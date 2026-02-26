@@ -436,6 +436,7 @@ interface VideoDetail {
   video_id: string
   title: string
   transcript: string
+  transcript_length: number
   assessment: {
     keyword_alignment: number
     quotability: number
@@ -1407,6 +1408,7 @@ export default function App() {
               }
               setVideoAnalyzing(false)
               fetchVideoAnalysisList()
+              fetchTodos()
               return
             } else if (eventType === 'error') {
               setVideoMessages(prev => [...prev, 'Error: ' + parsed.message])
@@ -5810,8 +5812,13 @@ export default function App() {
                           )}
                           {hasT ? (
                             <div>
-                              <h4 className="text-dark-500 text-xs font-semibold uppercase tracking-wider mb-2">Transcript ({detail.transcript.length.toLocaleString()} chars)</h4>
-                              <pre className="text-dark-300 text-xs leading-relaxed whitespace-pre-wrap bg-dark-950 border border-dark-800 rounded-xl p-4 max-h-96 overflow-y-auto font-sans">{detail.transcript}</pre>
+                              <h4 className="text-dark-500 text-xs font-semibold uppercase tracking-wider mb-2">Transcript ({(detail.transcript_length || detail.transcript.length).toLocaleString()} chars)</h4>
+                              <pre className="text-dark-300 text-xs leading-relaxed whitespace-pre-wrap bg-dark-950 border border-dark-800 rounded-xl p-4 max-h-48 overflow-y-auto font-sans">
+                                {detail.transcript}{detail.transcript_length > detail.transcript.length ? '…' : ''}
+                              </pre>
+                              {detail.transcript_length > detail.transcript.length && (
+                                <p className="text-dark-600 text-[10px] mt-1 italic">Showing first {detail.transcript.length.toLocaleString()} of {detail.transcript_length.toLocaleString()} chars</p>
+                              )}
                             </div>
                           ) : (
                             <p className="text-dark-500 text-xs italic">No transcript available for this video.</p>

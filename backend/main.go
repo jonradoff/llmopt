@@ -3976,11 +3976,14 @@ func handleGetVideoAnalysis(mongoDB *MongoDB) http.HandlerFunc {
 }
 
 func handleGetVideoDetails(mongoDB *MongoDB) http.HandlerFunc {
+	const transcriptSnippetLen = 500
+
 	type videoDetail struct {
-		VideoID    string           `json:"video_id"`
-		Title      string           `json:"title"`
-		Transcript string           `json:"transcript"`
-		Assessment *VideoAssessment `json:"assessment"`
+		VideoID          string           `json:"video_id"`
+		Title            string           `json:"title"`
+		Transcript       string           `json:"transcript"`
+		TranscriptLength int              `json:"transcript_length"`
+		Assessment       *VideoAssessment `json:"assessment"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		domain := normalizeDomain(r.PathValue("domain"))
@@ -4004,10 +4007,15 @@ func handleGetVideoDetails(mongoDB *MongoDB) http.HandlerFunc {
 
 		details := make([]videoDetail, 0, len(analysis.Videos))
 		for _, v := range analysis.Videos {
+			snippet := v.Transcript
+			if len(snippet) > transcriptSnippetLen {
+				snippet = snippet[:transcriptSnippetLen]
+			}
 			d := videoDetail{
-				VideoID:    v.VideoID,
-				Title:      v.Title,
-				Transcript: v.Transcript,
+				VideoID:          v.VideoID,
+				Title:            v.Title,
+				Transcript:       snippet,
+				TranscriptLength: len(v.Transcript),
 			}
 			if a, ok := cachedVideoAssessment(mongoDB, v.VideoID, domain, analysis.Config.SearchTerms); ok {
 				a.VideoID = v.VideoID
