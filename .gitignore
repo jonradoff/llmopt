@@ -1,0 +1,9 @@
+# Environment / secrets
+.env
+
+# Go
+backend/llmopt
+
+# Frontend
+frontend/node_modules/
+frontend/dist/

@@ -1,0 +1,8 @@
+.git
+.gitignore
+.env
+.env.*
+backend/llmopt
+frontend/node_modules/
+frontend/dist/
+.DS_Store
