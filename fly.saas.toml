@@ -1,0 +1,39 @@
+app = "llmopt"
+primary_region = "ewr"
+
+[build]
+  dockerfile = "Dockerfile.saas"
+
+[env]
+  # LLM Optimizer
+  LLMOPT_SAAS_ENABLED = "true"
+  STATIC_DIR = "/app/static"
+  LLMOPT_FRONTEND_DIR = "/app/saas-frontend"
+  DATABASE_NAME = "llmopt"
+  # LastSaaS
+  LASTSAAS_ENV = "prod"
+  LASTSAAS_CONFIG_DIR = "/app/lastsaas-config"
+  FRONTEND_STATIC_DIR = "/dev/null"
+  SERVER_PORT = "8091"
+  FRONTEND_URL = "https://llmopt.metavert.io"
+  APP_NAME = "LLM Optimizer"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  timeout = "5s"
+  path = "/health"
+
+[[vm]]
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 2

@@ -1,4 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import { apiFetch } from './apiFetch'
+import { fetchCurrentUser, fetchUnreadCount, clearAuth, type UserInfo } from './auth'
 
 interface CrawledPage {
   url: string
@@ -108,6 +110,7 @@ interface OptimizationListItem {
   id: string
   domain: string
   question: string
+  question_index: number
   overall_score: number
   model: string
   public: boolean
@@ -519,7 +522,13 @@ export default function App() {
   const [error, setError] = useState('')
   const abortRef = useRef<AbortController | null>(null)
 
-  const [activeTab, setActiveTab] = useState<ActiveTab>('analyze')
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
+    const params = new URLSearchParams(window.location.search)
+    const tab = params.get('tab')
+    const validTabs: ActiveTab[] = ['analyze', 'status', 'optimize', 'todos', 'brand', 'video']
+    if (tab && validTabs.includes(tab as ActiveTab)) return tab as ActiveTab
+    return 'analyze'
+  })
   const [selectedDomain, setSelectedDomain] = useState('')
   const [history, setHistory] = useState<AnalysisSummary[]>([])
 
@@ -558,10 +567,27 @@ export default function App() {
   const [todoSortMode, setTodoSortMode] = useState<TodoSortMode>('priority')
   const [expandedTodos, setExpandedTodos] = useState<Set<string>>(new Set())
 
-  const [publicReports, setPublicReports] = useState<OptimizationListItem[]>([])
   const [healthTimeline, setHealthTimeline] = useState<HealthTimelineRecord[]>([])
   const [healthTimelineLoading, setHealthTimelineLoading] = useState(false)
-  const [selectedOptPublic, setSelectedOptPublic] = useState(false)
+
+  // Domain sharing state
+  const [shareModalDomain, setShareModalDomain] = useState<string | null>(null)
+  const [domainShareState, setDomainShareState] = useState<{ visibility: string; share_id: string; share_url: string } | null>(null)
+  const [shareLoading, setShareLoading] = useState(false)
+  const [shareCopied, setShareCopied] = useState(false)
+  const [popularDomains, setPopularDomains] = useState<{ domain: string; brand_name: string; share_id: string; avg_score: number; report_count: number }[]>([])
+
+  // Shared view mode (read-only /share/{shareId} URL)
+  const [sharedMode, setSharedMode] = useState(false)
+  const [sharedLoading, setSharedLoading] = useState(false)
+  const [sharedNotFound, setSharedNotFound] = useState(false)
+  const sharedModeRef = useRef(false)
+  const [sharedOptimizations, setSharedOptimizations] = useState<FullOptimization[]>([])
+
+  // Modals for optimize question click + auth/subscription gating
+  const [optimizeConfirmQ, setOptimizeConfirmQ] = useState<number | null>(null) // question index for confirmation
+  const [readOnlyOptModal, setReadOnlyOptModal] = useState<string | null>(null) // brand name for "not ready" modal
+  const [subscriptionModal, setSubscriptionModal] = useState(false)
 
   // Brand Intelligence state
   const [brandProfile, setBrandProfile] = useState<BrandProfile | null>(null)
@@ -608,8 +634,6 @@ export default function App() {
   const [suggestedDiffs, setSuggestedDiffs] = useState<SuggestedDifferentiator[]>([])
   const [suggestDiffSelected, setSuggestDiffSelected] = useState<Set<number>>(new Set())
   const [brandPresenceComplete, setBrandPresenceComplete] = useState(false)
-  const [brandPublic, setBrandPublic] = useState(false)
-  const [, setPublicBrands] = useState<BrandProfileSummary[]>([])
   const [brandSections, setBrandSections] = useState({ audience: false, competitors: true, queries: false, presence: false })
 
   const [confirmDeleteBrand, setConfirmDeleteBrand] = useState(false)
@@ -645,6 +669,33 @@ export default function App() {
   const [videoFilterMinViews, setVideoFilterMinViews] = useState(0)
   const [videoFilterRecency, setVideoFilterRecency] = useState<'30d' | '90d' | '1y' | '3y' | 'all'>('all')
 
+  // SaaS auth state
+  const [saasEnabled, setSaasEnabled] = useState(false)
+  const [user, setUser] = useState<UserInfo | null>(null)
+  const [unreadCount, setUnreadCount] = useState(0)
+  const [showCredits, setShowCredits] = useState(false)
+  const [tenantCredits, setTenantCredits] = useState(0)
+  const [hasActivePlan, setHasActivePlan] = useState(false)
+
+  useEffect(() => {
+    apiFetch('/api/config').then(r => r.ok ? r.json() : null).then(data => {
+      if (data?.saas_enabled) {
+        setSaasEnabled(true)
+        fetchCurrentUser().then(setUser)
+        fetchUnreadCount().then(setUnreadCount)
+        // Fetch credits info
+        apiFetch('/api/plans').then(r => r.ok ? r.json() : null).then(plans => {
+          if (plans?.plans) {
+            const hasCredits = plans.plans.some((p: { usageCreditsPerMonth: number; bonusCredits: number }) => p.usageCreditsPerMonth > 0 || p.bonusCredits > 0)
+            setShowCredits(hasCredits)
+            setTenantCredits((plans.tenantSubscriptionCredits || 0) + (plans.tenantPurchasedCredits || 0))
+            setHasActivePlan(plans.billingStatus === 'active' || plans.billingWaived === true)
+          }
+        }).catch(() => {})
+      }
+    }).catch(() => {})
+  }, [])
+
   // Brand dirty tracking — flag-based, set only on user/AI changes after load
   const brandDirtyRef = useRef(false)
   const brandLoadingRef = useRef(false)
@@ -660,7 +711,7 @@ export default function App() {
       return
     }
     brandDirtyRef.current = true
-  }, [brandEditing, brandForm, brandCompetitors, brandQueries, brandMessages, brandPresenceForm, brandPresenceComplete, brandPublic])
+  }, [brandEditing, brandForm, brandCompetitors, brandQueries, brandMessages, brandPresenceForm, brandPresenceComplete])
 
   const isBrandDirty = useCallback(() => {
     return brandEditing && brandDirtyRef.current
@@ -677,7 +728,7 @@ export default function App() {
 
   const fetchHistory = useCallback(async () => {
     try {
-      const response = await fetch('/api/analyses')
+      const response = await apiFetch('/api/analyses')
       if (response.ok) {
         const data = await response.json()
         setHistory(data || [])
@@ -690,7 +741,7 @@ export default function App() {
   const checkHealth = useCallback(async () => {
     setHealthChecking(true)
     try {
-      const response = await fetch('/api/health/claude')
+      const response = await apiFetch('/api/health/claude')
       if (response.ok) {
         const data = await response.json() as HealthCheck
         setHealthHistory(prev => [data, ...prev].slice(0, 50))
@@ -711,7 +762,7 @@ export default function App() {
   const fetchTodos = useCallback(async () => {
     setTodosLoading(true)
     try {
-      const response = await fetch('/api/todos')
+      const response = await apiFetch('/api/todos')
       if (response.ok) {
         const data = await response.json()
         setTodos(data || [])
@@ -726,7 +777,7 @@ export default function App() {
   const fetchOptList = useCallback(async () => {
     setOptListLoading(true)
     try {
-      const response = await fetch('/api/optimizations')
+      const response = await apiFetch('/api/optimizations')
       if (response.ok) {
         const data = await response.json()
         setOptList(data || [])
@@ -764,7 +815,7 @@ export default function App() {
     const statuses: Record<string, DomainSummaryStatus> = {}
     await Promise.all(domains.map(async (domain) => {
       try {
-        const res = await fetch(`/api/domains/${encodeURIComponent(domain)}/summary/status`)
+        const res = await apiFetch(`/api/domains/${encodeURIComponent(domain)}/summary/status`)
         if (res.ok) statuses[domain] = await res.json()
       } catch { /* ignore */ }
     }))
@@ -782,7 +833,7 @@ export default function App() {
     const status = summaryStatuses[domain]
     if (status?.exists) {
       try {
-        const res = await fetch(`/api/domains/${encodeURIComponent(domain)}/summary`)
+        const res = await apiFetch(`/api/domains/${encodeURIComponent(domain)}/summary`)
         if (res.ok) {
           const data = await res.json()
           setActiveSummary(data.summary)
@@ -799,7 +850,7 @@ export default function App() {
 
   const deleteAnalysis = useCallback(async (id: string) => {
     try {
-      const response = await fetch(`/api/analyses/${id}`, { method: 'DELETE' })
+      const response = await apiFetch(`/api/analyses/${id}`, { method: 'DELETE' })
       if (response.ok) {
         fetchHistory()
         fetchOptList()
@@ -818,7 +869,7 @@ export default function App() {
 
   const deleteOptimization = useCallback(async (id: string) => {
     try {
-      const response = await fetch(`/api/optimizations/${id}`, { method: 'DELETE' })
+      const response = await apiFetch(`/api/optimizations/${id}`, { method: 'DELETE' })
       if (response.ok) {
         fetchOptList()
         fetchTodos()
@@ -832,16 +883,56 @@ export default function App() {
   }, [fetchOptList, fetchTodos])
 
   const loadOptimizationDetail = useCallback(async (id: string) => {
+    // In shared mode, use cached full optimization data instead of authenticated API call
+    if (sharedModeRef.current) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cached = sharedOptimizations.find((o: any) => o.id === id)
+      if (cached) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const data = cached as any
+        setSelectedOpt({
+          id: data.id,
+          analysis_id: data.analysis_id || '',
+          question_index: data.question_index ?? -1,
+          question: data.question || '',
+          domain: data.domain || '',
+          page_urls: data.page_urls || [],
+          result: data.result || {},
+          raw_text: '',
+          model: data.model || '',
+          public: data.public || false,
+          brand_status: data.brand_status || '',
+          brand_context_used: data.brand_context_used || false,
+          brand_profile_updated_at: data.brand_profile_updated_at,
+          created_at: data.created_at || '',
+        } as FullOptimization)
+        setOptimization(data.result)
+        setOptimizationMeta({
+          id: data.id,
+          model: data.model || '',
+          createdAt: data.created_at || '',
+          cached: false,
+          question: data.question || '',
+          questionIndex: data.question_index ?? -1,
+          brandStatus: data.brand_status || undefined,
+          brandContextUsed: data.brand_context_used || false,
+          brandProfileUpdatedAt: data.brand_profile_updated_at || undefined,
+        })
+        // Use todos from shared data for this optimization
+        setOptTodos(todos.filter(t => t.optimization_id === id))
+        setOptimizeView('detail')
+      }
+      return
+    }
     try {
       const [optRes, todosRes] = await Promise.all([
-        fetch(`/api/optimizations/${id}`),
-        fetch(`/api/todos?optimization_id=${id}`),
+        apiFetch(`/api/optimizations/${id}`),
+        apiFetch(`/api/todos?optimization_id=${id}`),
       ])
       if (optRes.ok) {
         const data = await optRes.json() as FullOptimization
         setSelectedOpt(data)
         setOptimization(data.result)
-        setSelectedOptPublic(data.public || false)
         setOptimizationMeta({
           id: data.id,
           model: data.model,
@@ -862,36 +953,63 @@ export default function App() {
     } catch (err) {
       console.error('Failed to load optimization:', err)
     }
-  }, [])
+  }, [sharedOptimizations, todos])
 
-  const fetchPublicReports = useCallback(async () => {
+  const fetchPopularDomains = useCallback(async () => {
     try {
-      const response = await fetch('/api/public/reports')
+      const response = await apiFetch('/api/share/popular')
       if (response.ok) {
         const data = await response.json()
-        setPublicReports(data || [])
+        setPopularDomains(data || [])
       }
     } catch (err) {
-      console.error('Failed to fetch public reports:', err)
+      console.error('Failed to fetch popular domains:', err)
     }
   }, [])
 
-  const fetchPublicBrands = useCallback(async () => {
+  const fetchDomainShare = useCallback(async (domain: string) => {
+    setShareLoading(true)
+    setShareCopied(false)
     try {
-      const response = await fetch('/api/public/brands')
+      const response = await apiFetch(`/api/domains/${encodeURIComponent(domain)}/share`)
       if (response.ok) {
         const data = await response.json()
-        setPublicBrands(data || [])
+        setDomainShareState(data)
       }
     } catch (err) {
-      console.error('Failed to fetch public brands:', err)
+      console.error('Failed to fetch domain share:', err)
+    } finally {
+      setShareLoading(false)
     }
   }, [])
+
+  const setDomainVisibility = useCallback(async (domain: string, visibility: string) => {
+    setShareLoading(true)
+    try {
+      const response = await apiFetch(`/api/domains/${encodeURIComponent(domain)}/share`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visibility }),
+      })
+      if (response.ok) {
+        const data = await response.json()
+        setDomainShareState(data)
+        setShareCopied(false)
+        if (visibility === 'popular' || visibility === 'private') {
+          fetchPopularDomains()
+        }
+      }
+    } catch (err) {
+      console.error('Failed to set domain visibility:', err)
+    } finally {
+      setShareLoading(false)
+    }
+  }, [fetchPopularDomains])
 
   const fetchHealthTimeline = useCallback(async (hours = 24) => {
     setHealthTimelineLoading(true)
     try {
-      const response = await fetch(`/api/health/history?hours=${hours}`)
+      const response = await apiFetch(`/api/health/history?hours=${hours}`)
       if (response.ok) {
         const data = await response.json()
         setHealthTimeline(data || [])
@@ -903,29 +1021,13 @@ export default function App() {
     }
   }, [])
 
-  const togglePublic = useCallback(async (id: string, isPublic: boolean) => {
-    try {
-      const response = await fetch(`/api/optimizations/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ public: isPublic }),
-      })
-      if (response.ok) {
-        setSelectedOptPublic(isPublic)
-        setOptList(prev => prev.map(o => o.id === id ? { ...o, public: isPublic } : o))
-      }
-    } catch (err) {
-      console.error('Failed to toggle public:', err)
-    }
-  }, [])
-
   // Brand Intelligence callbacks
   const emptyPresence: BrandPresence = { youtube_url: '', subreddits: [], review_site_urls: [], social_profiles: [], content_assets: [], podcasts: [] }
 
   const fetchBrandList = useCallback(async () => {
     setBrandLoading(true)
     try {
-      const response = await fetch('/api/brands')
+      const response = await apiFetch('/api/brands')
       if (response.ok) {
         const data = await response.json()
         setBrandList(data || [])
@@ -940,7 +1042,7 @@ export default function App() {
   const loadBrandProfile = useCallback(async (domain: string) => {
     setBrandLoading(true)
     try {
-      const response = await fetch(`/api/brands/${encodeURIComponent(domain)}`)
+      const response = await apiFetch(`/api/brands/${encodeURIComponent(domain)}`)
       if (response.ok) {
         const data = await response.json() as BrandProfile
         setBrandProfile(data)
@@ -967,7 +1069,6 @@ export default function App() {
           podcasts: (p.podcasts || []).join(', '),
         })
         setBrandPresenceComplete(data.presence_complete || false)
-        setBrandPublic(data.public || false)
         brandLoadingRef.current = true
         setBrandEditing(true)
         return true
@@ -1007,9 +1108,8 @@ export default function App() {
           podcasts: splitTrim(brandPresenceForm.podcasts),
         },
         presence_complete: brandPresenceComplete,
-        public: brandPublic,
       }
-      const response = await fetch(`/api/brands/${encodeURIComponent(brandDomain.trim())}`, {
+      const response = await apiFetch(`/api/brands/${encodeURIComponent(brandDomain.trim())}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -1018,7 +1118,6 @@ export default function App() {
         const saved = await response.json() as BrandProfile
         setBrandProfile(saved)
         fetchBrandList()
-        fetchPublicBrands()
         brandDirtyRef.current = false
       }
     } catch (err) {
@@ -1026,7 +1125,7 @@ export default function App() {
     } finally {
       setBrandSaving(false)
     }
-  }, [brandDomain, brandForm, brandCompetitors, brandQueries, brandMessages, brandPresenceForm, brandPresenceComplete, brandPublic, fetchBrandList, fetchPublicBrands])
+  }, [brandDomain, brandForm, brandCompetitors, brandQueries, brandMessages, brandPresenceForm, brandPresenceComplete, fetchBrandList])
 
   const startNewBrand = useCallback((domain?: string) => {
     brandLoadingRef.current = true
@@ -1038,7 +1137,6 @@ export default function App() {
     setBrandMessages([])
     setBrandPresenceForm({ youtube_url: '', subreddits: '', review_site_urls: '', social_profiles: '', content_assets: '', podcasts: '' })
     setBrandPresenceComplete(false)
-    setBrandPublic(false)
     setDiscoveredCompetitors([])
     setSuggestedQueries([])
     setSuggestedClaims([])
@@ -1056,7 +1154,7 @@ export default function App() {
     setMessages([])
     setRunning(true)
     try {
-      const response = await fetch(url, {
+      const response = await apiFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -1109,7 +1207,7 @@ export default function App() {
       async (resultStr: string) => {
         try {
           const parsed = JSON.parse(resultStr) as DomainSummaryResult
-          const res = await fetch(`/api/domains/${encodeURIComponent(domain)}/summary`)
+          const res = await apiFetch(`/api/domains/${encodeURIComponent(domain)}/summary`)
           if (res.ok) {
             const data = await res.json()
             setActiveSummary(data.summary)
@@ -1131,7 +1229,7 @@ export default function App() {
 
   const fetchVideoAnalysisList = useCallback(async () => {
     try {
-      const res = await fetch('/api/video/analyses')
+      const res = await apiFetch('/api/video/analyses')
       if (res.ok) {
         const data = await res.json()
         setVideoAnalysisList(data || [])
@@ -1143,7 +1241,7 @@ export default function App() {
 
   const loadVideoAnalysis = useCallback(async (domain: string) => {
     try {
-      const res = await fetch(`/api/video/analyses/${encodeURIComponent(domain)}`)
+      const res = await apiFetch(`/api/video/analyses/${encodeURIComponent(domain)}`)
       if (res.ok) {
         const data = await res.json() as VideoAnalysis
         setVideoAnalysis(data)
@@ -1162,7 +1260,7 @@ export default function App() {
     const brand = brandList.find(b => b.domain === domain)
     if (brand) {
       // Load full profile for presence data
-      fetch(`/api/brands/${encodeURIComponent(domain)}`)
+      apiFetch(`/api/brands/${encodeURIComponent(domain)}`)
         .then(res => res.ok ? res.json() : null)
         .then((profile: BrandProfile | null) => {
           if (profile) {
@@ -1235,7 +1333,7 @@ export default function App() {
       let competitors: string[] = []
       let brandName = videoDomain
       try {
-        const brandRes = await fetch(`/api/brands/${encodeURIComponent(videoDomain.trim())}`)
+        const brandRes = await apiFetch(`/api/brands/${encodeURIComponent(videoDomain.trim())}`)
         if (brandRes.ok) {
           const brand = await brandRes.json() as BrandProfile
           brandName = brand.brand_name || videoDomain
@@ -1243,7 +1341,7 @@ export default function App() {
         }
       } catch { /* ignore */ }
 
-      const res = await fetch('/api/video/discover', {
+      const res = await apiFetch('/api/video/discover', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1327,7 +1425,7 @@ export default function App() {
     // Auto-archive incomplete video todos for this domain
     if (videoAutoArchive && videoDomain.trim()) {
       try {
-        await fetch('/api/todos/archive', {
+        await apiFetch('/api/todos/archive', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ source_type: 'video', domain: videoDomain.trim() }),
@@ -1336,7 +1434,7 @@ export default function App() {
     }
 
     try {
-      const response = await fetch('/api/video/analyze', {
+      const response = await apiFetch('/api/video/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1437,7 +1535,7 @@ export default function App() {
   const deleteVideoAnalysis = useCallback(async () => {
     if (!videoDomain) return
     try {
-      await fetch(`/api/video/analyses/${encodeURIComponent(videoDomain)}`, { method: 'DELETE' })
+      await apiFetch(`/api/video/analyses/${encodeURIComponent(videoDomain)}`, { method: 'DELETE' })
       setVideoAnalysis(null)
       setVideoView('input')
       fetchVideoAnalysisList()
@@ -1638,7 +1736,7 @@ export default function App() {
 
   const updateTodoStatus = useCallback(async (id: string, status: 'todo' | 'completed' | 'backlogged' | 'archived') => {
     try {
-      const response = await fetch(`/api/todos/${id}`, {
+      const response = await apiFetch(`/api/todos/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status }),
@@ -1659,7 +1757,9 @@ export default function App() {
   }, [])
 
   // Tab-switch effects — split per tab to avoid cross-tab dependency cycles
+  // In shared mode, data is pre-loaded from the share endpoint — skip authenticated fetches.
   useEffect(() => {
+    if (sharedModeRef.current) return
     if (activeTab === 'todos') {
       fetchTodos()
       fetchBrandList()
@@ -1669,6 +1769,7 @@ export default function App() {
   }, [activeTab, selectedDomain, fetchTodos, fetchBrandList, fetchOptList, fetchHistory])
 
   useEffect(() => {
+    if (sharedModeRef.current) return
     if (activeTab === 'optimize' && optimizeView === 'list') {
       fetchOptList()
     }
@@ -1681,6 +1782,7 @@ export default function App() {
   }, [activeTab, fetchHealthTimeline])
 
   useEffect(() => {
+    if (sharedModeRef.current) return
     if (activeTab === 'brand' && !brandEditing && selectedDomain) {
       fetchBrandList()
       const existing = brandList.find(b => domainKey(b.domain) === domainKey(selectedDomain))
@@ -1700,6 +1802,7 @@ export default function App() {
   }, [activeTab, brandEditing, selectedDomain, fetchBrandList])
 
   useEffect(() => {
+    if (sharedModeRef.current) return
     if (activeTab === 'video') {
       fetchVideoAnalysisList()
       if (selectedDomain) {
@@ -1714,31 +1817,162 @@ export default function App() {
     }
   }, [activeTab, selectedDomain, fetchVideoAnalysisList, prepopulateFromBrand])
 
-  // Fetch all data on mount for domain dropdown
+  // Fetch all data on mount for domain dropdown (skip in shared mode)
   useEffect(() => {
-    fetchPublicReports()
+    if (sharedModeRef.current) return
+    fetchPopularDomains()
     fetchBrandList()
-    fetchPublicBrands()
     fetchHistory()
     fetchOptList()
     fetchTodos()
     fetchVideoAnalysisList()
-  }, [fetchPublicReports, fetchBrandList, fetchPublicBrands, fetchHistory, fetchOptList, fetchTodos, fetchVideoAnalysisList])
+  }, [fetchPopularDomains, fetchBrandList, fetchHistory, fetchOptList, fetchTodos, fetchVideoAnalysisList])
+
+  // Detect /share/{shareId} URL and load shared data
+  useEffect(() => {
+    const match = window.location.pathname.match(/^\/share\/([A-Za-z0-9]+)$/)
+    if (!match) return
+    const shareId = match[1]
+    const shareParams = new URLSearchParams(window.location.search)
+    const shareTab = shareParams.get('tab')
+    const validShareTabs: ActiveTab[] = ['analyze', 'optimize', 'todos', 'brand', 'video']
+    if (shareTab && validShareTabs.includes(shareTab as ActiveTab)) {
+      setActiveTab(shareTab as ActiveTab)
+    }
+    setSharedMode(true)
+    sharedModeRef.current = true
+    setSharedLoading(true)
+    fetch(`/api/share/${shareId}`)
+      .then(r => {
+        if (!r.ok) { setSharedNotFound(true); setSharedLoading(false); return null }
+        return r.json()
+      })
+      .then(data => {
+        if (!data) return
+        setSelectedDomain(data.domain)
+        setUrl(data.domain)
+        // Map analyses
+        if (data.analyses?.length > 0) {
+          const latest = data.analyses[0]
+          setResult(latest.result)
+          setResultMeta({ id: latest.id, model: latest.model, createdAt: latest.created_at, cached: false, brandContextUsed: latest.brand_context_used, brandProfileUpdatedAt: latest.brand_profile_updated_at || null })
+          setState('done')
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          setHistory(data.analyses.map((a: any) => ({
+            id: a.id, domain: a.domain,
+            site_summary: a.result?.site_summary || a.result?.siteSummary || '',
+            question_count: a.result?.questions?.length || 0,
+            page_count: a.result?.crawled_pages?.length || a.result?.crawledPages?.length || 0,
+            model: a.model, brand_context_used: a.brand_context_used,
+            brand_profile_updated_at: a.brand_profile_updated_at,
+            created_at: a.created_at,
+          })))
+        }
+        // Map optimizations
+        if (data.optimizations?.length > 0) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          setOptList(data.optimizations.map((o: any) => ({
+            id: o.id, domain: o.domain, question: o.question,
+            question_index: o.question_index ?? -1,
+            overall_score: o.result?.overallScore ?? 0,
+            model: o.model, public: false,
+            brand_status: o.brand_status || '',
+            brand_context_used: o.brand_context_used,
+            brand_profile_updated_at: o.brand_profile_updated_at,
+            created_at: o.created_at,
+          })))
+          // Store full optimization objects for detail view in shared mode
+          setSharedOptimizations(data.optimizations)
+        }
+        // Map brand profile — populate form fields so Brand tab renders properly
+        if (data.brand_profile) {
+          const bp = data.brand_profile
+          setBrandProfile(bp)
+          setBrandDomain(data.domain)
+          setBrandForm({
+            brand_name: bp.brand_name || '',
+            description: bp.description || '',
+            categories: (bp.categories || []).join(', '),
+            products: (bp.products || []).join(', '),
+            primary_audience: bp.primary_audience || '',
+            key_use_cases: (bp.key_use_cases || []).join(', '),
+            differentiators: (bp.differentiators || []).join(', '),
+          })
+          setBrandCompetitors(bp.competitors || [])
+          setBrandQueries(bp.target_queries || [])
+          setBrandMessages(bp.key_messages || [])
+          const p = bp.presence || { youtube_url: '', subreddits: [], review_site_urls: [], social_profiles: [], content_assets: [], podcasts: [] }
+          setBrandPresenceForm({
+            youtube_url: p.youtube_url || '',
+            subreddits: (p.subreddits || []).join(', '),
+            review_site_urls: (p.review_site_urls || []).join(', '),
+            social_profiles: (p.social_profiles || []).join(', '),
+            content_assets: (p.content_assets || []).join(', '),
+            podcasts: (p.podcasts || []).join(', '),
+          })
+          setBrandPresenceComplete(bp.presence_complete || false)
+          setBrandEditing(true)
+        }
+        // Map video analysis
+        if (data.video_analysis) {
+          setVideoAnalysis(data.video_analysis)
+          setVideoDomain(data.domain)
+          setVideoView('results')
+        }
+        // Map todos
+        if (data.todos?.length > 0) {
+          setTodos(data.todos)
+        }
+        // Map domain summary
+        if (data.domain_summary) {
+          setActiveSummary(data.domain_summary)
+          setActiveSummaryDomain(data.domain)
+        }
+        setSharedLoading(false)
+      })
+      .catch(() => { setSharedNotFound(true); setSharedLoading(false) })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Propagate selectedDomain to per-tab domain states
   useEffect(() => {
     if (!selectedDomain) return
     setBrandDomain(selectedDomain)
     setVideoDomain(selectedDomain)
-    // Reset optimize and video views to list when domain changes
-    setOptimizeView('list')
-    setVideoView('input')
-    setBrandEditing(false)
+    // In shared mode, don't reset views — share data load already set them
+    if (!sharedModeRef.current) {
+      setOptimizeView('list')
+      setVideoView('input')
+      setBrandEditing(false)
+    }
   }, [selectedDomain])
+
+  // Populate optScores from optList when analysis result or optList changes
+  useEffect(() => {
+    if (!result || !optList.length || !selectedDomain) {
+      setOptScores({})
+      return
+    }
+    const domainOpts = optList.filter(o => domainKey(o.domain) === domainKey(selectedDomain))
+    const scores: Record<number, number> = {}
+    // For each question in the analysis, find the latest optimization by question_index
+    for (const opt of domainOpts) {
+      if (opt.question_index >= 0 && opt.question_index < result.questions.length) {
+        // Only keep the highest score (latest is first since list is sorted by date desc,
+        // but question_index may have multiple runs — keep the latest/first)
+        if (scores[opt.question_index] === undefined) {
+          scores[opt.question_index] = opt.overall_score
+        }
+      }
+    }
+    setOptScores(scores)
+  }, [result, optList, selectedDomain])
 
   // Clear selectedDomain if it no longer exists in allDomains
   // (but only if idle — don't clear during active analysis which adds new domains)
+  // Skip in shared mode — domain is set from share data, not from allDomains
   useEffect(() => {
+    if (sharedModeRef.current) return
     if (selectedDomain && allDomains.length > 0 && state !== 'analyzing' &&
         !allDomains.some(d => domainKey(d.domain) === domainKey(selectedDomain))) {
       setSelectedDomain('')
@@ -1756,7 +1990,7 @@ export default function App() {
 
   const loadAnalysis = useCallback(async (id: string) => {
     try {
-      const response = await fetch(`/api/analyses/${id}`)
+      const response = await apiFetch(`/api/analyses/${id}`)
       if (response.ok) {
         const data = await response.json()
         setResult(data.result)
@@ -1779,7 +2013,7 @@ export default function App() {
 
   const loadBestAnalysis = useCallback(async (domain: string) => {
     try {
-      const res = await fetch(`/api/analyses?domain=${encodeURIComponent(domainKey(domain))}`)
+      const res = await apiFetch(`/api/analyses?domain=${encodeURIComponent(domainKey(domain))}`)
       if (!res.ok) return
       const list: AnalysisSummary[] = await res.json()
       // Backend sorts brand-intel reports first, then by date
@@ -1802,6 +2036,23 @@ export default function App() {
       return
     }
 
+    // If the domain matches a popular brand, navigate to its shared view
+    const popularMatch = popularDomains.find(pd => domainKey(pd.domain) === domainKey(targetUrl))
+    if (popularMatch && !force && !forceAnalyze) {
+      window.location.href = `/share/${popularMatch.share_id}`
+      return
+    }
+
+    // SaaS gating: require login and active subscription for new analyses
+    if (saasEnabled && !user) {
+      window.location.href = '/login'
+      return
+    }
+    if (saasEnabled && user && !hasActivePlan) {
+      setSubscriptionModal(true)
+      return
+    }
+
     const shouldForce = force ?? forceAnalyze
 
     setState('analyzing')
@@ -1815,7 +2066,7 @@ export default function App() {
     abortRef.current = controller
 
     try {
-      const response = await fetch('/api/analyze', {
+      const response = await apiFetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: targetUrl, force: shouldForce }),
@@ -1909,7 +2160,7 @@ export default function App() {
         setState('error')
       }
     }
-  }, [url, forceAnalyze, fetchHistory, allDomains, loadBestAnalysis])
+  }, [url, forceAnalyze, fetchHistory, allDomains, loadBestAnalysis, saasEnabled, user, hasActivePlan, popularDomains])
 
   const cancel = useCallback(() => {
     abortRef.current?.abort()
@@ -1933,7 +2184,7 @@ export default function App() {
     const questionText = result?.questions[questionIdx]?.question
     if (optimizeAutoArchive && url && questionText) {
       try {
-        await fetch('/api/todos/archive', {
+        await apiFetch('/api/todos/archive', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ source_type: 'optimization', domain: url, question: questionText }),
@@ -1945,7 +2196,7 @@ export default function App() {
     optimizeAbortRef.current = controller
 
     try {
-      const response = await fetch(`/api/analyses/${resultMeta.id}/questions/${questionIdx}/optimize`, {
+      const response = await apiFetch(`/api/analyses/${resultMeta.id}/questions/${questionIdx}/optimize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ force: force || false }),
@@ -2015,7 +2266,7 @@ export default function App() {
                   if (parsed.id) {
                     setTimeout(async () => {
                       try {
-                        const todosRes = await fetch(`/api/todos?optimization_id=${parsed.id}`)
+                        const todosRes = await apiFetch(`/api/todos?optimization_id=${parsed.id}`)
                         if (todosRes.ok) {
                           const todosData = await todosRes.json()
                           setOptTodos(todosData || [])
@@ -2069,40 +2320,168 @@ export default function App() {
     categoryColors[cat] = CATEGORY_COLORS[i % CATEGORY_COLORS.length]
   })
 
+  const readOnly = sharedMode
+
+  // Handle question click from Analyze tab — shows confirmation or jumps to existing report
+  const handleQuestionClick = (questionIdx: number) => {
+    if (readOnly) {
+      // Check if optimization report exists for this question
+      const existing = optList.find(o =>
+        domainKey(o.domain) === domainKey(selectedDomain) && o.question_index === questionIdx
+      )
+      if (existing) {
+        // Jump to existing report
+        loadOptimizationDetail(existing.id)
+        setActiveTab('optimize')
+      } else {
+        // Show "not ready" modal
+        const brandName = brandList.find(b => domainKey(b.domain) === domainKey(selectedDomain))?.brand_name || selectedDomain
+        setReadOnlyOptModal(brandName)
+      }
+      return
+    }
+    // Normal (authenticated) mode
+    if (!saasEnabled || !user) {
+      // Non-SaaS mode: just optimize directly
+      optimizeQuestion(questionIdx)
+      return
+    }
+    // Check if optimization report already exists
+    const existing = optList.find(o =>
+      domainKey(o.domain) === domainKey(selectedDomain) && o.question_index === questionIdx
+    )
+    if (existing) {
+      // Jump directly to existing report
+      loadOptimizationDetail(existing.id)
+      setActiveTab('optimize')
+      return
+    }
+    // Show confirmation modal
+    setOptimizeConfirmQ(questionIdx)
+  }
+
+  // Shared mode: loading / not-found states
+  if (sharedLoading) {
+    return (
+      <div className="min-h-screen bg-dark-950 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-dark-400">Loading shared report...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (sharedNotFound) {
+    return (
+      <div className="min-h-screen bg-dark-950 flex items-center justify-center">
+        <div className="text-center max-w-md mx-auto px-4">
+          <div className="w-16 h-16 rounded-full bg-dark-800 flex items-center justify-center mx-auto mb-4">
+            <svg className="w-8 h-8 text-dark-500" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
+          </div>
+          <h2 className="text-white text-xl font-semibold mb-2">Report Not Available</h2>
+          <p className="text-dark-400 text-sm mb-6">This shared report is no longer available. The owner may have made it private.</p>
+          <a href="/" className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-500 transition-colors text-sm font-medium">
+            Go to LLM Optimizer
+          </a>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen">
       {/* Header */}
       <header className="sticky top-0 z-50 bg-dark-900/80 backdrop-blur-xl border-b border-dark-800">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-accent-purple flex items-center justify-center">
-              <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
-              </svg>
-            </div>
-            <h1 className="text-xl font-semibold tracking-tight text-white">
-              LLM Optimizer
-            </h1>
+            <a href="/" className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-accent-purple flex items-center justify-center">
+                <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
+                </svg>
+              </div>
+              <h1 className="text-xl font-semibold tracking-tight text-white">
+                LLM Optimizer
+              </h1>
+            </a>
+            {readOnly && selectedDomain && (
+              <span className="text-dark-400 text-sm ml-2">· {selectedDomain}</span>
+            )}
           </div>
-          <button
-            onClick={() => setActiveTab('status')}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
-              activeTab === 'status' ? 'bg-dark-800 text-white' : 'hover:bg-dark-800/50 text-dark-400'
-            }`}
-          >
-            {healthHistory.length > 0 ? (() => {
-              const latest = healthHistory[0]
-              const anyAvailable = latest.models.some(m => m.status === 'available')
-              const allError = latest.models.every(m => m.status === 'error')
-              return <span className={`w-2.5 h-2.5 rounded-full ${anyAvailable ? 'bg-emerald-400' : allError ? 'bg-red-400' : 'bg-amber-400'}`} />
-            })() : <span className="w-2.5 h-2.5 rounded-full bg-dark-600" />}
-            <span className="text-sm">Status</span>
-          </button>
+          <div className="flex items-center gap-2">
+            {!readOnly && saasEnabled && user && (
+              <>
+                {user.isRootTenant && (user.role === 'owner' || user.role === 'admin') && (
+                  <a href="/last" className="px-3 py-1.5 text-sm text-dark-400 hover:text-white hover:bg-dark-800/50 rounded-lg transition-colors">Admin</a>
+                )}
+                <a href="/last/team" className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-dark-400 hover:text-white hover:bg-dark-800/50 rounded-lg transition-colors">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
+                  </svg>
+                  Team
+                </a>
+                <a href="/last/plan" className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-dark-400 hover:text-white hover:bg-dark-800/50 rounded-lg transition-colors">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25v10.5A2.25 2.25 0 004.5 19.5z" />
+                  </svg>
+                  Plan
+                </a>
+                {showCredits && (
+                  <a href="/last/plan" className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-700 text-sm text-dark-300 hover:text-white hover:border-primary-500/30 transition-colors" title="Usage credits">
+                    <svg className="w-4 h-4 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    <span className="font-medium">{tenantCredits.toLocaleString()}</span>
+                  </a>
+                )}
+                <a href="/last/messages" className="relative px-2 py-1.5 text-dark-400 hover:text-white hover:bg-dark-800/50 rounded-lg transition-colors">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+                  </svg>
+                  {unreadCount > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-primary-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">{unreadCount > 9 ? '9+' : unreadCount}</span>
+                  )}
+                </a>
+                <a href="/last/settings" className="px-3 py-1.5 text-sm text-dark-400 hover:text-white hover:bg-dark-800/50 rounded-lg transition-colors truncate max-w-[120px]">{user.displayName || user.email}</a>
+                <button
+                  onClick={() => clearAuth()}
+                  className="text-dark-400 hover:text-white transition-colors"
+                  title="Sign out"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" />
+                  </svg>
+                </button>
+              </>
+            )}
+            {saasEnabled && !user && (
+              <>
+                <a href="/login" className="px-3 py-1.5 text-sm text-dark-400 hover:text-white hover:bg-dark-800/50 rounded-lg transition-colors">Sign In</a>
+                <a href="/signup" className="px-3 py-1.5 text-sm text-white bg-primary-500 hover:bg-primary-600 rounded-lg transition-colors">Sign Up</a>
+              </>
+            )}
+            <button
+              onClick={() => setActiveTab('status')}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                activeTab === 'status' ? 'bg-dark-800 text-white' : 'hover:bg-dark-800/50 text-dark-400'
+              }`}
+            >
+              {healthHistory.length > 0 ? (() => {
+                const latest = healthHistory[0]
+                const anyAvailable = latest.models.some(m => m.status === 'available')
+                const allError = latest.models.every(m => m.status === 'error')
+                return <span className={`w-2.5 h-2.5 rounded-full ${anyAvailable ? 'bg-emerald-400' : allError ? 'bg-red-400' : 'bg-amber-400'}`} />
+              })() : <span className="w-2.5 h-2.5 rounded-full bg-dark-600" />}
+              <span className="text-sm">Status</span>
+            </button>
+          </div>
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         {/* Hero */}
+        {!readOnly && (
         <div className="text-center mb-8">
           <h2 className="text-4xl sm:text-5xl font-bold text-white mb-4 leading-tight">
             Be the Brand AI Recommends
@@ -2112,11 +2491,35 @@ export default function App() {
             We help you see how AI sees your brand — and optimize so it recommends you.
           </p>
         </div>
+        )}
 
         {/* Tab Navigation — Domain List + tab pills */}
         <div className="flex justify-center mb-6">
           <div className="inline-flex items-center bg-dark-900/50 border border-dark-800 rounded-lg p-1 gap-1">
-            <select
+            {/* Back button — shown when viewing a report, navigates to default home view */}
+            {selectedDomain && (
+              <button
+                onClick={() => {
+                  if (sharedMode) {
+                    window.location.href = '/'
+                  } else {
+                    setSelectedDomain('')
+                    setActiveTab('analyze')
+                    setUrl('')
+                    setResult(null)
+                    setResultMeta(null)
+                    setState('idle')
+                  }
+                }}
+                className="px-2 py-2 rounded-md text-dark-400 hover:text-white transition-all cursor-pointer"
+                title="Back to home"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+                </svg>
+              </button>
+            )}
+            {!readOnly && <select
               value={selectedDomain}
               onChange={e => {
                 const domain = e.target.value
@@ -2148,7 +2551,7 @@ export default function App() {
               {allDomains.map(d => (
                 <option key={d.domain} value={d.domain}>{d.domain.replace(/^https?:\/\//, '')}</option>
               ))}
-            </select>
+            </select>}
             <button
               onClick={() => {
                 const doSwitch = () => {
@@ -2197,14 +2600,18 @@ export default function App() {
                     ) : null
                   })()}
                   {tab === 'brand' && selectedDomain && (() => {
-                    const bp = brandList.find(b => domainKey(b.domain) === domainKey(selectedDomain))
-                    const pct = bp?.completeness ?? 0
+                    // In shared mode, use brandCompleteness (computed from form state) since brandList isn't populated
+                    const pct = sharedMode
+                      ? (brandEditing ? brandCompleteness : 0)
+                      : (brandList.find(b => domainKey(b.domain) === domainKey(selectedDomain))?.completeness ?? 0)
                     if (pct >= 100) return null
                     if (pct > 0) return (
                       <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] flex items-center justify-center px-1 text-[10px] font-bold bg-amber-500 text-white rounded-full leading-none">
                         {pct}%
                       </span>
                     )
+                    // Don't show empty dot if brand profile exists (shared mode with full profile)
+                    if (sharedMode && brandProfile) return null
                     return <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-amber-500 rounded-full" />
                   })()}
                   {tab === 'video' && videoAnalyzing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
@@ -2215,31 +2622,31 @@ export default function App() {
           </div>
         </div>
 
-        {/* URL entry + Analyze button — only on Analyze tab */}
-        {activeTab === 'analyze' && <div className="max-w-xl mx-auto mb-8 flex flex-col items-center gap-3">
+        {/* URL entry + Go button — always on Analyze tab */}
+        {activeTab === 'analyze' && <div className="max-w-xl mx-auto mb-8 flex items-center gap-2">
           <input
             type="text"
             value={url}
             onChange={e => setUrl(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && state !== 'analyzing') analyze() }}
+            onKeyDown={e => { if (e.key === 'Enter' && state !== 'analyzing') { if (sharedMode) { window.location.href = '/' } else { analyze() } } }}
             placeholder="example.com"
             disabled={state === 'analyzing'}
-            className="w-full px-4 py-2.5 bg-dark-800 border border-dark-700 rounded-lg text-white placeholder-dark-500 focus:outline-none focus:border-primary-500 focus:ring-1 focus:ring-primary-500 transition-colors disabled:opacity-50 text-center"
+            className="flex-1 px-4 py-2.5 bg-dark-800 border border-dark-700 rounded-lg text-white placeholder-dark-500 focus:outline-none focus:border-primary-500 focus:ring-1 focus:ring-primary-500 transition-colors disabled:opacity-50 text-center"
           />
           {state === 'analyzing' ? (
             <button
               onClick={cancel}
-              className="px-8 py-2.5 bg-dark-800 border border-dark-700 text-white font-medium rounded-lg hover:bg-dark-700 transition-all cursor-pointer"
+              className="px-6 py-2.5 bg-dark-800 border border-dark-700 text-white font-medium rounded-lg hover:bg-dark-700 transition-all cursor-pointer shrink-0"
             >
               Cancel
             </button>
           ) : (
             <button
-              onClick={() => analyze()}
+              onClick={() => { if (sharedMode) { window.location.href = '/' } else { analyze() } }}
               disabled={!url.trim()}
-              className="px-8 py-2.5 bg-gradient-to-r from-primary-600 to-primary-500 text-white font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              className="px-6 py-2.5 bg-gradient-to-r from-primary-600 to-primary-500 text-white font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shrink-0"
             >
-              Analyze
+              Go
             </button>
           )}
         </div>}
@@ -2280,54 +2687,40 @@ export default function App() {
         {/* ===== ANALYZE TAB ===== */}
         {activeTab === 'analyze' && (
           <>
-            {/* Popular Domains — grouped from public reports */}
-            {state !== 'done' && publicReports.length > 0 && (
+            {/* Popular Brands */}
+            {state !== 'done' && popularDomains.length > 0 && (
               <div className="max-w-2xl mx-auto mb-12 animate-fade-in">
                 <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest mb-4 text-center">
-                  Popular Domains
+                  Popular Brands
                 </h3>
                 <div className="grid gap-2">
-                  {(() => {
-                    const byDomain: Record<string, { reports: typeof publicReports; avgScore: number }> = {}
-                    for (const r of publicReports) {
-                      if (!byDomain[r.domain]) byDomain[r.domain] = { reports: [], avgScore: 0 }
-                      byDomain[r.domain].reports.push(r)
-                    }
-                    for (const d of Object.values(byDomain)) {
-                      d.avgScore = Math.round(d.reports.reduce((s, r) => s + r.overall_score, 0) / d.reports.length)
-                    }
-                    return Object.entries(byDomain).map(([domain, { reports, avgScore }]) => (
-                      <button
-                        key={domain}
-                        onClick={() => {
-                          setUrl(domain)
-                          setSelectedDomain(domain)
-                          loadBestAnalysis(domain)
-                        }}
-                        className="w-full text-left bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-xl p-4 hover:border-primary-500/50 transition-all cursor-pointer group"
-                      >
-                        <div className="flex items-center gap-3">
-                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 ${
-                            avgScore >= 80 ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' :
-                            avgScore >= 60 ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' :
-                            avgScore >= 40 ? 'bg-orange-500/15 text-orange-400 border border-orange-500/30' :
-                            'bg-red-500/15 text-red-400 border border-red-500/30'
-                          }`}>
-                            {avgScore}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-white text-sm font-medium group-hover:text-primary-300 transition-colors truncate">
-                              {domain.replace(/^https?:\/\//, '')}
-                            </p>
-                            <p className="text-dark-500 text-xs">{reports.length} {reports.length === 1 ? 'report' : 'reports'}</p>
-                          </div>
-                          <svg className="w-4 h-4 text-dark-600 group-hover:text-primary-400 transition-colors shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-                          </svg>
+                  {popularDomains.map(pd => (
+                    <a
+                      key={pd.share_id}
+                      href={`/share/${pd.share_id}`}
+                      className="w-full text-left bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-xl p-4 hover:border-primary-500/50 transition-all cursor-pointer group block"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 ${
+                          pd.avg_score >= 80 ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' :
+                          pd.avg_score >= 60 ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' :
+                          pd.avg_score >= 40 ? 'bg-orange-500/15 text-orange-400 border border-orange-500/30' :
+                          'bg-red-500/15 text-red-400 border border-red-500/30'
+                        }`}>
+                          {pd.avg_score}
                         </div>
-                      </button>
-                    ))
-                  })()}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-white text-sm font-medium group-hover:text-primary-300 transition-colors truncate">
+                            {pd.brand_name || pd.domain}
+                          </p>
+                          <p className="text-dark-500 text-xs">{pd.domain} · {pd.report_count} {pd.report_count === 1 ? 'report' : 'reports'}</p>
+                        </div>
+                        <svg className="w-4 h-4 text-dark-600 group-hover:text-primary-400 transition-colors shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                        </svg>
+                      </div>
+                    </a>
+                  ))}
                 </div>
               </div>
             )}
@@ -2394,13 +2787,27 @@ export default function App() {
                         </span>
                       )}
                     </div>
-                    <button
-                      onClick={() => analyze(true)}
-                      disabled={state === 'analyzing'}
-                      className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all disabled:opacity-50 cursor-pointer"
-                    >
-                      Re-analyze
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {saasEnabled && user && (user.role === 'owner' || user.role === 'admin') && selectedDomain && (
+                        <button
+                          onClick={() => { setDomainShareState(null); setShareModalDomain(selectedDomain); fetchDomainShare(selectedDomain) }}
+                          className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all cursor-pointer flex items-center gap-1.5"
+                          title="Share this domain"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0-12.814a2.25 2.25 0 1 0 0-2.186m0 2.186a2.25 2.25 0 1 0 0 2.186" /></svg>
+                          Share
+                        </button>
+                      )}
+                      {!readOnly && (
+                        <button
+                          onClick={() => analyze(true)}
+                          disabled={state === 'analyzing'}
+                          className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all disabled:opacity-50 cursor-pointer"
+                        >
+                          Re-analyze
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -2427,17 +2834,19 @@ export default function App() {
                             {brandNewer ? 'Brand Intelligence has been updated since this analysis' : 'Brand Intelligence available but not used in this analysis'}
                           </span>
                         </div>
-                        <button
-                          onClick={() => analyze(true)}
-                          disabled={state === 'analyzing'}
-                          className="text-xs px-3 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg hover:bg-amber-500/20 transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
-                        >
-                          Re-run with Brand Intel
-                        </button>
+                        {!readOnly && (
+                          <button
+                            onClick={() => analyze(true)}
+                            disabled={state === 'analyzing'}
+                            className="text-xs px-3 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg hover:bg-amber-500/20 transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+                          >
+                            Re-run with Brand Intel
+                          </button>
+                        )}
                       </div>
                     )
                   }
-                  if (!brandEntry) {
+                  if (!brandEntry && !readOnly) {
                     return (
                       <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-dark-900/50 border border-dark-800 rounded-xl">
                         <span className="text-dark-500 text-xs">No Brand Intelligence set up for this domain</span>
@@ -2479,15 +2888,17 @@ export default function App() {
                     </div>
                   </div>
 
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={optimizeAutoArchive}
-                      onChange={e => setOptimizeAutoArchive(e.target.checked)}
-                      className="w-3.5 h-3.5 rounded border-dark-600 bg-dark-800 text-primary-500 focus:ring-primary-500/30 cursor-pointer"
-                    />
-                    <span className="text-dark-400 text-xs">Automatically archive incomplete optimization recommendations when re-running a question</span>
-                  </label>
+                  {!readOnly && (
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={optimizeAutoArchive}
+                        onChange={e => setOptimizeAutoArchive(e.target.checked)}
+                        className="w-3.5 h-3.5 rounded border-dark-600 bg-dark-800 text-primary-500 focus:ring-primary-500/30 cursor-pointer"
+                      />
+                      <span className="text-dark-400 text-xs">Automatically archive incomplete optimization recommendations when re-running a question</span>
+                    </label>
+                  )}
 
                   <div className="grid gap-3">
                     {result.questions.map((q, i) => (
@@ -2546,11 +2957,21 @@ export default function App() {
                           </div>
                           {resultMeta?.id && (
                             <button
-                              onClick={() => optimizeQuestion(i)}
+                              onClick={() => handleQuestionClick(i)}
                               disabled={optimizing}
-                              className="text-xs px-3 py-1 bg-accent-purple/10 border border-accent-purple/20 text-purple-300 rounded-lg hover:bg-accent-purple/20 hover:text-purple-200 transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+                              className={`text-xs px-3 py-1 rounded-lg transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0 ${
+                                readOnly
+                                  ? optScores[i] !== undefined
+                                    ? 'bg-primary-500/10 border border-primary-500/20 text-primary-300 hover:bg-primary-500/20'
+                                    : 'bg-dark-800 border border-dark-700 text-dark-400 hover:bg-dark-700'
+                                  : 'bg-accent-purple/10 border border-accent-purple/20 text-purple-300 hover:bg-accent-purple/20 hover:text-purple-200'
+                              }`}
                             >
-                              {optimizing && optimizationMeta?.questionIndex === i ? 'Optimizing...' : 'Optimize'}
+                              {optimizing && optimizationMeta?.questionIndex === i
+                                ? 'Optimizing...'
+                                : readOnly
+                                  ? optScores[i] !== undefined ? 'View Report' : 'View'
+                                  : optScores[i] !== undefined ? 'View Report' : 'Optimize'}
                             </button>
                           )}
                         </div>
@@ -2681,21 +3102,23 @@ export default function App() {
                             <span className="text-xs text-dark-500">{filtered.length} {filtered.length === 1 ? 'report' : 'reports'}</span>
                           </div>
                         </div>
-                        <button
-                          onClick={() => handleSummaryClick(canonicalDomain)}
-                          className={`text-xs px-3 py-1.5 rounded-lg border transition-all cursor-pointer flex items-center gap-1.5 ${
-                            status?.exists && !status?.stale
-                              ? 'bg-primary-500/10 border-primary-500/30 text-primary-400 hover:bg-primary-500/20'
-                              : status?.stale
-                              ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20'
-                              : 'bg-dark-800 border-dark-700 text-dark-400 hover:bg-dark-700 hover:text-white'
-                          }`}
-                        >
-                          Summary
-                          {status?.stale && (
-                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                          )}
-                        </button>
+                        {(readOnly ? activeSummary : true) && (
+                          <button
+                            onClick={() => readOnly ? setOptimizeView('summary') : handleSummaryClick(canonicalDomain)}
+                            className={`text-xs px-3 py-1.5 rounded-lg border transition-all cursor-pointer flex items-center gap-1.5 ${
+                              readOnly || (status?.exists && !status?.stale)
+                                ? 'bg-primary-500/10 border-primary-500/30 text-primary-400 hover:bg-primary-500/20'
+                                : status?.stale
+                                ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20'
+                                : 'bg-dark-800 border-dark-700 text-dark-400 hover:bg-dark-700 hover:text-white'
+                            }`}
+                          >
+                            Summary
+                            {!readOnly && status?.stale && (
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                            )}
+                          </button>
+                        )}
                       </div>
                       {/* Report cards */}
                       <div className="space-y-2">
@@ -2791,19 +3214,25 @@ export default function App() {
                 </button>
 
                 {!activeSummary ? (
-                  /* No summary exists — prompt to generate */
-                  <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-8 text-center">
-                    <h3 className="text-white font-semibold text-lg mb-2">Domain Summary for {activeSummaryDomain}</h3>
-                    <p className="text-dark-400 text-sm mb-6 max-w-md mx-auto">
-                      Generate a comprehensive summary that synthesizes all optimization reports and brand intelligence for this domain into a unified strategic overview.
-                    </p>
-                    <button
-                      onClick={() => generateSummary(activeSummaryDomain)}
-                      className="px-5 py-2.5 bg-gradient-to-r from-primary-600 to-primary-500 text-white text-sm font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all cursor-pointer"
-                    >
-                      Generate Summary Report
-                    </button>
-                  </div>
+                  /* No summary exists */
+                  readOnly ? (
+                    <div className="text-center text-dark-500 py-16">
+                      No summary report available for this domain yet.
+                    </div>
+                  ) : (
+                    <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-8 text-center">
+                      <h3 className="text-white font-semibold text-lg mb-2">Domain Summary for {activeSummaryDomain}</h3>
+                      <p className="text-dark-400 text-sm mb-6 max-w-md mx-auto">
+                        Generate a comprehensive summary that synthesizes all optimization reports and brand intelligence for this domain into a unified strategic overview.
+                      </p>
+                      <button
+                        onClick={() => generateSummary(activeSummaryDomain)}
+                        className="px-5 py-2.5 bg-gradient-to-r from-primary-600 to-primary-500 text-white text-sm font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all cursor-pointer"
+                      >
+                        Generate Summary Report
+                      </button>
+                    </div>
+                  )
                 ) : (
                   /* Summary exists — full detail */
                   <div className="space-y-4">
@@ -2813,14 +3242,16 @@ export default function App() {
                         <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest">
                           Domain Summary
                         </h3>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => generateSummary(activeSummary.domain)}
-                            className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all cursor-pointer"
-                          >
-                            Regenerate
-                          </button>
-                        </div>
+                        {!readOnly && (
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => generateSummary(activeSummary.domain)}
+                              className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all cursor-pointer"
+                            >
+                              Regenerate
+                            </button>
+                          </div>
+                        )}
                       </div>
                       <h2 className="text-white font-medium text-lg mb-2">{activeSummary.domain}</h2>
                       <div className="flex items-center gap-3 text-xs text-dark-500">
@@ -2837,7 +3268,7 @@ export default function App() {
                     </div>
 
                     {/* Stale banner */}
-                    {activeSummaryStale && (
+                    {activeSummaryStale && !readOnly && (
                       <div className="flex items-center justify-between bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3">
                         <span className="text-amber-400 text-sm">New reports have been added since this summary was generated.</span>
                         <button
@@ -2996,17 +3427,17 @@ export default function App() {
                       LLM Visibility Analysis
                     </h3>
                     <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => togglePublic(optimizationMeta.id, !selectedOptPublic)}
-                        className={`text-xs px-3 py-1.5 rounded-lg border transition-all cursor-pointer ${
-                          selectedOptPublic
-                            ? 'bg-accent-emerald/10 border-accent-emerald/30 text-emerald-400 hover:bg-accent-emerald/20'
-                            : 'bg-dark-800 border-dark-700 text-dark-400 hover:bg-dark-700 hover:text-white'
-                        }`}
-                      >
-                        {selectedOptPublic ? 'Public' : 'Make Public'}
-                      </button>
-                      {resultMeta?.id && (
+                      {saasEnabled && user && (user.role === 'owner' || user.role === 'admin') && selectedDomain && (
+                        <button
+                          onClick={() => { setDomainShareState(null); setShareModalDomain(selectedDomain); fetchDomainShare(selectedDomain) }}
+                          className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all cursor-pointer flex items-center gap-1.5"
+                          title="Share this domain"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0-12.814a2.25 2.25 0 1 0 0-2.186m0 2.186a2.25 2.25 0 1 0 0 2.186" /></svg>
+                          Share
+                        </button>
+                      )}
+                      {!readOnly && resultMeta?.id && (
                         <button
                           onClick={() => optimizeQuestion(optimizationMeta.questionIndex, true)}
                           disabled={optimizing}
@@ -3015,12 +3446,14 @@ export default function App() {
                           Re-analyze
                         </button>
                       )}
-                      <button
-                        onClick={() => setConfirmDeleteOptimization(optimizationMeta.id)}
-                        className="text-xs px-3 py-1.5 text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/10 transition-all cursor-pointer"
-                      >
-                        Delete
-                      </button>
+                      {!readOnly && (
+                        <button
+                          onClick={() => setConfirmDeleteOptimization(optimizationMeta.id)}
+                          className="text-xs px-3 py-1.5 text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/10 transition-all cursor-pointer"
+                        >
+                          Delete
+                        </button>
+                      )}
                     </div>
                   </div>
                   <p className="text-white font-medium text-lg leading-snug mb-2">
@@ -3079,33 +3512,35 @@ export default function App() {
                             {brandNewer ? 'Brand Intelligence has been updated since this report was generated' : 'This report was generated without Brand Intelligence'}
                           </span>
                         </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          {!brandEntry && (
-                            <button
-                              onClick={() => { startNewBrand(domain); setActiveTab('brand') }}
-                              className="text-xs text-primary-400 hover:text-primary-300 transition-colors cursor-pointer whitespace-nowrap"
-                            >
-                              Set up Brand Intel
-                            </button>
-                          )}
-                          {brandEntry && (
-                            <button
-                              onClick={() => { loadBrandProfile(domain); setActiveTab('brand') }}
-                              className="text-xs text-primary-400 hover:text-primary-300 transition-colors cursor-pointer whitespace-nowrap"
-                            >
-                              View Brand Intel
-                            </button>
-                          )}
-                          {brandEntry && resultMeta?.id && (
-                            <button
-                              onClick={() => optimizeQuestion(optimizationMeta.questionIndex, true)}
-                              disabled={optimizing}
-                              className="text-xs px-3 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg hover:bg-amber-500/20 transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap"
-                            >
-                              Re-run with Brand Intel
-                            </button>
-                          )}
-                        </div>
+                        {!readOnly && (
+                          <div className="flex items-center gap-2 shrink-0">
+                            {!brandEntry && (
+                              <button
+                                onClick={() => { startNewBrand(domain); setActiveTab('brand') }}
+                                className="text-xs text-primary-400 hover:text-primary-300 transition-colors cursor-pointer whitespace-nowrap"
+                              >
+                                Set up Brand Intel
+                              </button>
+                            )}
+                            {brandEntry && (
+                              <button
+                                onClick={() => { loadBrandProfile(domain); setActiveTab('brand') }}
+                                className="text-xs text-primary-400 hover:text-primary-300 transition-colors cursor-pointer whitespace-nowrap"
+                              >
+                                View Brand Intel
+                              </button>
+                            )}
+                            {brandEntry && resultMeta?.id && (
+                              <button
+                                onClick={() => optimizeQuestion(optimizationMeta.questionIndex, true)}
+                                disabled={optimizing}
+                                className="text-xs px-3 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg hover:bg-amber-500/20 transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                              >
+                                Re-run with Brand Intel
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )
                   }
@@ -3292,13 +3727,25 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                <button
-                  onClick={fetchTodos}
-                  disabled={todosLoading}
-                  className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all disabled:opacity-50 cursor-pointer"
-                >
+                <div className="flex items-center gap-2">
+                  {saasEnabled && user && (user.role === 'owner' || user.role === 'admin') && selectedDomain && (
+                    <button
+                      onClick={() => { setDomainShareState(null); setShareModalDomain(selectedDomain); fetchDomainShare(selectedDomain) }}
+                      className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all cursor-pointer flex items-center gap-1.5"
+                      title="Share this domain"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0-12.814a2.25 2.25 0 1 0 0-2.186m0 2.186a2.25 2.25 0 1 0 0 2.186" /></svg>
+                      Share
+                    </button>
+                  )}
+                  <button
+                    onClick={fetchTodos}
+                    disabled={todosLoading}
+                    className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all disabled:opacity-50 cursor-pointer"
+                  >
                   {todosLoading ? 'Loading...' : 'Refresh'}
-                </button>
+                  </button>
+                </div>
               </div>
               {/* Sort mode toggle */}
               <div className="flex items-center gap-2">
@@ -3475,20 +3922,22 @@ export default function App() {
                             >
                               {/* Compact row — always visible */}
                               <div className="flex items-center gap-3 px-4 py-2.5">
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); updateTodoStatus(todo.id, todo.status === 'completed' ? 'todo' : 'completed') }}
-                                  className={`w-4.5 h-4.5 rounded border-2 shrink-0 flex items-center justify-center transition-all cursor-pointer ${
-                                    todo.status === 'completed'
-                                      ? 'bg-emerald-500/20 border-emerald-500/50'
-                                      : 'border-dark-600 hover:border-primary-500'
-                                  }`}
-                                >
-                                  {todo.status === 'completed' && (
-                                    <svg className="w-2.5 h-2.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                                      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                                    </svg>
-                                  )}
-                                </button>
+                                {!readOnly && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); updateTodoStatus(todo.id, todo.status === 'completed' ? 'todo' : 'completed') }}
+                                    className={`w-4.5 h-4.5 rounded border-2 shrink-0 flex items-center justify-center transition-all cursor-pointer ${
+                                      todo.status === 'completed'
+                                        ? 'bg-emerald-500/20 border-emerald-500/50'
+                                        : 'border-dark-600 hover:border-primary-500'
+                                    }`}
+                                  >
+                                    {todo.status === 'completed' && (
+                                      <svg className="w-2.5 h-2.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                                      </svg>
+                                    )}
+                                  </button>
+                                )}
                                 <button
                                   onClick={() => setExpandedTodos(prev => { const next = new Set(prev); next.has(todo.id) ? next.delete(todo.id) : next.add(todo.id); return next })}
                                   className="flex-1 min-w-0 text-left cursor-pointer"
@@ -3526,17 +3975,17 @@ export default function App() {
                                         </svg>
                                       </button>
                                     )}
-                                    {todo.status !== 'backlogged' && todo.status !== 'archived' && (
+                                    {!readOnly && todo.status !== 'backlogged' && todo.status !== 'archived' && (
                                       <button onClick={() => updateTodoStatus(todo.id, 'backlogged')} title="Backlog" className="p-1 text-dark-500 hover:text-amber-400 transition-colors cursor-pointer">
                                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                                       </button>
                                     )}
-                                    {todo.status !== 'archived' && (
+                                    {!readOnly && todo.status !== 'archived' && (
                                       <button onClick={() => updateTodoStatus(todo.id, 'archived')} title="Archive" className="p-1 text-dark-500 hover:text-dark-300 transition-colors cursor-pointer">
                                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
                                       </button>
                                     )}
-                                    {(todo.status === 'backlogged' || todo.status === 'archived') && (
+                                    {!readOnly && (todo.status === 'backlogged' || todo.status === 'archived') && (
                                       <button onClick={() => updateTodoStatus(todo.id, 'todo')} title="Move to To-Do" className="p-1 text-dark-500 hover:text-primary-400 transition-colors cursor-pointer">
                                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg>
                                       </button>
@@ -3617,20 +4066,22 @@ export default function App() {
                               className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-xl overflow-hidden group hover:border-dark-700 transition-colors"
                             >
                               <div className="flex items-center gap-3 px-4 py-2.5">
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); updateTodoStatus(todo.id, todo.status === 'completed' ? 'todo' : 'completed') }}
-                                  className={`w-4.5 h-4.5 rounded border-2 shrink-0 flex items-center justify-center transition-all cursor-pointer ${
-                                    todo.status === 'completed'
-                                      ? 'bg-emerald-500/20 border-emerald-500/50'
-                                      : 'border-dark-600 hover:border-primary-500'
-                                  }`}
-                                >
-                                  {todo.status === 'completed' && (
-                                    <svg className="w-2.5 h-2.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                                      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                                    </svg>
-                                  )}
-                                </button>
+                                {!readOnly && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); updateTodoStatus(todo.id, todo.status === 'completed' ? 'todo' : 'completed') }}
+                                    className={`w-4.5 h-4.5 rounded border-2 shrink-0 flex items-center justify-center transition-all cursor-pointer ${
+                                      todo.status === 'completed'
+                                        ? 'bg-emerald-500/20 border-emerald-500/50'
+                                        : 'border-dark-600 hover:border-primary-500'
+                                    }`}
+                                  >
+                                    {todo.status === 'completed' && (
+                                      <svg className="w-2.5 h-2.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                                      </svg>
+                                    )}
+                                  </button>
+                                )}
                                 <button
                                   onClick={() => setExpandedTodos(prev => { const next = new Set(prev); next.has(todo.id) ? next.delete(todo.id) : next.add(todo.id); return next })}
                                   className="flex-1 min-w-0 text-left cursor-pointer"
@@ -3648,17 +4099,17 @@ export default function App() {
                                     'bg-dark-700/50 text-dark-400 border border-dark-600'
                                   }`}>{todo.priority}</span>
                                   <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    {todo.status !== 'backlogged' && todo.status !== 'archived' && (
+                                    {!readOnly && todo.status !== 'backlogged' && todo.status !== 'archived' && (
                                       <button onClick={() => updateTodoStatus(todo.id, 'backlogged')} title="Backlog" className="p-1 text-dark-500 hover:text-amber-400 transition-colors cursor-pointer">
                                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                                       </button>
                                     )}
-                                    {todo.status !== 'archived' && (
+                                    {!readOnly && todo.status !== 'archived' && (
                                       <button onClick={() => updateTodoStatus(todo.id, 'archived')} title="Archive" className="p-1 text-dark-500 hover:text-dark-300 transition-colors cursor-pointer">
                                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
                                       </button>
                                     )}
-                                    {(todo.status === 'backlogged' || todo.status === 'archived') && (
+                                    {!readOnly && (todo.status === 'backlogged' || todo.status === 'archived') && (
                                       <button onClick={() => updateTodoStatus(todo.id, 'todo')} title="Move to To-Do" className="p-1 text-dark-500 hover:text-primary-400 transition-colors cursor-pointer">
                                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg>
                                       </button>
@@ -3926,16 +4377,20 @@ export default function App() {
               /* Brand Edit View */
               <div>
                 <div className="flex items-center justify-between mb-6">
-                  <button
-                    onClick={() => guardBrandNav(() => { setBrandEditing(false); fetchBrandList() })}
-                    className="text-dark-400 hover:text-white text-sm flex items-center gap-1 cursor-pointer"
-                  >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-                    </svg>
-                    Back
-                  </button>
-                  {brandEditing && (
+                  {!readOnly ? (
+                    <button
+                      onClick={() => guardBrandNav(() => { setBrandEditing(false); fetchBrandList() })}
+                      className="text-dark-400 hover:text-white text-sm flex items-center gap-1 cursor-pointer"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+                      </svg>
+                      Back
+                    </button>
+                  ) : (
+                    <h3 className="text-sm font-semibold text-dark-400">Brand Intelligence</h3>
+                  )}
+                  {brandEditing && !readOnly && (
                     <div className="flex items-center gap-3">
                       {/* Completeness */}
                       <div className="flex items-center gap-2 text-xs">
@@ -3950,16 +4405,16 @@ export default function App() {
                         </div>
                         <span className="text-dark-500">{brandCompleteness}%</span>
                       </div>
-                      <button
-                        onClick={() => setBrandPublic(!brandPublic)}
-                        className={`text-xs px-3 py-1.5 rounded-lg border transition-all cursor-pointer ${
-                          brandPublic
-                            ? 'bg-accent-emerald/10 border-accent-emerald/30 text-emerald-400 hover:bg-accent-emerald/20'
-                            : 'bg-dark-800 border-dark-700 text-dark-400 hover:bg-dark-700 hover:text-white'
-                        }`}
-                      >
-                        {brandPublic ? 'Public' : 'Make Public'}
-                      </button>
+                      {saasEnabled && user && (user.role === 'owner' || user.role === 'admin') && selectedDomain && (
+                        <button
+                          onClick={() => { setDomainShareState(null); setShareModalDomain(selectedDomain); fetchDomainShare(selectedDomain) }}
+                          className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all cursor-pointer flex items-center gap-1.5"
+                          title="Share this domain"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0-12.814a2.25 2.25 0 1 0 0-2.186m0 2.186a2.25 2.25 0 1 0 0 2.186" /></svg>
+                          Share
+                        </button>
+                      )}
                       <button
                         onClick={saveBrandProfile}
                         disabled={brandSaving || !brandDomain.trim()}
@@ -3972,6 +4427,7 @@ export default function App() {
                 </div>
 
 
+                <div className={readOnly ? 'pointer-events-none' : ''}>
                 {/* Section 1: Core Identity (always open) */}
                 <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6 mb-4">
                   <h4 className="text-sm font-semibold text-white mb-4">Core Identity</h4>
@@ -4775,24 +5231,28 @@ export default function App() {
                   )}
                 </div>
 
+                </div>{/* close readOnly pointer-events wrapper */}
+
                 {/* Bottom save bar */}
-                <div className="flex justify-end gap-3 mt-6">
-                  {brandProfile && (
+                {!readOnly && (
+                  <div className="flex justify-end gap-3 mt-6">
+                    {brandProfile && (
+                      <button
+                        onClick={() => setConfirmDeleteBrand(true)}
+                        className="px-4 py-2 text-red-400 hover:text-red-300 text-sm cursor-pointer"
+                      >
+                        Delete Profile
+                      </button>
+                    )}
                     <button
-                      onClick={() => setConfirmDeleteBrand(true)}
-                      className="px-4 py-2 text-red-400 hover:text-red-300 text-sm cursor-pointer"
+                      onClick={saveBrandProfile}
+                      disabled={brandSaving || !brandDomain.trim()}
+                      className="px-6 py-2.5 bg-gradient-to-r from-primary-600 to-primary-500 text-white font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all disabled:opacity-50 cursor-pointer"
                     >
-                      Delete Profile
+                      {brandSaving ? 'Saving...' : 'Save Brand Profile'}
                     </button>
-                  )}
-                  <button
-                    onClick={saveBrandProfile}
-                    disabled={brandSaving || !brandDomain.trim()}
-                    className="px-6 py-2.5 bg-gradient-to-r from-primary-600 to-primary-500 text-white font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all disabled:opacity-50 cursor-pointer"
-                  >
-                    {brandSaving ? 'Saving...' : 'Save Brand Profile'}
-                  </button>
-                </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -4804,7 +5264,12 @@ export default function App() {
           <div className="max-w-4xl mx-auto animate-fade-in">
 
             {/* Input View */}
-            {videoView === 'input' && (
+            {videoView === 'input' && readOnly && (
+              <div className="text-center text-dark-500 py-16">
+                No video analysis available for this domain yet.
+              </div>
+            )}
+            {videoView === 'input' && !readOnly && (
               <div className="space-y-6">
                 <div className="flex items-center justify-between">
                   <h2 className="text-2xl font-bold text-white">Video Authority Analyzer</h2>
@@ -5336,10 +5801,20 @@ export default function App() {
                     Re-run or Change Settings
                   </button>
                   <div className="flex items-center gap-3">
+                    {saasEnabled && user && (user.role === 'owner' || user.role === 'admin') && selectedDomain && (
+                      <button
+                        onClick={() => { setDomainShareState(null); setShareModalDomain(selectedDomain); fetchDomainShare(selectedDomain) }}
+                        className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all cursor-pointer flex items-center gap-1.5"
+                        title="Share this domain"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0-12.814a2.25 2.25 0 1 0 0-2.186m0 2.186a2.25 2.25 0 1 0 0 2.186" /></svg>
+                        Share
+                      </button>
+                    )}
                     <button
                       onClick={async () => {
                         try {
-                          const res = await fetch(`/api/video/analyses/${encodeURIComponent(videoAnalysis.domain)}/details`)
+                          const res = await apiFetch(`/api/video/analyses/${encodeURIComponent(videoAnalysis.domain)}/details`)
                           if (res.ok) {
                             const data = await res.json() as VideoDetail[]
                             setVideoDetails(data)
@@ -5352,18 +5827,22 @@ export default function App() {
                     >
                       View Transcripts
                     </button>
-                    <button
-                      onClick={() => setConfirmDeleteVideoAnalysis(true)}
-                      className="text-xs text-red-400 border border-red-500/30 rounded-lg px-3 py-1.5 hover:bg-red-500/10 transition-colors cursor-pointer"
-                    >
-                      Delete
-                    </button>
-                    <button
-                      onClick={() => { setVideoView('review'); setDiscoveredVideos(videoAnalysis.videos) }}
-                      className="text-xs text-primary-400 border border-primary-500/30 rounded-lg px-3 py-1.5 hover:bg-primary-500/10 transition-colors cursor-pointer"
-                    >
-                      Re-run Analysis
-                    </button>
+                    {!readOnly && (
+                      <>
+                        <button
+                          onClick={() => setConfirmDeleteVideoAnalysis(true)}
+                          className="text-xs text-red-400 border border-red-500/30 rounded-lg px-3 py-1.5 hover:bg-red-500/10 transition-colors cursor-pointer"
+                        >
+                          Delete
+                        </button>
+                        <button
+                          onClick={() => { setVideoView('review'); setDiscoveredVideos(videoAnalysis.videos) }}
+                          className="text-xs text-primary-400 border border-primary-500/30 rounded-lg px-3 py-1.5 hover:bg-primary-500/10 transition-colors cursor-pointer"
+                        >
+                          Re-run Analysis
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -5876,7 +6355,7 @@ export default function App() {
                   setConfirmDeleteBrand(false)
                   if (!brandDomain) return
                   try {
-                    await fetch(`/api/brands/${encodeURIComponent(brandDomain)}`, { method: 'DELETE' })
+                    await apiFetch(`/api/brands/${encodeURIComponent(brandDomain)}`, { method: 'DELETE' })
                     setBrandEditing(false)
                     setBrandProfile(null)
                     fetchBrandList()
@@ -5973,6 +6452,216 @@ export default function App() {
                 className="flex-1 px-4 py-2 text-sm text-white bg-primary-600 rounded-lg hover:bg-primary-500 transition-colors cursor-pointer font-medium"
               >
                 Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Share Domain Modal */}
+      {shareModalDomain && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-900 border border-dark-700 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-white font-semibold text-lg">Share Domain</h3>
+              <button
+                onClick={() => setShareModalDomain(null)}
+                className="text-dark-400 hover:text-white transition-colors cursor-pointer"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <p className="text-dark-400 text-sm mb-4">
+              Control who can view reports for <span className="text-white font-medium">{shareModalDomain}</span>.
+              All reports (analysis, optimization, video, todos) are shared collectively.
+            </p>
+
+            {shareLoading && !domainShareState ? (
+              <div className="text-center py-6 text-dark-400">Loading...</div>
+            ) : (
+              <div className="space-y-3">
+                {/* Private option */}
+                <button
+                  onClick={() => setDomainVisibility(shareModalDomain, 'private')}
+                  disabled={shareLoading}
+                  className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer ${
+                    domainShareState?.visibility === 'private'
+                      ? 'bg-dark-800 border-primary-500/50'
+                      : 'bg-dark-900/50 border-dark-700 hover:border-dark-600'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                      domainShareState?.visibility === 'private' ? 'border-primary-500' : 'border-dark-600'
+                    }`}>
+                      {domainShareState?.visibility === 'private' && <div className="w-2 h-2 rounded-full bg-primary-500" />}
+                    </div>
+                    <div>
+                      <p className="text-white text-sm font-medium">Private</p>
+                      <p className="text-dark-500 text-xs">Only team members can view these reports</p>
+                    </div>
+                  </div>
+                </button>
+
+                {/* Public option */}
+                <button
+                  onClick={() => setDomainVisibility(shareModalDomain, 'public')}
+                  disabled={shareLoading}
+                  className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer ${
+                    domainShareState?.visibility === 'public'
+                      ? 'bg-dark-800 border-primary-500/50'
+                      : 'bg-dark-900/50 border-dark-700 hover:border-dark-600'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                      domainShareState?.visibility === 'public' ? 'border-primary-500' : 'border-dark-600'
+                    }`}>
+                      {domainShareState?.visibility === 'public' && <div className="w-2 h-2 rounded-full bg-primary-500" />}
+                    </div>
+                    <div>
+                      <p className="text-white text-sm font-medium">Public</p>
+                      <p className="text-dark-500 text-xs">Anyone with the link can view these reports</p>
+                    </div>
+                  </div>
+                </button>
+
+                {/* Popular option (root tenant admin/owner only) */}
+                {user?.isRootTenant && (user.role === 'owner' || user.role === 'admin') && (
+                  <button
+                    onClick={() => setDomainVisibility(shareModalDomain, 'popular')}
+                    disabled={shareLoading}
+                    className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer ${
+                      domainShareState?.visibility === 'popular'
+                        ? 'bg-dark-800 border-accent-purple/50'
+                        : 'bg-dark-900/50 border-dark-700 hover:border-dark-600'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                        domainShareState?.visibility === 'popular' ? 'border-accent-purple' : 'border-dark-600'
+                      }`}>
+                        {domainShareState?.visibility === 'popular' && <div className="w-2 h-2 rounded-full bg-accent-purple" />}
+                      </div>
+                      <div>
+                        <p className="text-white text-sm font-medium">Popular</p>
+                        <p className="text-dark-500 text-xs">Featured on the Analyze page + publicly accessible</p>
+                      </div>
+                    </div>
+                  </button>
+                )}
+
+                {/* Share URL display */}
+                {domainShareState?.share_url && (domainShareState.visibility === 'public' || domainShareState.visibility === 'popular') && (() => {
+                  const shareFullUrl = `${window.location.origin}${domainShareState.share_url}?tab=${activeTab}`
+                  return (
+                  <div className="mt-4 p-3 bg-dark-800 rounded-xl border border-dark-700">
+                    <label className="text-dark-500 text-xs font-medium block mb-2">Share Link</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        readOnly
+                        value={shareFullUrl}
+                        className="flex-1 bg-dark-900 border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-300 font-mono"
+                      />
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(shareFullUrl)
+                          setShareCopied(true)
+                          setTimeout(() => setShareCopied(false), 2000)
+                        }}
+                        className="px-3 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-500 transition-colors cursor-pointer font-medium shrink-0"
+                      >
+                        {shareCopied ? 'Copied!' : 'Copy'}
+                      </button>
+                    </div>
+                  </div>
+                  )
+                })()}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Optimize Confirmation Modal — shown when clicking a question with no existing report */}
+      {optimizeConfirmQ !== null && result && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-900 border border-dark-700 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <h3 className="text-white font-semibold text-lg mb-3">Generate Optimization Report</h3>
+            <p className="text-dark-400 text-sm mb-6">
+              Do you want to generate an Optimize report to help surface this question to LLMs at <span className="text-white font-medium">{brandList.find(b => domainKey(b.domain) === domainKey(selectedDomain))?.brand_name || selectedDomain}</span> better?
+            </p>
+            <p className="text-dark-500 text-xs mb-6 italic">
+              &ldquo;{result.questions[optimizeConfirmQ]?.question}&rdquo;
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setOptimizeConfirmQ(null)}
+                className="px-4 py-2 text-dark-400 hover:text-white text-sm transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { const qi = optimizeConfirmQ; setOptimizeConfirmQ(null); optimizeQuestion(qi) }}
+                className="px-4 py-2 bg-gradient-to-r from-primary-600 to-primary-500 text-white text-sm font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all cursor-pointer"
+              >
+                Yes, Generate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ReadOnly "Not Ready" Modal — shown when clicking question with no optimize report in shared view */}
+      {readOnlyOptModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-900 border border-dark-700 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <h3 className="text-white font-semibold text-lg mb-3">Report Not Available</h3>
+            <p className="text-dark-400 text-sm mb-6">
+              An Optimize report for this question hasn't been generated yet. Would you like to see other optimization reports for <span className="text-white font-medium">{readOnlyOptModal}</span>?
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setReadOnlyOptModal(null)}
+                className="px-4 py-2 text-dark-400 hover:text-white text-sm transition-colors cursor-pointer"
+              >
+                No, Thanks
+              </button>
+              <button
+                onClick={() => { setReadOnlyOptModal(null); setActiveTab('optimize') }}
+                className="px-4 py-2 bg-gradient-to-r from-primary-600 to-primary-500 text-white text-sm font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all cursor-pointer"
+              >
+                View Reports
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Subscription Required Modal */}
+      {subscriptionModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-900 border border-dark-700 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <h3 className="text-white font-semibold text-lg mb-3">Subscription Required</h3>
+            <p className="text-dark-400 text-sm mb-4">
+              You need an active subscription to run reports. You can still view popular public reports shared by other users.
+            </p>
+            <p className="text-dark-400 text-sm mb-6">
+              Would you like to choose a plan?
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setSubscriptionModal(false)}
+                className="px-4 py-2 text-dark-400 hover:text-white text-sm transition-colors cursor-pointer"
+              >
+                Not Now
+              </button>
+              <button
+                onClick={() => { setSubscriptionModal(false); window.location.href = '/last/plan' }}
+                className="px-4 py-2 bg-gradient-to-r from-primary-600 to-primary-500 text-white text-sm font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all cursor-pointer"
+              >
+                View Plans
               </button>
             </div>
           </div>

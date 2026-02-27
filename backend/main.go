@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,6 +23,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"llmopt/internal/saas"
 )
 
 // normalizeDomain strips protocol, trailing slashes, and lowercases.
@@ -80,12 +84,17 @@ func main() {
 
 	ytKey := os.Getenv("YOUTUBE_API_KEY") // optional — video tab disabled if missing
 
-	mongoDB, err := NewMongoDB(mongoURI, "llmopt")
+	dbName := os.Getenv("DATABASE_NAME")
+	if dbName == "" {
+		dbName = "llmopt"
+	}
+
+	mongoDB, err := NewMongoDB(mongoURI, dbName)
 	if err != nil {
 		log.Fatalf("Failed to connect to MongoDB: %v", err)
 	}
 	defer mongoDB.Close(context.Background())
-	log.Println("Connected to MongoDB")
+	log.Printf("Connected to MongoDB (database: %s)", dbName)
 
 	// One-time migration: normalize domain fields (strip protocol)
 	mongoDB.migrateDomains()
@@ -93,63 +102,109 @@ func main() {
 		log.Println("YouTube API key configured — Video Authority enabled")
 	}
 
+	// SaaS mode: multi-tenant auth via shared JWT with LastSaaS
+	saasEnabled := os.Getenv("LLMOPT_SAAS_ENABLED") == "true"
+	var sm *saas.Middleware
+	if saasEnabled {
+		jwtSecret := os.Getenv("LLMOPT_JWT_ACCESS_SECRET")
+		if jwtSecret == "" {
+			log.Fatal("LLMOPT_JWT_ACCESS_SECRET is required when LLMOPT_SAAS_ENABLED=true")
+		}
+		jv := saas.NewJWTValidator(jwtSecret)
+		sm = saas.NewMiddleware(jv, mongoDB.Database)
+		log.Println("SaaS mode enabled — JWT auth active")
+
+		// One-time migration: assign root tenant to existing data
+		mongoDB.migrateTenantIDs()
+
+		// One-time migration: convert per-record public flags to domain shares
+		mongoDB.migratePublicToDomainShares()
+	}
+
+	// withAuth wraps a handler with JWT + tenant middleware (SaaS mode only).
+	// In non-SaaS mode, returns the handler unwrapped.
+	withAuth := func(h http.HandlerFunc) http.HandlerFunc {
+		if sm == nil {
+			return h
+		}
+		return func(w http.ResponseWriter, r *http.Request) {
+			sm.RequireJWT(sm.RequireTenant(http.HandlerFunc(h))).ServeHTTP(w, r)
+		}
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/analyze", handleAnalyze(apiKey, mongoDB))
-	mux.HandleFunc("GET /api/analyses", handleListAnalyses(mongoDB))
-	mux.HandleFunc("GET /api/analyses/{id}", handleGetAnalysis(mongoDB))
-	mux.HandleFunc("DELETE /api/analyses/{id}", handleDeleteAnalysis(mongoDB))
-	mux.HandleFunc("DELETE /api/optimizations/{id}", handleDeleteOptimization(mongoDB))
+
+	// SaaS config endpoint — tells the frontend whether auth is required
+	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"saas_enabled": saasEnabled})
+	})
+	mux.HandleFunc("OPTIONS /api/config", handleOptions)
+
+	// Tenant-scoped routes (wrapped with auth in SaaS mode)
+	mux.HandleFunc("POST /api/analyze", withAuth(handleAnalyze(apiKey, mongoDB)))
+	mux.HandleFunc("GET /api/analyses", withAuth(handleListAnalyses(mongoDB)))
+	mux.HandleFunc("GET /api/analyses/{id}", withAuth(handleGetAnalysis(mongoDB)))
+	mux.HandleFunc("DELETE /api/analyses/{id}", withAuth(handleDeleteAnalysis(mongoDB)))
+	mux.HandleFunc("DELETE /api/optimizations/{id}", withAuth(handleDeleteOptimization(mongoDB)))
+	mux.HandleFunc("POST /api/analyses/{id}/questions/{idx}/optimize", withAuth(handleOptimize(apiKey, mongoDB)))
+	mux.HandleFunc("GET /api/analyses/{id}/questions/{idx}/optimization", withAuth(handleGetOptimization(mongoDB)))
+	mux.HandleFunc("GET /api/optimizations", withAuth(handleListOptimizations(mongoDB)))
+	mux.HandleFunc("GET /api/optimizations/{id}", withAuth(handleGetOptimizationByID(mongoDB)))
+	mux.HandleFunc("GET /api/domains/{domain}/share", withAuth(handleGetDomainShare(mongoDB)))
+	mux.HandleFunc("PUT /api/domains/{domain}/share", withAuth(handleSetDomainShare(mongoDB)))
+	mux.HandleFunc("GET /api/todos", withAuth(handleListTodos(mongoDB)))
+	mux.HandleFunc("PATCH /api/todos/{id}", withAuth(handleUpdateTodo(mongoDB)))
+	mux.HandleFunc("POST /api/todos/archive", withAuth(handleBulkArchiveTodos(mongoDB)))
+	mux.HandleFunc("POST /api/domains/{domain}/summary", withAuth(handleGenerateDomainSummary(apiKey, mongoDB)))
+	mux.HandleFunc("GET /api/domains/{domain}/summary", withAuth(handleGetDomainSummary(mongoDB)))
+	mux.HandleFunc("GET /api/domains/{domain}/summary/status", withAuth(handleDomainSummaryStatus(mongoDB)))
+	mux.HandleFunc("GET /api/brands", withAuth(handleListBrands(mongoDB)))
+	mux.HandleFunc("GET /api/brands/{domain}", withAuth(handleGetBrand(mongoDB)))
+	mux.HandleFunc("PUT /api/brands/{domain}", withAuth(handleSaveBrand(mongoDB)))
+	mux.HandleFunc("DELETE /api/brands/{domain}", withAuth(handleDeleteBrand(mongoDB)))
+	mux.HandleFunc("POST /api/brands/{domain}/discover-competitors", withAuth(handleDiscoverCompetitors(apiKey, mongoDB)))
+	mux.HandleFunc("POST /api/brands/{domain}/suggest-queries", withAuth(handleSuggestQueries(apiKey, mongoDB)))
+	mux.HandleFunc("POST /api/brands/{domain}/generate-description", withAuth(handleGenerateDescription(apiKey, mongoDB)))
+	mux.HandleFunc("POST /api/brands/{domain}/predict-audience", withAuth(handlePredictAudience(apiKey, mongoDB)))
+	mux.HandleFunc("POST /api/brands/{domain}/suggest-claims", withAuth(handleSuggestClaims(apiKey, mongoDB)))
+	mux.HandleFunc("POST /api/brands/{domain}/predict-differentiators", withAuth(handlePredictDifferentiators(apiKey, mongoDB)))
+	mux.HandleFunc("POST /api/video/discover", withAuth(handleVideoDiscover(ytKey, mongoDB)))
+	mux.HandleFunc("POST /api/video/analyze", withAuth(handleVideoAnalyze(apiKey, ytKey, mongoDB)))
+	mux.HandleFunc("GET /api/video/analyses/{domain}/details", withAuth(handleGetVideoDetails(mongoDB)))
+	mux.HandleFunc("GET /api/video/analyses/{domain}", withAuth(handleGetVideoAnalysis(mongoDB)))
+	mux.HandleFunc("GET /api/video/analyses", withAuth(handleListVideoAnalyses(mongoDB)))
+	mux.HandleFunc("DELETE /api/video/analyses/{domain}", withAuth(handleDeleteVideoAnalysis(mongoDB)))
+
+	// Public routes (no auth required)
 	mux.HandleFunc("GET /api/health/claude", handleHealthCheck(apiKey, mongoDB))
 	mux.HandleFunc("GET /api/health/history", handleHealthHistory(mongoDB))
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("POST /api/analyses/{id}/questions/{idx}/optimize", handleOptimize(apiKey, mongoDB))
-	mux.HandleFunc("GET /api/analyses/{id}/questions/{idx}/optimization", handleGetOptimization(mongoDB))
+	mux.HandleFunc("GET /api/share/popular", handleGetPopularDomains(mongoDB))
+	mux.HandleFunc("GET /api/share/{shareId}", handleGetSharedDomain(mongoDB))
+
+	// OPTIONS handlers (CORS preflight — no auth)
+	// Note: OPTIONS /api/config already registered above with the GET handler
 	mux.HandleFunc("OPTIONS /api/health/claude", handleOptions)
 	mux.HandleFunc("OPTIONS /api/health", handleOptions)
 	mux.HandleFunc("OPTIONS /api/analyze", handleOptions)
 	mux.HandleFunc("OPTIONS /api/analyses", handleOptions)
 	mux.HandleFunc("OPTIONS /api/analyses/{id}", handleOptions)
-	mux.HandleFunc("GET /api/optimizations", handleListOptimizations(mongoDB))
-	mux.HandleFunc("GET /api/optimizations/{id}", handleGetOptimizationByID(mongoDB))
-	mux.HandleFunc("PATCH /api/optimizations/{id}", handleTogglePublic(mongoDB))
-	mux.HandleFunc("GET /api/todos", handleListTodos(mongoDB))
-	mux.HandleFunc("PATCH /api/todos/{id}", handleUpdateTodo(mongoDB))
-	mux.HandleFunc("POST /api/todos/archive", handleBulkArchiveTodos(mongoDB))
-	mux.HandleFunc("GET /api/public/reports", handleListPublicReports(mongoDB))
-	mux.HandleFunc("GET /api/public/reports/{id}", handleGetPublicReport(mongoDB))
 	mux.HandleFunc("OPTIONS /api/analyses/{id}/questions/{idx}/optimize", handleOptions)
 	mux.HandleFunc("OPTIONS /api/analyses/{id}/questions/{idx}/optimization", handleOptions)
 	mux.HandleFunc("OPTIONS /api/optimizations", handleOptions)
 	mux.HandleFunc("OPTIONS /api/optimizations/{id}", handleOptions)
+	mux.HandleFunc("OPTIONS /api/domains/{domain}/share", handleOptions)
+	mux.HandleFunc("OPTIONS /api/share/popular", handleOptions)
+	mux.HandleFunc("OPTIONS /api/share/{shareId}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/todos", handleOptions)
 	mux.HandleFunc("OPTIONS /api/todos/{id}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/health/history", handleOptions)
-	mux.HandleFunc("OPTIONS /api/public/reports", handleOptions)
-	mux.HandleFunc("OPTIONS /api/public/reports/{id}", handleOptions)
-
-	// Domain Summary routes
-	mux.HandleFunc("POST /api/domains/{domain}/summary", handleGenerateDomainSummary(apiKey, mongoDB))
-	mux.HandleFunc("GET /api/domains/{domain}/summary", handleGetDomainSummary(mongoDB))
-	mux.HandleFunc("GET /api/domains/{domain}/summary/status", handleDomainSummaryStatus(mongoDB))
 	mux.HandleFunc("OPTIONS /api/domains/{domain}/summary", handleOptions)
 	mux.HandleFunc("OPTIONS /api/domains/{domain}/summary/status", handleOptions)
-
-	// Brand Intelligence routes
-	mux.HandleFunc("GET /api/brands", handleListBrands(mongoDB))
-	mux.HandleFunc("GET /api/brands/{domain}", handleGetBrand(mongoDB))
-	mux.HandleFunc("PUT /api/brands/{domain}", handleSaveBrand(mongoDB))
-	mux.HandleFunc("DELETE /api/brands/{domain}", handleDeleteBrand(mongoDB))
-	mux.HandleFunc("POST /api/brands/{domain}/discover-competitors", handleDiscoverCompetitors(apiKey, mongoDB))
-	mux.HandleFunc("POST /api/brands/{domain}/suggest-queries", handleSuggestQueries(apiKey, mongoDB))
-	mux.HandleFunc("POST /api/brands/{domain}/generate-description", handleGenerateDescription(apiKey, mongoDB))
-	mux.HandleFunc("POST /api/brands/{domain}/predict-audience", handlePredictAudience(apiKey, mongoDB))
-	mux.HandleFunc("POST /api/brands/{domain}/suggest-claims", handleSuggestClaims(apiKey, mongoDB))
-	mux.HandleFunc("POST /api/brands/{domain}/predict-differentiators", handlePredictDifferentiators(apiKey, mongoDB))
-	mux.HandleFunc("GET /api/public/brands", handleListPublicBrands(mongoDB))
-	mux.HandleFunc("GET /api/public/brands/{domain}", handleGetPublicBrand(mongoDB))
 	mux.HandleFunc("OPTIONS /api/brands", handleOptions)
 	mux.HandleFunc("OPTIONS /api/brands/{domain}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/brands/{domain}/discover-competitors", handleOptions)
@@ -158,23 +213,29 @@ func main() {
 	mux.HandleFunc("OPTIONS /api/brands/{domain}/predict-audience", handleOptions)
 	mux.HandleFunc("OPTIONS /api/brands/{domain}/suggest-claims", handleOptions)
 	mux.HandleFunc("OPTIONS /api/brands/{domain}/predict-differentiators", handleOptions)
-	mux.HandleFunc("OPTIONS /api/public/brands", handleOptions)
-	mux.HandleFunc("OPTIONS /api/public/brands/{domain}", handleOptions)
-
-	// Video Authority routes
-	mux.HandleFunc("POST /api/video/discover", handleVideoDiscover(ytKey, mongoDB))
-	mux.HandleFunc("POST /api/video/analyze", handleVideoAnalyze(apiKey, ytKey, mongoDB))
-	mux.HandleFunc("GET /api/video/analyses/{domain}/details", handleGetVideoDetails(mongoDB))
-	mux.HandleFunc("GET /api/video/analyses/{domain}", handleGetVideoAnalysis(mongoDB))
-	mux.HandleFunc("GET /api/video/analyses", handleListVideoAnalyses(mongoDB))
-	mux.HandleFunc("DELETE /api/video/analyses/{domain}", handleDeleteVideoAnalysis(mongoDB))
 	mux.HandleFunc("OPTIONS /api/video/discover", handleOptions)
 	mux.HandleFunc("OPTIONS /api/video/analyze", handleOptions)
 	mux.HandleFunc("OPTIONS /api/video/analyses/{domain}/details", handleOptions)
 	mux.HandleFunc("OPTIONS /api/video/analyses/{domain}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/video/analyses", handleOptions)
+	mux.HandleFunc("OPTIONS /api/todos/archive", handleOptions)
 
-	// Serve frontend static files if available
+	// SaaS frontend: serve LastSaaS auth/admin pages when configured
+	if saasFrontendDir := os.Getenv("LLMOPT_FRONTEND_DIR"); saasFrontendDir != "" {
+		if info, statErr := os.Stat(saasFrontendDir); statErr == nil && info.IsDir() {
+			log.Printf("Serving SaaS frontend from %s", saasFrontendDir)
+			saasSPA := &spaHandler{staticPath: saasFrontendDir, indexPath: "index.html"}
+			// Auth pages at root level
+			for _, p := range []string{"/login", "/signup", "/forgot-password", "/reset-password", "/verify-email", "/auth/callback", "/auth/mfa", "/auth/magic-link", "/setup"} {
+				mux.Handle(p, saasSPA)
+			}
+			// Admin/team/settings under /last/ — StripPrefix so asset paths
+			// (e.g. /last/assets/index-ABC.js) resolve correctly in the SPA dir
+			mux.Handle("/last/", http.StripPrefix("/last", saasSPA))
+		}
+	}
+
+	// Serve main frontend static files if available
 	staticDir := os.Getenv("STATIC_DIR")
 	if staticDir == "" {
 		staticDir = "../frontend/dist"
@@ -199,13 +260,48 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Tenant-ID")
 		next.ServeHTTP(w, r)
 	})
 }
 
+// tenantFilter appends a tenantId filter element when running in SaaS mode.
+// In non-SaaS mode (no tenant in context), returns the filter unchanged.
+func tenantFilter(ctx context.Context, filter bson.D) bson.D {
+	if tid := saas.TenantIDFromContext(ctx); tid != "" {
+		return append(filter, bson.E{Key: "tenantId", Value: tid})
+	}
+	return filter
+}
+
 func handleOptions(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
+}
+
+// generateShareID returns a 12-character base62 string using crypto/rand.
+func generateShareID() string {
+	const charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	b := make([]byte, 12)
+	for i := range b {
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		b[i] = charset[n.Int64()]
+	}
+	return string(b)
+}
+
+// isShareAdmin checks if the current user is an owner or admin of their tenant.
+func isShareAdmin(ctx context.Context) bool {
+	role := saas.MemberRoleFromContext(ctx)
+	return role == "owner" || role == "admin"
+}
+
+// isRootShareAdmin checks if the user is an owner/admin of the root tenant.
+func isRootShareAdmin(ctx context.Context) bool {
+	if !isShareAdmin(ctx) {
+		return false
+	}
+	tenant := saas.TenantFromContext(ctx)
+	return tenant != nil && tenant.IsRoot
 }
 
 // spaHandler serves static files with SPA fallback to index.html.
@@ -249,6 +345,7 @@ func saveAndSendDone(w http.ResponseWriter, flusher http.Flusher, ctx context.Co
 	if err := json.Unmarshal([]byte(resultJSON), &analysisResult); err == nil {
 		analysis := Analysis{
 			Domain:                domain,
+			TenantID:              saas.TenantIDFromContext(ctx),
 			RawText:               rawText,
 			Result:                analysisResult,
 			Model:                 model,
@@ -676,10 +773,11 @@ func handleAnalyze(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 		if !req.Force {
 			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 			var cached Analysis
-			err := mongoDB.Analyses().FindOne(ctx, bson.D{
+			cacheFilter := tenantFilter(r.Context(), bson.D{
 				{Key: "domain", Value: req.URL},
 				{Key: "createdAt", Value: bson.D{{Key: "$gt", Value: time.Now().AddDate(0, 0, -30)}}},
-			}, options.FindOne().SetSort(bson.D{{Key: "createdAt", Value: -1}})).Decode(&cached)
+			})
+			err := mongoDB.Analyses().FindOne(ctx, cacheFilter, options.FindOne().SetSort(bson.D{{Key: "createdAt", Value: -1}})).Decode(&cached)
 			cancel()
 
 			if err == nil {
@@ -704,7 +802,7 @@ func handleAnalyze(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 			"message": "Starting analysis of " + req.URL + "...",
 		})
 
-		brandInfo := lookupBrandContext(mongoDB, req.URL)
+		brandInfo := lookupBrandContext(mongoDB, req.URL, saas.TenantIDFromContext(r.Context()))
 
 		brandInstructions := ""
 		if brandInfo.Used {
@@ -845,10 +943,10 @@ func handleListAnalyses(mongoDB *MongoDB) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		filter := bson.D{}
+		filter := tenantFilter(r.Context(), bson.D{})
 		sort := bson.D{{Key: "createdAt", Value: -1}}
 		if domain := r.URL.Query().Get("domain"); domain != "" {
-			filter = bson.D{{Key: "domain", Value: normalizeDomain(domain)}}
+			filter = append(filter, bson.E{Key: "domain", Value: normalizeDomain(domain)})
 			// When filtering by domain, sort brand-intel reports first, then by date
 			sort = bson.D{{Key: "brandContextUsed", Value: -1}, {Key: "createdAt", Value: -1}}
 		}
@@ -913,7 +1011,7 @@ func handleGetAnalysis(mongoDB *MongoDB) http.HandlerFunc {
 		defer cancel()
 
 		var analysis Analysis
-		err = mongoDB.Analyses().FindOne(ctx, bson.D{{Key: "_id", Value: oid}}).Decode(&analysis)
+		err = mongoDB.Analyses().FindOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "_id", Value: oid}})).Decode(&analysis)
 		if err == mongo.ErrNoDocuments {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
@@ -1121,7 +1219,7 @@ func handleOptimize(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 		// Load parent analysis
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		var analysis Analysis
-		err = mongoDB.Analyses().FindOne(ctx, bson.D{{Key: "_id", Value: analysisOID}}).Decode(&analysis)
+		err = mongoDB.Analyses().FindOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "_id", Value: analysisOID}})).Decode(&analysis)
 		cancel()
 		if err != nil {
 			sendSSE(w, flusher, "error", map[string]string{"message": "Analysis not found"})
@@ -1139,11 +1237,12 @@ func handleOptimize(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 		if !req.Force {
 			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 			var cached Optimization
-			err := mongoDB.Optimizations().FindOne(ctx, bson.D{
+			optCacheFilter := tenantFilter(r.Context(), bson.D{
 				{Key: "analysisId", Value: analysisOID},
 				{Key: "questionIndex", Value: questionIdx},
 				{Key: "createdAt", Value: bson.D{{Key: "$gt", Value: time.Now().AddDate(0, 0, -30)}}},
-			}, options.FindOne().SetSort(bson.D{{Key: "createdAt", Value: -1}})).Decode(&cached)
+			})
+			err := mongoDB.Optimizations().FindOne(ctx, optCacheFilter, options.FindOne().SetSort(bson.D{{Key: "createdAt", Value: -1}})).Decode(&cached)
 			cancel()
 
 			if err == nil {
@@ -1167,7 +1266,7 @@ func handleOptimize(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 			"message": "Starting optimization analysis for: " + question.Question,
 		})
 
-		optBrandInfo := lookupBrandContext(mongoDB, analysis.Domain)
+		optBrandInfo := lookupBrandContext(mongoDB, analysis.Domain, saas.TenantIDFromContext(r.Context()))
 
 		pageURLsList := strings.Join(question.PageURLs, "\n- ")
 		if pageURLsList != "" {
@@ -1341,6 +1440,7 @@ Be specific and evidence-based in your scoring. Reference actual content you fou
 					QuestionIndex:         questionIdx,
 					Question:              question.Question,
 					Domain:                analysis.Domain,
+					TenantID:              saas.TenantIDFromContext(r.Context()),
 					PageURLs:              question.PageURLs,
 					Result:                optResult,
 					RawText:               result.rawText,
@@ -1356,7 +1456,7 @@ Be specific and evidence-based in your scoring. Reference actual content you fou
 					log.Printf("Failed to save optimization: %v", insertErr)
 				} else if oid, ok := insertResult.InsertedID.(primitive.ObjectID); ok {
 					savedID = oid.Hex()
-					go createTodosFromOptimization(mongoDB, oid, analysisOID, analysis.Domain, question.Question, optResult)
+					go createTodosFromOptimization(mongoDB, oid, analysisOID, analysis.Domain, question.Question, saas.TenantIDFromContext(r.Context()), optResult)
 				}
 
 				sendSSE(w, flusher, "done", map[string]any{
@@ -1401,10 +1501,10 @@ func handleGetOptimization(mongoDB *MongoDB) http.HandlerFunc {
 		defer cancel()
 
 		var opt Optimization
-		err = mongoDB.Optimizations().FindOne(ctx, bson.D{
+		err = mongoDB.Optimizations().FindOne(ctx, tenantFilter(r.Context(), bson.D{
 			{Key: "analysisId", Value: analysisOID},
 			{Key: "questionIndex", Value: questionIdx},
-		}, options.FindOne().SetSort(bson.D{{Key: "createdAt", Value: -1}})).Decode(&opt)
+		}), options.FindOne().SetSort(bson.D{{Key: "createdAt", Value: -1}})).Decode(&opt)
 		if err == mongo.ErrNoDocuments {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
@@ -1430,6 +1530,7 @@ func handleListOptimizations(mongoDB *MongoDB) http.HandlerFunc {
 			SetProjection(bson.D{
 				{Key: "domain", Value: 1},
 				{Key: "question", Value: 1},
+				{Key: "questionIndex", Value: 1},
 				{Key: "result.overallScore", Value: 1},
 				{Key: "model", Value: 1},
 				{Key: "public", Value: 1},
@@ -1439,7 +1540,7 @@ func handleListOptimizations(mongoDB *MongoDB) http.HandlerFunc {
 				{Key: "createdAt", Value: 1},
 			})
 
-		cursor, err := mongoDB.Optimizations().Find(ctx, bson.D{}, opts)
+		cursor, err := mongoDB.Optimizations().Find(ctx, tenantFilter(r.Context(), bson.D{}), opts)
 		if err != nil {
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -1458,6 +1559,7 @@ func handleListOptimizations(mongoDB *MongoDB) http.HandlerFunc {
 				ID:                    o.ID,
 				Domain:                o.Domain,
 				Question:              o.Question,
+				QuestionIndex:         o.QuestionIndex,
 				OverallScore:          o.Result.OverallScore,
 				Model:                 o.Model,
 				Public:                o.Public,
@@ -1486,7 +1588,7 @@ func handleGetOptimizationByID(mongoDB *MongoDB) http.HandlerFunc {
 		defer cancel()
 
 		var opt Optimization
-		err = mongoDB.Optimizations().FindOne(ctx, bson.D{{Key: "_id", Value: oid}}).Decode(&opt)
+		err = mongoDB.Optimizations().FindOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "_id", Value: oid}})).Decode(&opt)
 		if err == mongo.ErrNoDocuments {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
@@ -1521,7 +1623,7 @@ func todoSummary(action, impact string) string {
 	return a
 }
 
-func createTodosFromOptimization(mongoDB *MongoDB, optimizationID, analysisID primitive.ObjectID, domain, question string, result OptimizationResult) {
+func createTodosFromOptimization(mongoDB *MongoDB, optimizationID, analysisID primitive.ObjectID, domain, question, tenantID string, result OptimizationResult) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -1536,6 +1638,7 @@ func createTodosFromOptimization(mongoDB *MongoDB, optimizationID, analysisID pr
 			OptimizationID: optimizationID,
 			AnalysisID:     analysisID,
 			Domain:         domain,
+			TenantID:       tenantID,
 			Question:       question,
 			Action:         rec.Action,
 			Summary:        todoSummary(rec.Action, rec.ExpectedImpact),
@@ -1553,7 +1656,7 @@ func createTodosFromOptimization(mongoDB *MongoDB, optimizationID, analysisID pr
 	}
 }
 
-func createTodosFromVideoAnalysis(mongoDB *MongoDB, videoAnalysisID primitive.ObjectID, domain string, recommendations []VideoRecommendation) {
+func createTodosFromVideoAnalysis(mongoDB *MongoDB, videoAnalysisID primitive.ObjectID, domain, tenantID string, recommendations []VideoRecommendation) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -1584,6 +1687,7 @@ func createTodosFromVideoAnalysis(mongoDB *MongoDB, videoAnalysisID primitive.Ob
 			VideoAnalysisID: &videoAnalysisID,
 			SourceType:      "video",
 			Domain:          domain,
+			TenantID:        tenantID,
 			Question:        question,
 			Action:          rec.Action,
 			Summary:         todoSummary(rec.Action, rec.ExpectedImpact),
@@ -1606,7 +1710,7 @@ func handleListTodos(mongoDB *MongoDB) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		filter := bson.D{}
+		filter := tenantFilter(r.Context(), bson.D{})
 		if status := r.URL.Query().Get("status"); status != "" {
 			filter = append(filter, bson.E{Key: "status", Value: status})
 		}
@@ -1722,7 +1826,7 @@ func handleUpdateTodo(mongoDB *MongoDB) http.HandlerFunc {
 			}
 		}
 
-		result, err := mongoDB.Todos().UpdateByID(ctx, oid, update)
+		result, err := mongoDB.Todos().UpdateOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "_id", Value: oid}}), update)
 		if err != nil {
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -1753,10 +1857,10 @@ func handleBulkArchiveTodos(mongoDB *MongoDB) http.HandlerFunc {
 		defer cancel()
 
 		now := time.Now()
-		filter := bson.D{
+		filter := tenantFilter(r.Context(), bson.D{
 			{Key: "domain", Value: req.Domain},
 			{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"todo", "backlogged"}}}},
-		}
+		})
 		if req.SourceType == "video" {
 			filter = append(filter, bson.E{Key: "sourceType", Value: "video"})
 		} else if req.SourceType == "optimization" && req.Question != "" {
@@ -1787,196 +1891,298 @@ func handleBulkArchiveTodos(mongoDB *MongoDB) http.HandlerFunc {
 	}
 }
 
-func handleTogglePublic(mongoDB *MongoDB) http.HandlerFunc {
+// handleGetDomainShare returns the current share state for a domain.
+func handleGetDomainShare(mongoDB *MongoDB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		idStr := r.PathValue("id")
-		oid, err := primitive.ObjectIDFromHex(idStr)
+		domain := normalizeDomain(r.PathValue("domain"))
+		tenantID := saas.TenantIDFromContext(r.Context())
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		var ds DomainShare
+		err := mongoDB.DomainShares().FindOne(ctx, bson.M{
+			"tenantId": tenantID,
+			"domain":   domain,
+		}).Decode(&ds)
+		if err == mongo.ErrNoDocuments {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"visibility": "private",
+				"share_id":   "",
+				"share_url":  "",
+			})
+			return
+		}
 		if err != nil {
-			http.Error(w, "Invalid ID", http.StatusBadRequest)
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		shareURL := ""
+		if ds.ShareID != "" {
+			shareURL = "/share/" + ds.ShareID
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"visibility": ds.Visibility,
+			"share_id":   ds.ShareID,
+			"share_url":  shareURL,
+		})
+	}
+}
+
+// handleSetDomainShare sets the sharing visibility for a domain.
+func handleSetDomainShare(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := normalizeDomain(r.PathValue("domain"))
+		tenantID := saas.TenantIDFromContext(r.Context())
+
+		if !isShareAdmin(r.Context()) {
+			http.Error(w, `{"error":"must be owner or admin to share"}`, http.StatusForbidden)
 			return
 		}
 
 		var req struct {
-			Public bool `json:"public"`
+			Visibility string `json:"visibility"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+
+		if req.Visibility != "private" && req.Visibility != "public" && req.Visibility != "popular" {
+			http.Error(w, `{"error":"visibility must be private, public, or popular"}`, http.StatusBadRequest)
+			return
+		}
+
+		if req.Visibility == "popular" && !isRootShareAdmin(r.Context()) {
+			http.Error(w, `{"error":"only root tenant admins can mark domains as popular"}`, http.StatusForbidden)
 			return
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		result, err := mongoDB.Optimizations().UpdateByID(ctx, oid, bson.D{
-			{Key: "$set", Value: bson.D{{Key: "public", Value: req.Public}}},
+		// Verify the tenant actually has data for this domain
+		count, err := mongoDB.Analyses().CountDocuments(ctx, bson.M{"tenantId": tenantID, "domain": domain})
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+		if count == 0 {
+			// Also check optimizations and brand profiles
+			count, _ = mongoDB.Optimizations().CountDocuments(ctx, bson.M{"tenantId": tenantID, "domain": domain})
+			if count == 0 {
+				count, _ = mongoDB.BrandProfiles().CountDocuments(ctx, bson.M{"tenantId": tenantID, "domain": domain})
+			}
+		}
+		if count == 0 {
+			http.Error(w, `{"error":"no data found for this domain"}`, http.StatusNotFound)
+			return
+		}
+
+		now := time.Now()
+		shareID := ""
+		if req.Visibility == "public" || req.Visibility == "popular" {
+			shareID = generateShareID()
+		}
+
+		filter := bson.M{"tenantId": tenantID, "domain": domain}
+		update := bson.M{
+			"$set": bson.M{
+				"visibility": req.Visibility,
+				"shareId":    shareID,
+				"updatedAt":  now,
+			},
+			"$setOnInsert": bson.M{
+				"tenantId":  tenantID,
+				"domain":    domain,
+				"createdAt": now,
+			},
+		}
+		opts := options.Update().SetUpsert(true)
+		_, err = mongoDB.DomainShares().UpdateOne(ctx, filter, update, opts)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		shareURL := ""
+		if shareID != "" {
+			shareURL = "/share/" + shareID
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"visibility": req.Visibility,
+			"share_id":   shareID,
+			"share_url":  shareURL,
 		})
-		if err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
-			return
-		}
-		if result.MatchedCount == 0 {
-			http.Error(w, "Not found", http.StatusNotFound)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"status": "ok", "public": req.Public})
 	}
 }
 
-func handleListPublicReports(mongoDB *MongoDB) http.HandlerFunc {
+// handleGetSharedDomain returns all domain data for a public/popular share link.
+func handleGetSharedDomain(mongoDB *MongoDB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		shareID := r.PathValue("shareId")
+
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
 
-		opts := options.Find().
-			SetSort(bson.D{{Key: "createdAt", Value: -1}}).
-			SetLimit(20).
-			SetProjection(bson.D{
-				{Key: "domain", Value: 1},
-				{Key: "question", Value: 1},
-				{Key: "result.overallScore", Value: 1},
-				{Key: "model", Value: 1},
-				{Key: "brandContextUsed", Value: 1},
-				{Key: "brandProfileUpdatedAt", Value: 1},
-				{Key: "createdAt", Value: 1},
-			})
-
-		cursor, err := mongoDB.Optimizations().Find(ctx, bson.D{
-			{Key: "public", Value: true},
-		}, opts)
-		if err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
+		var ds DomainShare
+		err := mongoDB.DomainShares().FindOne(ctx, bson.M{
+			"shareId":    shareID,
+			"visibility": bson.M{"$in": []string{"public", "popular"}},
+		}).Decode(&ds)
+		if err == mongo.ErrNoDocuments {
+			http.Error(w, `{"error":"share not found"}`, http.StatusNotFound)
 			return
 		}
-		defer cursor.Close(ctx)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
 
+		tenantDomain := bson.M{"tenantId": ds.TenantID, "domain": ds.Domain}
+
+		// Fetch analyses (limit 20, newest first)
+		var analyses []Analysis
+		analysisCur, err := mongoDB.Analyses().Find(ctx, tenantDomain,
+			options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(20))
+		if err == nil {
+			analysisCur.All(ctx, &analyses)
+			analysisCur.Close(ctx)
+		}
+		// Strip rawText
+		for i := range analyses {
+			analyses[i].RawText = ""
+		}
+
+		// Fetch optimizations (limit 50, newest first)
 		var optimizations []Optimization
-		if err := cursor.All(ctx, &optimizations); err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
-			return
+		optCur, err := mongoDB.Optimizations().Find(ctx, tenantDomain,
+			options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(50))
+		if err == nil {
+			optCur.All(ctx, &optimizations)
+			optCur.Close(ctx)
+		}
+		// Strip rawText
+		for i := range optimizations {
+			optimizations[i].RawText = ""
 		}
 
-		summaries := make([]OptimizationSummary, len(optimizations))
-		for i, o := range optimizations {
-			summaries[i] = OptimizationSummary{
-				ID:                    o.ID,
-				Domain:                o.Domain,
-				Question:              o.Question,
-				OverallScore:          o.Result.OverallScore,
-				Model:                 o.Model,
-				Public:                true,
-				BrandContextUsed:      o.BrandContextUsed,
-				BrandProfileUpdatedAt: o.BrandProfileUpdatedAt,
-				CreatedAt:             o.CreatedAt,
-			}
+		// Fetch brand profile
+		var brandProfile *BrandProfile
+		var bp BrandProfile
+		if err := mongoDB.BrandProfiles().FindOne(ctx, tenantDomain).Decode(&bp); err == nil {
+			brandProfile = &bp
+		}
+
+		// Fetch video analysis
+		var videoAnalysis *VideoAnalysis
+		var va VideoAnalysis
+		if err := mongoDB.VideoAnalyses().FindOne(ctx, tenantDomain).Decode(&va); err == nil {
+			va.RawText = ""
+			videoAnalysis = &va
+		}
+
+		// Fetch todos (status=todo, limit 100)
+		var todos []TodoItem
+		todoFilter := bson.M{"tenantId": ds.TenantID, "domain": ds.Domain, "status": "todo"}
+		todoCur, err := mongoDB.Todos().Find(ctx, todoFilter,
+			options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(100))
+		if err == nil {
+			todoCur.All(ctx, &todos)
+			todoCur.Close(ctx)
+		}
+
+		// Fetch domain summary
+		var domainSummary *DomainSummary
+		var dsm DomainSummary
+		if err := mongoDB.DomainSummaries().FindOne(ctx, tenantDomain).Decode(&dsm); err == nil {
+			dsm.RawText = ""
+			domainSummary = &dsm
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(summaries)
+		json.NewEncoder(w).Encode(map[string]any{
+			"domain":         ds.Domain,
+			"visibility":     ds.Visibility,
+			"analyses":       analyses,
+			"optimizations":  optimizations,
+			"brand_profile":  brandProfile,
+			"video_analysis": videoAnalysis,
+			"todos":          todos,
+			"domain_summary": domainSummary,
+		})
 	}
 }
 
-func handleGetPublicReport(mongoDB *MongoDB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		idStr := r.PathValue("id")
-		oid, err := primitive.ObjectIDFromHex(idStr)
-		if err != nil {
-			http.Error(w, "Invalid ID", http.StatusBadRequest)
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-
-		var opt Optimization
-		err = mongoDB.Optimizations().FindOne(ctx, bson.D{
-			{Key: "_id", Value: oid},
-			{Key: "public", Value: true},
-		}).Decode(&opt)
-		if err == mongo.ErrNoDocuments {
-			http.Error(w, "Not found", http.StatusNotFound)
-			return
-		}
-		if err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
-			return
-		}
-
-		// Strip raw_text from public reports for privacy
-		opt.RawText = ""
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(opt)
-	}
-}
-
-func handleListPublicBrands(mongoDB *MongoDB) http.HandlerFunc {
+// handleGetPopularDomains returns all domains marked as "popular".
+func handleGetPopularDomains(mongoDB *MongoDB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		opts := options.Find().
-			SetSort(bson.D{{Key: "updatedAt", Value: -1}}).
-			SetLimit(20)
-
-		cursor, err := mongoDB.BrandProfiles().Find(ctx, bson.D{
-			{Key: "public", Value: true},
-		}, opts)
+		cursor, err := mongoDB.DomainShares().Find(ctx, bson.M{"visibility": "popular"})
 		if err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
 			return
 		}
 		defer cursor.Close(ctx)
 
-		var profiles []BrandProfile
-		if err := cursor.All(ctx, &profiles); err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
+		var shares []DomainShare
+		if err := cursor.All(ctx, &shares); err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
 			return
 		}
 
-		summaries := make([]BrandProfileSummary, len(profiles))
-		for i, p := range profiles {
-			summaries[i] = BrandProfileSummary{
-				ID:              p.ID,
-				Domain:          p.Domain,
-				BrandName:       p.BrandName,
-				CompetitorCount: len(p.Competitors),
-				QueryCount:      len(p.TargetQueries),
-				Completeness:    computeBrandCompleteness(p),
-				Public:          true,
-				UpdatedAt:       p.UpdatedAt,
+		type PopularDomain struct {
+			Domain      string `json:"domain"`
+			BrandName   string `json:"brand_name"`
+			ShareID     string `json:"share_id"`
+			AvgScore    int    `json:"avg_score"`
+			ReportCount int    `json:"report_count"`
+		}
+
+		results := make([]PopularDomain, 0, len(shares))
+		for _, s := range shares {
+			pd := PopularDomain{
+				Domain:  s.Domain,
+				ShareID: s.ShareID,
 			}
+
+			// Get brand name
+			var bp BrandProfile
+			if err := mongoDB.BrandProfiles().FindOne(ctx, bson.M{"tenantId": s.TenantID, "domain": s.Domain}).Decode(&bp); err == nil {
+				pd.BrandName = bp.BrandName
+			}
+
+			// Get report count and avg score
+			optFilter := bson.M{"tenantId": s.TenantID, "domain": s.Domain}
+			optCur, err := mongoDB.Optimizations().Find(ctx, optFilter,
+				options.Find().SetProjection(bson.M{"result.overallScore": 1}))
+			if err == nil {
+				var opts []Optimization
+				optCur.All(ctx, &opts)
+				optCur.Close(ctx)
+				pd.ReportCount = len(opts)
+				if len(opts) > 0 {
+					total := 0
+					for _, o := range opts {
+						total += o.Result.OverallScore
+					}
+					pd.AvgScore = total / len(opts)
+				}
+			}
+
+			results = append(results, pd)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(summaries)
-	}
-}
-
-func handleGetPublicBrand(mongoDB *MongoDB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		domain := normalizeDomain(r.PathValue("domain"))
-
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-
-		var profile BrandProfile
-		err := mongoDB.BrandProfiles().FindOne(ctx, bson.D{
-			{Key: "domain", Value: domain},
-			{Key: "public", Value: true},
-		}).Decode(&profile)
-		if err == mongo.ErrNoDocuments {
-			http.Error(w, "Not found", http.StatusNotFound)
-			return
-		}
-		if err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(profile)
+		json.NewEncoder(w).Encode(results)
 	}
 }
 
@@ -1991,7 +2197,7 @@ func handleListBrands(mongoDB *MongoDB) http.HandlerFunc {
 			SetSort(bson.D{{Key: "updatedAt", Value: -1}}).
 			SetLimit(50)
 
-		cursor, err := mongoDB.BrandProfiles().Find(ctx, bson.D{}, opts)
+		cursor, err := mongoDB.BrandProfiles().Find(ctx, tenantFilter(r.Context(), bson.D{}), opts)
 		if err != nil {
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -2031,7 +2237,7 @@ func handleGetBrand(mongoDB *MongoDB) http.HandlerFunc {
 		defer cancel()
 
 		var profile BrandProfile
-		err := mongoDB.BrandProfiles().FindOne(ctx, bson.D{{Key: "domain", Value: domain}}).Decode(&profile)
+		err := mongoDB.BrandProfiles().FindOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})).Decode(&profile)
 		if err == mongo.ErrNoDocuments {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
@@ -2060,6 +2266,7 @@ func handleSaveBrand(mongoDB *MongoDB) http.HandlerFunc {
 		defer cancel()
 
 		now := time.Now()
+		tid := saas.TenantIDFromContext(r.Context())
 		update := bson.D{
 			{Key: "$set", Value: bson.D{
 				{Key: "domain", Value: domain},
@@ -2080,11 +2287,13 @@ func handleSaveBrand(mongoDB *MongoDB) http.HandlerFunc {
 			}},
 			{Key: "$setOnInsert", Value: bson.D{
 				{Key: "createdAt", Value: now},
+				{Key: "tenantId", Value: tid},
 			}},
 		}
 
+		brandFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
 		opts := options.Update().SetUpsert(true)
-		result, err := mongoDB.BrandProfiles().UpdateOne(ctx, bson.D{{Key: "domain", Value: domain}}, update, opts)
+		result, err := mongoDB.BrandProfiles().UpdateOne(ctx, brandFilter, update, opts)
 		if err != nil {
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -2092,7 +2301,7 @@ func handleSaveBrand(mongoDB *MongoDB) http.HandlerFunc {
 
 		// Fetch the saved profile to return it
 		var saved BrandProfile
-		err = mongoDB.BrandProfiles().FindOne(ctx, bson.D{{Key: "domain", Value: domain}}).Decode(&saved)
+		err = mongoDB.BrandProfiles().FindOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})).Decode(&saved)
 		if err != nil {
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -2113,7 +2322,7 @@ func handleDeleteBrand(mongoDB *MongoDB) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		result, err := mongoDB.BrandProfiles().DeleteOne(ctx, bson.D{{Key: "domain", Value: domain}})
+		result, err := mongoDB.BrandProfiles().DeleteOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}}))
 		if err != nil {
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -2165,7 +2374,7 @@ func handleDeleteAnalysis(mongoDB *MongoDB) http.HandlerFunc {
 		mongoDB.Optimizations().DeleteMany(ctx, bson.D{{Key: "analysisId", Value: oid}})
 
 		// Delete the analysis itself
-		result, err := mongoDB.Analyses().DeleteOne(ctx, bson.D{{Key: "_id", Value: oid}})
+		result, err := mongoDB.Analyses().DeleteOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "_id", Value: oid}}))
 		if err != nil {
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -2196,7 +2405,7 @@ func handleDeleteOptimization(mongoDB *MongoDB) http.HandlerFunc {
 		mongoDB.Todos().DeleteMany(ctx, bson.D{{Key: "optimizationId", Value: oid}})
 
 		// Delete the optimization itself
-		result, err := mongoDB.Optimizations().DeleteOne(ctx, bson.D{{Key: "_id", Value: oid}})
+		result, err := mongoDB.Optimizations().DeleteOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "_id", Value: oid}}))
 		if err != nil {
 			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
@@ -2293,11 +2502,12 @@ func handleDomainSummaryStatus(mongoDB *MongoDB) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
+		domainFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
 		var summary DomainSummary
-		err := mongoDB.DomainSummaries().FindOne(ctx, bson.D{{Key: "domain", Value: domain}}).Decode(&summary)
+		err := mongoDB.DomainSummaries().FindOne(ctx, domainFilter).Decode(&summary)
 
 		if err == mongo.ErrNoDocuments {
-			count, _ := mongoDB.Optimizations().CountDocuments(ctx, bson.D{{Key: "domain", Value: domain}})
+			count, _ := mongoDB.Optimizations().CountDocuments(ctx, domainFilter)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
 				"exists":             false,
@@ -2310,11 +2520,11 @@ func handleDomainSummaryStatus(mongoDB *MongoDB) http.HandlerFunc {
 			return
 		}
 
-		newerCount, _ := mongoDB.Optimizations().CountDocuments(ctx, bson.D{
+		newerCount, _ := mongoDB.Optimizations().CountDocuments(ctx, tenantFilter(r.Context(), bson.D{
 			{Key: "domain", Value: domain},
 			{Key: "createdAt", Value: bson.D{{Key: "$gt", Value: summary.GeneratedAt}}},
-		})
-		totalCount, _ := mongoDB.Optimizations().CountDocuments(ctx, bson.D{{Key: "domain", Value: domain}})
+		}))
+		totalCount, _ := mongoDB.Optimizations().CountDocuments(ctx, domainFilter)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -2334,8 +2544,9 @@ func handleGetDomainSummary(mongoDB *MongoDB) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
+		domainFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
 		var summary DomainSummary
-		err := mongoDB.DomainSummaries().FindOne(ctx, bson.D{{Key: "domain", Value: domain}}).Decode(&summary)
+		err := mongoDB.DomainSummaries().FindOne(ctx, domainFilter).Decode(&summary)
 		if err == mongo.ErrNoDocuments {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
@@ -2345,10 +2556,10 @@ func handleGetDomainSummary(mongoDB *MongoDB) http.HandlerFunc {
 			return
 		}
 
-		newerCount, _ := mongoDB.Optimizations().CountDocuments(ctx, bson.D{
+		newerCount, _ := mongoDB.Optimizations().CountDocuments(ctx, tenantFilter(r.Context(), bson.D{
 			{Key: "domain", Value: domain},
 			{Key: "createdAt", Value: bson.D{{Key: "$gt", Value: summary.GeneratedAt}}},
-		})
+		}))
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -2375,9 +2586,9 @@ func handleGenerateDomainSummary(apiKey string, mongoDB *MongoDB) http.HandlerFu
 
 		// Load all optimizations for this domain (max 30)
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-		cursor, err := mongoDB.Optimizations().Find(ctx, bson.D{
+		cursor, err := mongoDB.Optimizations().Find(ctx, tenantFilter(r.Context(), bson.D{
 			{Key: "domain", Value: domain},
-		}, options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(30))
+		}), options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(30))
 		cancel()
 		if err != nil {
 			sendSSE(w, flusher, "error", map[string]string{"message": "Failed to load optimizations"})
@@ -2397,7 +2608,7 @@ func handleGenerateDomainSummary(apiKey string, mongoDB *MongoDB) http.HandlerFu
 			return
 		}
 
-		brandInfo := lookupBrandContext(mongoDB, domain)
+		brandInfo := lookupBrandContext(mongoDB, domain, saas.TenantIDFromContext(r.Context()))
 
 		sendSSE(w, flusher, "status", map[string]string{
 			"message": fmt.Sprintf("Synthesizing %d optimization reports for %s...", len(optimizations), domain),
@@ -2475,6 +2686,7 @@ func handleGenerateDomainSummary(apiKey string, mongoDB *MongoDB) http.HandlerFu
 
 				summary := DomainSummary{
 					Domain:          domain,
+					TenantID:        saas.TenantIDFromContext(r.Context()),
 					Result:          summaryResult,
 					RawText:         result.rawText,
 					Model:           model.name,
@@ -2485,7 +2697,7 @@ func handleGenerateDomainSummary(apiKey string, mongoDB *MongoDB) http.HandlerFu
 
 				saveCtx, saveCancel := context.WithTimeout(r.Context(), 10*time.Second)
 				_, saveErr := mongoDB.DomainSummaries().ReplaceOne(saveCtx,
-					bson.D{{Key: "domain", Value: domain}},
+					tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}}),
 					summary,
 					options.Replace().SetUpsert(true),
 				)
@@ -2530,7 +2742,7 @@ func handleDiscoverCompetitors(apiKey string, mongoDB *MongoDB) http.HandlerFunc
 		// Load existing brand profile for context (optional)
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		var brand BrandProfile
-		brandErr := mongoDB.BrandProfiles().FindOne(ctx, bson.D{{Key: "domain", Value: domain}}).Decode(&brand)
+		brandErr := mongoDB.BrandProfiles().FindOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})).Decode(&brand)
 		cancel()
 
 		brandContext := ""
@@ -2673,7 +2885,7 @@ func handleSuggestQueries(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 		// Load brand profile for context
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		var brand BrandProfile
-		brandErr := mongoDB.BrandProfiles().FindOne(ctx, bson.D{{Key: "domain", Value: domain}}).Decode(&brand)
+		brandErr := mongoDB.BrandProfiles().FindOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})).Decode(&brand)
 		cancel()
 
 		if brandErr != nil {
@@ -2924,7 +3136,7 @@ func handlePredictAudience(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 		// Load existing brand profile for context
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		var brand BrandProfile
-		brandErr := mongoDB.BrandProfiles().FindOne(ctx, bson.D{{Key: "domain", Value: domain}}).Decode(&brand)
+		brandErr := mongoDB.BrandProfiles().FindOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})).Decode(&brand)
 		cancel()
 
 		brandContext := ""
@@ -3051,7 +3263,7 @@ func handleSuggestClaims(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 		// Load existing brand profile for context
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		var brand BrandProfile
-		brandErr := mongoDB.BrandProfiles().FindOne(ctx, bson.D{{Key: "domain", Value: domain}}).Decode(&brand)
+		brandErr := mongoDB.BrandProfiles().FindOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})).Decode(&brand)
 		cancel()
 
 		brandContext := ""
@@ -3185,7 +3397,7 @@ func handlePredictDifferentiators(apiKey string, mongoDB *MongoDB) http.HandlerF
 		// Load existing brand profile for context (including competitors)
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		var brand BrandProfile
-		brandErr := mongoDB.BrandProfiles().FindOne(ctx, bson.D{{Key: "domain", Value: domain}}).Decode(&brand)
+		brandErr := mongoDB.BrandProfiles().FindOne(ctx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})).Decode(&brand)
 		cancel()
 
 		brandContext := ""
@@ -3629,7 +3841,7 @@ func handleVideoAnalyze(apiKey, ytKey string, mongoDB *MongoDB) http.HandlerFunc
 		}
 		req.Domain = normalizeDomain(req.Domain)
 
-		brandInfo := lookupBrandContext(mongoDB, req.Domain)
+		brandInfo := lookupBrandContext(mongoDB, req.Domain, saas.TenantIDFromContext(r.Context()))
 
 		// Phase 1: Gather video data
 		sendSSE(w, flusher, "status", map[string]string{
@@ -3840,7 +4052,7 @@ func handleVideoAnalyze(apiKey, ytKey string, mongoDB *MongoDB) http.HandlerFunc
 		if brandInfo.Used {
 			cCtx, cCancel := context.WithTimeout(r.Context(), 5*time.Second)
 			var brand BrandProfile
-			if err := mongoDB.BrandProfiles().FindOne(cCtx, bson.D{{Key: "domain", Value: req.Domain}}).Decode(&brand); err == nil {
+			if err := mongoDB.BrandProfiles().FindOne(cCtx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: req.Domain}})).Decode(&brand); err == nil {
 				for _, c := range brand.Competitors {
 					competitorNames = append(competitorNames, c.Name)
 				}
@@ -3893,6 +4105,7 @@ func handleVideoAnalyze(apiKey, ytKey string, mongoDB *MongoDB) http.HandlerFunc
 		// Save results
 		analysis := VideoAnalysis{
 			Domain:           req.Domain,
+			TenantID:         saas.TenantIDFromContext(r.Context()),
 			Config:           req.Config,
 			Videos:           videos,
 			Result:           &result,
@@ -3904,7 +4117,7 @@ func handleVideoAnalyze(apiKey, ytKey string, mongoDB *MongoDB) http.HandlerFunc
 
 		saveCtx, saveCancel := context.WithTimeout(r.Context(), 10*time.Second)
 		upsertResult, saveErr := mongoDB.VideoAnalyses().ReplaceOne(saveCtx,
-			bson.D{{Key: "domain", Value: req.Domain}},
+			tenantFilter(r.Context(), bson.D{{Key: "domain", Value: req.Domain}}),
 			analysis,
 			options.Replace().SetUpsert(true),
 		)
@@ -3921,13 +4134,13 @@ func handleVideoAnalyze(apiKey, ytKey string, mongoDB *MongoDB) http.HandlerFunc
 			} else {
 				fetchCtx, fetchCancel := context.WithTimeout(r.Context(), 5*time.Second)
 				var existing VideoAnalysis
-				if err := mongoDB.VideoAnalyses().FindOne(fetchCtx, bson.D{{Key: "domain", Value: req.Domain}}).Decode(&existing); err == nil {
+				if err := mongoDB.VideoAnalyses().FindOne(fetchCtx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: req.Domain}})).Decode(&existing); err == nil {
 					analysisID = existing.ID
 				}
 				fetchCancel()
 			}
 			if !analysisID.IsZero() {
-				go createTodosFromVideoAnalysis(mongoDB, analysisID, req.Domain, result.Recommendations)
+				go createTodosFromVideoAnalysis(mongoDB, analysisID, req.Domain, saas.TenantIDFromContext(r.Context()), result.Recommendations)
 			}
 		}
 
@@ -3956,7 +4169,7 @@ func handleGetVideoAnalysis(mongoDB *MongoDB) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		filter := bson.D{{Key: "domain", Value: domain}}
+		filter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
 		opts := options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}})
 
 		var analysis VideoAnalysis
@@ -3991,7 +4204,7 @@ func handleGetVideoDetails(mongoDB *MongoDB) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		filter := bson.D{{Key: "domain", Value: domain}}
+		filter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
 		opts := options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}})
 
 		var analysis VideoAnalysis
@@ -4052,7 +4265,7 @@ func handleListVideoAnalyses(mongoDB *MongoDB) http.HandlerFunc {
 				{Key: "result.topicalDominance.contentGaps", Value: 0},
 			})
 
-		cursor, err := mongoDB.VideoAnalyses().Find(ctx, bson.D{}, opts)
+		cursor, err := mongoDB.VideoAnalyses().Find(ctx, tenantFilter(r.Context(), bson.D{}), opts)
 		if err != nil {
 			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
 			return
@@ -4102,12 +4315,13 @@ func handleDeleteVideoAnalysis(mongoDB *MongoDB) http.HandlerFunc {
 		defer cancel()
 
 		// Find the analysis first to get its ID for cascade delete
+		delFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
 		var analysis struct {
 			ID primitive.ObjectID `bson:"_id"`
 		}
-		findErr := mongoDB.VideoAnalyses().FindOne(ctx, bson.D{{Key: "domain", Value: domain}}).Decode(&analysis)
+		findErr := mongoDB.VideoAnalyses().FindOne(ctx, delFilter).Decode(&analysis)
 
-		result, err := mongoDB.VideoAnalyses().DeleteOne(ctx, bson.D{{Key: "domain", Value: domain}})
+		result, err := mongoDB.VideoAnalyses().DeleteOne(ctx, delFilter)
 		if err != nil {
 			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
 			return
@@ -4133,13 +4347,18 @@ type BrandContextInfo struct {
 }
 
 // lookupBrandContext returns brand context for use in prompts. If no profile exists, returns empty info.
-func lookupBrandContext(mongoDB *MongoDB, domain string) BrandContextInfo {
+// tenantID is optional — when non-empty, filters brand profiles by tenant.
+func lookupBrandContext(mongoDB *MongoDB, domain, tenantID string) BrandContextInfo {
 	domain = normalizeDomain(domain)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	filter := bson.D{{Key: "domain", Value: domain}}
+	if tenantID != "" {
+		filter = append(filter, bson.E{Key: "tenantId", Value: tenantID})
+	}
 	var brand BrandProfile
-	err := mongoDB.BrandProfiles().FindOne(ctx, bson.D{{Key: "domain", Value: domain}}).Decode(&brand)
+	err := mongoDB.BrandProfiles().FindOne(ctx, filter).Decode(&brand)
 	if err != nil {
 		return BrandContextInfo{}
 	}

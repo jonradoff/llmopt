@@ -51,6 +51,7 @@ func (m *MongoDB) ensureIndexes() {
 	indexes := []mongo.IndexModel{
 		{Keys: bson.D{{Key: "domain", Value: 1}, {Key: "createdAt", Value: -1}}},
 		{Keys: bson.D{{Key: "createdAt", Value: -1}}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}, {Key: "createdAt", Value: -1}}},
 	}
 
 	_, err := m.Analyses().Indexes().CreateMany(ctx, indexes)
@@ -61,6 +62,7 @@ func (m *MongoDB) ensureIndexes() {
 	optIndexes := []mongo.IndexModel{
 		{Keys: bson.D{{Key: "analysisId", Value: 1}, {Key: "questionIndex", Value: 1}}},
 		{Keys: bson.D{{Key: "domain", Value: 1}, {Key: "createdAt", Value: -1}}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}, {Key: "createdAt", Value: -1}}},
 	}
 	_, err = m.Optimizations().Indexes().CreateMany(ctx, optIndexes)
 	if err != nil {
@@ -72,6 +74,7 @@ func (m *MongoDB) ensureIndexes() {
 		{Keys: bson.D{{Key: "optimizationId", Value: 1}}},
 		{Keys: bson.D{{Key: "domain", Value: 1}, {Key: "status", Value: 1}}},
 		{Keys: bson.D{{Key: "videoAnalysisId", Value: 1}}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "status", Value: 1}, {Key: "createdAt", Value: -1}}},
 	}
 	_, err = m.Todos().Indexes().CreateMany(ctx, todoIndexes)
 	if err != nil {
@@ -82,6 +85,7 @@ func (m *MongoDB) ensureIndexes() {
 		{Keys: bson.D{{Key: "domain", Value: 1}},
 			Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "updatedAt", Value: -1}}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
 	}
 	_, err = m.BrandProfiles().Indexes().CreateMany(ctx, brandIndexes)
 	if err != nil {
@@ -99,6 +103,7 @@ func (m *MongoDB) ensureIndexes() {
 	summaryIndexes := []mongo.IndexModel{
 		{Keys: bson.D{{Key: "domain", Value: 1}},
 			Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
 	}
 	_, err = m.DomainSummaries().Indexes().CreateMany(ctx, summaryIndexes)
 	if err != nil {
@@ -109,10 +114,23 @@ func (m *MongoDB) ensureIndexes() {
 		{Keys: bson.D{{Key: "domain", Value: 1}},
 			Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "generatedAt", Value: -1}}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
 	}
 	_, err = m.VideoAnalyses().Indexes().CreateMany(ctx, videoIndexes)
 	if err != nil {
 		log.Printf("Warning: failed to create indexes on video_analyses: %v", err)
+	}
+
+	shareIndexes := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}},
+			Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "shareId", Value: 1}},
+			Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.M{"shareId": bson.M{"$gt": ""}})},
+		{Keys: bson.D{{Key: "visibility", Value: 1}}},
+	}
+	_, err = m.DomainShares().Indexes().CreateMany(ctx, shareIndexes)
+	if err != nil {
+		log.Printf("Warning: failed to create indexes on domain_shares: %v", err)
 	}
 
 	cacheIndexes := []mongo.IndexModel{
@@ -157,6 +175,10 @@ func (m *MongoDB) VideoAnalyses() *mongo.Collection {
 
 func (m *MongoDB) YouTubeCache() *mongo.Collection {
 	return m.Database.Collection("youtube_cache")
+}
+
+func (m *MongoDB) DomainShares() *mongo.Collection {
+	return m.Database.Collection("domain_shares")
 }
 
 func (m *MongoDB) Close(ctx context.Context) error {

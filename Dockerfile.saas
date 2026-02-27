@@ -1,0 +1,94 @@
+# Dockerfile.saas — Multi-stage build for SaaS mode
+# Runs both llmopt and LastSaaS backends behind Caddy reverse proxy.
+#
+# Build: docker build -f Dockerfile.saas -t llmopt-saas .
+# Requires: lastsaas/ directory (run ./scripts/setup-saas.sh first)
+
+# ============================================================
+# Stage 1: Build llmopt Go binary
+# ============================================================
+FROM golang:1.24-alpine AS llmopt-builder
+WORKDIR /app
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
+COPY backend/ .
+RUN CGO_ENABLED=0 GOOS=linux go build -o llmopt .
+
+# ============================================================
+# Stage 2: Build LastSaaS Go binary
+# ============================================================
+FROM golang:1.25-bookworm AS lastsaas-builder
+WORKDIR /app
+COPY lastsaas/backend/go.mod lastsaas/backend/go.sum ./
+RUN go mod download
+COPY lastsaas/backend/ .
+COPY lastsaas/VERSION ./VERSION
+RUN CGO_ENABLED=0 go build -ldflags "-X lastsaas/internal/version.buildVersion=$(cat VERSION)" -o lastsaas ./cmd/server
+
+# ============================================================
+# Stage 3: Build llmopt frontend
+# ============================================================
+FROM node:22-alpine AS frontend-builder
+WORKDIR /build
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ .
+RUN npm run build
+
+# ============================================================
+# Stage 4: Build SaaS frontend (LastSaaS + llmopt overlay)
+# ============================================================
+FROM node:22-alpine AS saas-frontend-builder
+WORKDIR /build
+
+# Copy LastSaaS frontend as base
+COPY lastsaas/frontend/ ./
+
+# Apply llmopt overlay on top
+COPY frontend-overlay/ ./
+
+# Install and build
+RUN npm install --legacy-peer-deps 2>/dev/null || npm install
+RUN npm install react-is --legacy-peer-deps 2>/dev/null || true
+RUN npm run build
+
+# ============================================================
+# Stage 5: Production runtime (Debian for Cloudflare WARP support)
+# ============================================================
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl gnupg dbus caddy supervisor \
+    && curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
+       | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ bookworm main" \
+       > /etc/apt/sources.list.d/cloudflare-client.list \
+    && apt-get update && apt-get install -y --no-install-recommends cloudflare-warp \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy llmopt binary
+COPY --from=llmopt-builder /app/llmopt .
+
+# Copy llmopt frontend
+COPY --from=frontend-builder /build/dist ./static
+
+# Copy LastSaaS binary + config
+COPY --from=lastsaas-builder /app/lastsaas ./lastsaas-server
+COPY lastsaas/backend/config/ ./lastsaas-config/
+# Create prod.yaml from the example (it uses env var expansion at runtime)
+RUN cp ./lastsaas-config/prod.example.yaml ./lastsaas-config/prod.yaml
+
+# Copy SaaS frontend (auth/admin pages)
+COPY --from=saas-frontend-builder /build/dist ./saas-frontend
+
+# Copy runtime configs
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY deploy/supervisord.conf /etc/supervisor/conf.d/llmopt.conf
+COPY start-saas.sh .
+RUN chmod +x start-saas.sh
+
+EXPOSE 8080
+
+CMD ["supervisord", "-c", "/etc/supervisor/conf.d/llmopt.conf"]

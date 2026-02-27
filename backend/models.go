@@ -27,6 +27,7 @@ type AnalysisResult struct {
 
 type Analysis struct {
 	ID        primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	TenantID  string             `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
 	Domain    string             `json:"domain" bson:"domain"`
 	RawText   string             `json:"raw_text" bson:"rawText"`
 	Result                AnalysisResult     `json:"result" bson:"result"`
@@ -69,6 +70,7 @@ type OptimizationResult struct {
 
 type Optimization struct {
 	ID            primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	TenantID      string             `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
 	AnalysisID    primitive.ObjectID `json:"analysis_id" bson:"analysisId"`
 	QuestionIndex int                `json:"question_index" bson:"questionIndex"`
 	Question      string             `json:"question" bson:"question"`
@@ -88,6 +90,7 @@ type Optimization struct {
 
 type TodoItem struct {
 	ID              primitive.ObjectID  `json:"id" bson:"_id,omitempty"`
+	TenantID        string              `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
 	OptimizationID  primitive.ObjectID  `json:"optimization_id" bson:"optimizationId"`
 	AnalysisID      primitive.ObjectID  `json:"analysis_id" bson:"analysisId"`
 	VideoAnalysisID *primitive.ObjectID `json:"video_analysis_id,omitempty" bson:"videoAnalysisId,omitempty"`
@@ -108,11 +111,12 @@ type TodoItem struct {
 
 // OptimizationSummary is the lightweight shape returned by the optimizations list endpoint.
 type OptimizationSummary struct {
-	ID           primitive.ObjectID `json:"id" bson:"_id"`
-	Domain       string             `json:"domain" bson:"domain"`
-	Question     string             `json:"question" bson:"question"`
-	OverallScore int                `json:"overall_score"`
-	Model        string             `json:"model" bson:"model"`
+	ID            primitive.ObjectID `json:"id" bson:"_id"`
+	Domain        string             `json:"domain" bson:"domain"`
+	Question      string             `json:"question" bson:"question"`
+	QuestionIndex int                `json:"question_index"`
+	OverallScore  int                `json:"overall_score"`
+	Model         string             `json:"model" bson:"model"`
 	Public                bool               `json:"public" bson:"public"`
 	BrandStatus           string             `json:"brand_status,omitempty"`
 	BrandContextUsed      bool               `json:"brand_context_used"`
@@ -165,6 +169,7 @@ type BrandPresence struct {
 
 type BrandProfile struct {
 	ID              primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	TenantID        string             `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
 	Domain          string             `json:"domain" bson:"domain"`
 	BrandName       string             `json:"brand_name" bson:"brandName"`
 	Description     string             `json:"description" bson:"description"`
@@ -246,6 +251,7 @@ type DomainSummaryResult struct {
 
 type DomainSummary struct {
 	ID              primitive.ObjectID   `json:"id" bson:"_id,omitempty"`
+	TenantID        string               `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
 	Domain          string               `json:"domain" bson:"domain"`
 	Result          DomainSummaryResult  `json:"result" bson:"result"`
 	RawText         string               `json:"raw_text" bson:"rawText"`
@@ -422,6 +428,7 @@ type VideoAuthorityResult struct {
 // Top-level video analysis document
 type VideoAnalysis struct {
 	ID               primitive.ObjectID   `json:"id" bson:"_id,omitempty"`
+	TenantID         string               `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
 	Domain           string               `json:"domain" bson:"domain"`
 	Config           VideoAnalysisConfig  `json:"config" bson:"config"`
 	Videos           []YouTubeVideo       `json:"videos" bson:"videos"`
@@ -454,6 +461,18 @@ type VideoAssessment struct {
 	BrandSentiment   string   `json:"brand_sentiment" bson:"brand_sentiment"`
 	Summary          string   `json:"summary" bson:"summary"`
 	HasTranscript    bool     `json:"has_transcript" bson:"has_transcript"`
+}
+
+// Domain sharing
+
+type DomainShare struct {
+	ID         primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	TenantID   string             `json:"tenant_id" bson:"tenantId"`
+	Domain     string             `json:"domain" bson:"domain"`
+	ShareID    string             `json:"share_id" bson:"shareId"`
+	Visibility string             `json:"visibility" bson:"visibility"` // "private", "public", "popular"
+	CreatedAt  time.Time          `json:"created_at" bson:"createdAt"`
+	UpdatedAt  time.Time          `json:"updated_at" bson:"updatedAt"`
 }
 
 // YouTube API cache

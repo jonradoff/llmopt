@@ -1,0 +1,29 @@
+# Caddyfile — Reverse proxy for LLM Optimizer SaaS mode
+#
+# Port 8080 is the external port (Fly.io health checks hit this).
+# LLM Optimizer backend runs on :8090, LastSaaS backend runs on :8091.
+#
+# Routing:
+#   /api/auth/*, /api/users/*, /api/tenants/*, /api/billing/*,
+#   /api/plans/*, /api/messages/*, /api/admin/*,
+#   /api/branding/*, /api/bundles/*, /api/stripe/*, /health
+#       → LastSaaS backend (:8091)
+#   Everything else → LLM Optimizer backend (:8090)
+#   Note: /api/config is llmopt's own endpoint (not LastSaaS).
+#   LastSaaS config is under /api/admin/config/* (covered by "admin" match).
+
+:8080 {
+	# LastSaaS API routes — use path_regexp to match both /api/X and /api/X/*
+	@lastsaas path_regexp ^/api/(auth|users|tenants|tenant|billing|plans|messages|admin|branding|bundles|stripe|webhooks|bootstrap|credit-bundles|announcements|usage|docs)(/.*)?$
+	handle @lastsaas {
+		reverse_proxy localhost:8091
+	}
+	handle /health {
+		reverse_proxy localhost:8091
+	}
+
+	# Everything else goes to llmopt backend
+	handle {
+		reverse_proxy localhost:8090
+	}
+}
