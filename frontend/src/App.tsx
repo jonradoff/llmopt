@@ -588,6 +588,7 @@ export default function App() {
   const [optimizeConfirmQ, setOptimizeConfirmQ] = useState<number | null>(null) // question index for confirmation
   const [readOnlyOptModal, setReadOnlyOptModal] = useState<string | null>(null) // brand name for "not ready" modal
   const [subscriptionModal, setSubscriptionModal] = useState(false)
+  const [loginModal, setLoginModal] = useState(false)
 
   // Brand Intelligence state
   const [brandProfile, setBrandProfile] = useState<BrandProfile | null>(null)
@@ -2628,7 +2629,13 @@ export default function App() {
             type="text"
             value={url}
             onChange={e => setUrl(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && state !== 'analyzing') { if (sharedMode) { window.location.href = '/' } else { analyze() } } }}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && state !== 'analyzing') {
+                if (saasEnabled && !user) { setLoginModal(true) }
+                else if (sharedMode) { window.location.href = '/' }
+                else { analyze() }
+              }
+            }}
             placeholder="example.com"
             disabled={state === 'analyzing'}
             className="flex-1 px-4 py-2.5 bg-dark-800 border border-dark-700 rounded-lg text-white placeholder-dark-500 focus:outline-none focus:border-primary-500 focus:ring-1 focus:ring-primary-500 transition-colors disabled:opacity-50 text-center"
@@ -2642,7 +2649,11 @@ export default function App() {
             </button>
           ) : (
             <button
-              onClick={() => { if (sharedMode) { window.location.href = '/' } else { analyze() } }}
+              onClick={() => {
+                if (saasEnabled && !user) { setLoginModal(true) }
+                else if (sharedMode) { window.location.href = '/' }
+                else { analyze() }
+              }}
               disabled={!url.trim()}
               className="px-6 py-2.5 bg-gradient-to-r from-primary-600 to-primary-500 text-white font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shrink-0"
             >
@@ -5813,6 +5824,20 @@ export default function App() {
                     )}
                     <button
                       onClick={async () => {
+                        // In shared mode, build details from pre-loaded video analysis data
+                        if (sharedModeRef.current && videoAnalysis) {
+                          const details: VideoDetail[] = videoAnalysis.videos.map(v => ({
+                            video_id: v.video_id,
+                            title: v.title,
+                            transcript: v.transcript || '',
+                            transcript_length: v.transcript?.length || 0,
+                            assessment: null,
+                          }))
+                          setVideoDetails(details)
+                          setVideoDetailsExpanded(new Set())
+                          setVideoView('transcripts')
+                          return
+                        }
                         try {
                           const res = await apiFetch(`/api/video/analyses/${encodeURIComponent(videoAnalysis.domain)}/details`)
                           if (res.ok) {
@@ -6633,6 +6658,32 @@ export default function App() {
                 className="px-4 py-2 bg-gradient-to-r from-primary-600 to-primary-500 text-white text-sm font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all cursor-pointer"
               >
                 View Reports
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Login Required Modal */}
+      {loginModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-900 border border-dark-700 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <h3 className="text-white font-semibold text-lg mb-3">Sign In Required</h3>
+            <p className="text-dark-400 text-sm mb-6">
+              You need to be signed in to generate new analyses. You can browse the popular domains below for free without an account.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setLoginModal(false)}
+                className="px-4 py-2 text-dark-400 hover:text-white text-sm transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setLoginModal(false); window.location.href = '/login' }}
+                className="px-4 py-2 bg-gradient-to-r from-primary-600 to-primary-500 text-white text-sm font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all cursor-pointer"
+              >
+                Sign In / Sign Up
               </button>
             </div>
           </div>
