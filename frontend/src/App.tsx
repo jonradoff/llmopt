@@ -719,11 +719,12 @@ export default function App() {
   }, [brandEditing])
 
   // Navigation guard — wraps any action that would leave the brand editor
+  // Skip in shared mode — brand is read-only, no unsaved changes possible
   const guardBrandNav = useCallback((action: () => void) => {
-    if (isBrandDirty()) {
-      setPendingNavAction(() => action)
-    } else {
+    if (sharedModeRef.current || !isBrandDirty()) {
       action()
+    } else {
+      setPendingNavAction(() => action)
     }
   }, [isBrandDirty])
 
@@ -1912,6 +1913,7 @@ export default function App() {
             podcasts: (p.podcasts || []).join(', '),
           })
           setBrandPresenceComplete(bp.presence_complete || false)
+          brandLoadingRef.current = true
           setBrandEditing(true)
         }
         // Map video analysis
