@@ -2140,11 +2140,13 @@ func handleGetPopularDomains(mongoDB *MongoDB) http.HandlerFunc {
 		}
 
 		type PopularDomain struct {
-			Domain      string `json:"domain"`
-			BrandName   string `json:"brand_name"`
-			ShareID     string `json:"share_id"`
-			AvgScore    int    `json:"avg_score"`
-			ReportCount int    `json:"report_count"`
+			Domain          string `json:"domain"`
+			BrandName       string `json:"brand_name"`
+			ShareID         string `json:"share_id"`
+			AvgScore        int    `json:"avg_score"`
+			ReportCount     int    `json:"report_count"`
+			AnalysisCount   int    `json:"analysis_count"`
+			HasVideo        bool   `json:"has_video"`
 		}
 
 		results := make([]PopularDomain, 0, len(shares))
@@ -2160,15 +2162,19 @@ func handleGetPopularDomains(mongoDB *MongoDB) http.HandlerFunc {
 				pd.BrandName = bp.BrandName
 			}
 
-			// Get report count and avg score
-			optFilter := bson.M{"tenantId": s.TenantID, "domain": s.Domain}
-			optCur, err := mongoDB.Optimizations().Find(ctx, optFilter,
+			tdFilter := bson.M{"tenantId": s.TenantID, "domain": s.Domain}
+
+			// Count analyses
+			analysisCount, _ := mongoDB.Analyses().CountDocuments(ctx, tdFilter)
+			pd.AnalysisCount = int(analysisCount)
+
+			// Get optimization count and avg score
+			optCur, err := mongoDB.Optimizations().Find(ctx, tdFilter,
 				options.Find().SetProjection(bson.M{"result.overallScore": 1}))
 			if err == nil {
 				var opts []Optimization
 				optCur.All(ctx, &opts)
 				optCur.Close(ctx)
-				pd.ReportCount = len(opts)
 				if len(opts) > 0 {
 					total := 0
 					for _, o := range opts {
@@ -2176,7 +2182,17 @@ func handleGetPopularDomains(mongoDB *MongoDB) http.HandlerFunc {
 					}
 					pd.AvgScore = total / len(opts)
 				}
+				pd.ReportCount = len(opts)
 			}
+
+			// Use analysis count as report count if no optimizations
+			if pd.ReportCount == 0 {
+				pd.ReportCount = pd.AnalysisCount
+			}
+
+			// Check for video analysis
+			videoCount, _ := mongoDB.VideoAnalyses().CountDocuments(ctx, tdFilter)
+			pd.HasVideo = videoCount > 0
 
 			results = append(results, pd)
 		}

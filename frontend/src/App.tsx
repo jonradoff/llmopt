@@ -575,7 +575,7 @@ export default function App() {
   const [domainShareState, setDomainShareState] = useState<{ visibility: string; share_id: string; share_url: string } | null>(null)
   const [shareLoading, setShareLoading] = useState(false)
   const [shareCopied, setShareCopied] = useState(false)
-  const [popularDomains, setPopularDomains] = useState<{ domain: string; brand_name: string; share_id: string; avg_score: number; report_count: number }[]>([])
+  const [popularDomains, setPopularDomains] = useState<{ domain: string; brand_name: string; share_id: string; avg_score: number; report_count: number; analysis_count?: number; has_video?: boolean }[]>([])
 
   // Shared view mode (read-only /share/{shareId} URL)
   const [sharedMode, setSharedMode] = useState(false)
@@ -2714,19 +2714,29 @@ export default function App() {
                       className="w-full text-left bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-xl p-4 hover:border-primary-500/50 transition-all cursor-pointer group block"
                     >
                       <div className="flex items-center gap-3">
-                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 ${
-                          pd.avg_score >= 80 ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' :
-                          pd.avg_score >= 60 ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' :
-                          pd.avg_score >= 40 ? 'bg-orange-500/15 text-orange-400 border border-orange-500/30' :
-                          'bg-red-500/15 text-red-400 border border-red-500/30'
-                        }`}>
-                          {pd.avg_score}
-                        </div>
+                        {pd.avg_score > 0 ? (
+                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 border ${
+                            pd.avg_score >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' :
+                            pd.avg_score >= 60 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' :
+                            pd.avg_score >= 40 ? 'bg-orange-500/15 text-orange-400 border-orange-500/30' :
+                            'bg-red-500/15 text-red-400 border-red-500/30'
+                          }`}>
+                            {pd.avg_score}
+                          </div>
+                        ) : (
+                          <div className="w-10 h-10 rounded-lg flex items-center justify-center text-sm shrink-0 border bg-dark-800/50 text-dark-500 border-dark-700">
+                            --
+                          </div>
+                        )}
                         <div className="flex-1 min-w-0">
                           <p className="text-white text-sm font-medium group-hover:text-primary-300 transition-colors truncate">
                             {pd.brand_name || pd.domain}
                           </p>
-                          <p className="text-dark-500 text-xs">{pd.domain} · {pd.report_count} {pd.report_count === 1 ? 'report' : 'reports'}</p>
+                          <p className="text-dark-500 text-xs">
+                            {pd.domain}
+                            {pd.report_count > 0 && <> · {pd.report_count} {pd.report_count === 1 ? 'report' : 'reports'}</>}
+                            {pd.has_video && <> · video</>}
+                          </p>
                         </div>
                         <svg className="w-4 h-4 text-dark-600 group-hover:text-primary-400 transition-colors shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
