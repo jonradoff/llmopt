@@ -226,6 +226,7 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
       setKeyInput('');
       toast.success('API key saved and verified');
       onUpdate();
+      window.dispatchEvent(new Event('apikey-updated'));
     } catch (err) {
       toast.error(getErrorMessage(err));
     } finally {
@@ -239,6 +240,7 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
       const result = await verifyAPIKey('anthropic');
       toast.success(`Key status: ${result.status}`);
       onUpdate();
+      window.dispatchEvent(new Event('apikey-updated'));
     } catch (err) {
       toast.error(getErrorMessage(err));
     } finally {
@@ -252,6 +254,7 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
       await deleteAPIKey('anthropic');
       toast.success('API key removed');
       onUpdate();
+      window.dispatchEvent(new Event('apikey-updated'));
     } catch (err) {
       toast.error(getErrorMessage(err));
     } finally {

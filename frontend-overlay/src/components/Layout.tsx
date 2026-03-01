@@ -8,7 +8,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
 import { useBranding } from '../contexts/BrandingContext';
 import { messagesApi, plansApi, bundlesApi } from '../api/client';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import type { LucideIcon } from 'lucide-react';
 
 const iconMap: Record<string, LucideIcon> = {
@@ -34,6 +34,30 @@ export default function Layout() {
 
   const isActive = (path: string) => location.pathname === path || location.pathname.startsWith(path + '/');
 
+  const fetchKeyStatus = useCallback(() => {
+    const token = localStorage.getItem('lastsaas_access_token');
+    const tenantId = localStorage.getItem('lastsaas_active_tenant');
+    if (!token) return;
+    const headers: Record<string, string> = { 'Authorization': `Bearer ${token}` };
+    if (tenantId) headers['X-Tenant-ID'] = tenantId;
+    fetch('/api/settings/api-keys/status', { headers })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data) {
+          setHasKey(data.has_key || false);
+          setKeyStatus(data.status || 'unconfigured');
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Re-fetch key status when ProfileTab saves/deletes a key
+  useEffect(() => {
+    const handler = () => fetchKeyStatus();
+    window.addEventListener('apikey-updated', handler);
+    return () => window.removeEventListener('apikey-updated', handler);
+  }, [fetchKeyStatus]);
+
   useEffect(() => {
     if (isAuthenticated) {
       messagesApi.unreadCount()
@@ -51,20 +75,7 @@ export default function Layout() {
         .then((data) => setHasBundles(data.bundles.length > 0))
         .catch(() => {});
       // Fetch user's API key status
-      const token = localStorage.getItem('token');
-      if (token) {
-        fetch('/api/settings/api-keys/status', {
-          headers: { 'Authorization': `Bearer ${token}` },
-        })
-          .then(r => r.ok ? r.json() : null)
-          .then(data => {
-            if (data) {
-              setHasKey(data.has_key || false);
-              setKeyStatus(data.status || 'unconfigured');
-            }
-          })
-          .catch(() => {});
-      }
+      fetchKeyStatus();
     }
     // Fetch health status (public endpoint, no auth needed)
     fetch('/api/health/history')
