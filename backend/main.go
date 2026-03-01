@@ -157,6 +157,14 @@ func main() {
 	})
 	mux.HandleFunc("OPTIONS /api/config", handleOptions)
 
+	// Bootstrap status — the SaaS frontend checks this to decide if /setup is needed.
+	// The llmopt backend is always initialized (setup is handled by the LastSaaS CLI).
+	mux.HandleFunc("GET /api/bootstrap/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"initialized": true})
+	})
+	mux.HandleFunc("OPTIONS /api/bootstrap/status", handleOptions)
+
 	// Tenant-scoped routes (wrapped with auth in SaaS mode)
 	mux.HandleFunc("POST /api/analyze", withAuth(handleAnalyze(mongoDB, encryptionKey, apiKey, saasEnabled)))
 	mux.HandleFunc("GET /api/analyses", withAuth(handleListAnalyses(mongoDB)))
