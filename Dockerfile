@@ -14,7 +14,16 @@ RUN npm ci
 COPY frontend/ .
 RUN npm run build
 
-# Stage 3: Production runtime (Debian for Cloudflare WARP support)
+# Stage 3: Build SaaS frontend (LastSaaS + llmopt overlay)
+FROM node:22-alpine AS saas-frontend-builder
+WORKDIR /build
+COPY lastsaas/frontend/ ./
+COPY frontend-overlay/ ./
+RUN npm install --legacy-peer-deps 2>/dev/null || npm install
+RUN npm install react-is --legacy-peer-deps 2>/dev/null || true
+RUN npm run build
+
+# Stage 4: Production runtime (Debian for Cloudflare WARP support)
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -30,10 +39,12 @@ WORKDIR /app
 
 COPY --from=backend-builder /app/llmopt .
 COPY --from=frontend-builder /build/dist ./static
+COPY --from=saas-frontend-builder /build/dist ./saas-frontend
 COPY start.sh .
 RUN chmod +x start.sh
 
 ENV STATIC_DIR=/app/static
+ENV LLMOPT_FRONTEND_DIR=/app/saas-frontend
 ENV PORT=8080
 
 EXPOSE 8080

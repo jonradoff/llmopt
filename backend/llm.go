@@ -1,77 +1,24 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"strings"
-	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 
 	"llmopt/internal/saas"
 )
 
-// verifyAnthropicKey makes a minimal API call to check if a key is valid.
-// Returns status: "active", "invalid", "no_credits", or "error".
-func verifyAnthropicKey(ctx context.Context, apiKey string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	body, _ := json.Marshal(map[string]any{
-		"model":      "claude-haiku-4-5-20251001",
-		"max_tokens": 10,
-		"messages": []map[string]any{
-			{"role": "user", "content": "Reply with just the word 'ok'."},
-		},
-	})
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
-	if err != nil {
-		return "error", fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return "error", fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	switch {
-	case resp.StatusCode == 200:
-		return "active", nil
-	case resp.StatusCode == 401:
-		return "invalid", nil
-	case resp.StatusCode == 429:
-		// Could be rate limit or out of credits — check error body
-		errBody, _ := io.ReadAll(resp.Body)
-		errStr := strings.ToLower(string(errBody))
-		if strings.Contains(errStr, "credit") || strings.Contains(errStr, "billing") {
-			return "no_credits", nil
-		}
-		// Rate limited but key is valid
-		return "active", nil
-	case resp.StatusCode == 529:
-		// API overloaded — key is probably fine, API is just busy
-		return "active", nil
-	default:
-		errBody, _ := io.ReadAll(resp.Body)
-		return "error", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(errBody))
-	}
-}
-
-// resolveAnthropicKey looks up the tenant's Anthropic API key from the database,
-// decrypts it, and returns the plaintext key. In non-SaaS mode (dev), falls back
-// to the system key. Returns an error if no key is configured.
-func resolveAnthropicKey(ctx context.Context, mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) (string, error) {
+// resolveProviderKey looks up the tenant's API key for the given provider,
+// decrypts it, and returns the plaintext key. In non-SaaS mode (dev), falls
+// back to the system key (only for anthropic).
+func resolveProviderKey(ctx context.Context, mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool, providerID string) (string, error) {
 	if !saasEnabled {
-		return fallbackKey, nil
+		// In dev mode, only the Anthropic system key is available
+		if providerID == "anthropic" {
+			return fallbackKey, nil
+		}
+		return "", fmt.Errorf("api_key_required")
 	}
 
 	tenantID := saas.TenantIDFromContext(ctx)
@@ -82,7 +29,7 @@ func resolveAnthropicKey(ctx context.Context, mongoDB *MongoDB, encKey []byte, f
 	var doc TenantAPIKey
 	err := mongoDB.TenantAPIKeys().FindOne(ctx, bson.M{
 		"tenantId": tenantID,
-		"provider": "anthropic",
+		"provider": providerID,
 	}).Decode(&doc)
 	if err != nil {
 		return "", fmt.Errorf("api_key_required")
@@ -98,4 +45,59 @@ func resolveAnthropicKey(ctx context.Context, mongoDB *MongoDB, encKey []byte, f
 	}
 
 	return plaintext, nil
+}
+
+// resolvePrimaryLLM resolves the tenant's primary LLM provider and API key.
+// Returns the provider, decrypted API key, and the preferred model (if set).
+// In non-SaaS mode, defaults to the Anthropic system key.
+func resolvePrimaryLLM(ctx context.Context, mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) (LLMProvider, string, string, error) {
+	if !saasEnabled {
+		provider := getProvider("anthropic")
+		return provider, fallbackKey, "", nil
+	}
+
+	tenantID := saas.TenantIDFromContext(ctx)
+	if tenantID == "" {
+		return nil, "", "", fmt.Errorf("no tenant context")
+	}
+
+	// Look up tenant's primary provider setting
+	primaryProviderID := "anthropic" // default
+	var settings TenantSettings
+	err := mongoDB.TenantSettings().FindOne(ctx, bson.M{"tenantId": tenantID}).Decode(&settings)
+	if err == nil && settings.PrimaryProvider != "" {
+		primaryProviderID = settings.PrimaryProvider
+	}
+
+	provider := getProvider(primaryProviderID)
+	if provider == nil {
+		return nil, "", "", fmt.Errorf("unknown provider: %s", primaryProviderID)
+	}
+
+	// Get the key for this provider
+	var doc TenantAPIKey
+	err = mongoDB.TenantAPIKeys().FindOne(ctx, bson.M{
+		"tenantId": tenantID,
+		"provider": primaryProviderID,
+	}).Decode(&doc)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("api_key_required")
+	}
+
+	if doc.EncryptedKey == "" {
+		return nil, "", "", fmt.Errorf("api_key_required")
+	}
+
+	plaintext, err := decryptSecret(doc.EncryptedKey, encKey)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to decrypt API key: %w", err)
+	}
+
+	return provider, plaintext, doc.PreferredModel, nil
+}
+
+// resolveAnthropicKey is a backward-compatible wrapper for code that specifically
+// needs the Anthropic key (e.g. health checks).
+func resolveAnthropicKey(ctx context.Context, mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) (string, error) {
+	return resolveProviderKey(ctx, mongoDB, encKey, fallbackKey, saasEnabled, "anthropic")
 }

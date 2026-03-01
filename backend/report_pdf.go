@@ -241,6 +241,34 @@ func buildReportPDF(
 	pdf.SetFont("Helvetica", "", 11)
 	pdf.SetTextColor(120, 120, 120)
 	pdf.CellFormat(0, 7, "Generated "+time.Now().Format("January 2, 2006"), "", 1, "C", false, 0, "")
+
+	// AI Models used
+	modelSet := map[string]bool{}
+	if analysis != nil && analysis.Model != "" {
+		modelSet[analysis.Model] = true
+	}
+	for _, opt := range optimizations {
+		if opt.Model != "" {
+			modelSet[opt.Model] = true
+		}
+	}
+	if videoAnalysis != nil && videoAnalysis.Model != "" {
+		modelSet[videoAnalysis.Model] = true
+	}
+	if redditAnalysis != nil && redditAnalysis.Model != "" {
+		modelSet[redditAnalysis.Model] = true
+	}
+	if len(modelSet) > 0 {
+		modelNames := make([]string, 0, len(modelSet))
+		for m := range modelSet {
+			modelNames = append(modelNames, m)
+		}
+		sort.Strings(modelNames)
+		pdf.SetFont("Helvetica", "I", 10)
+		pdf.SetTextColor(120, 120, 120)
+		pdf.CellFormat(0, 6, "AI Models: "+strings.Join(modelNames, ", "), "", 1, "C", false, 0, "")
+	}
+
 	pdf.Ln(12)
 
 	// Branding

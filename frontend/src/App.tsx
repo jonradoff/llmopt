@@ -604,8 +604,55 @@ interface SearchAnalysisSummary {
   generated_at: string
 }
 
+// LLM Test types
+interface TestQuery {
+  query: string
+  type: string   // brand, category, comparison, discovery, custom
+  priority: string // high, medium, low
+}
+
+interface TestProviderResult {
+  provider_id: string
+  provider_name: string
+  model: string
+  response: string
+  mentioned: boolean
+  recommended: boolean
+  sentiment: string  // positive, neutral, negative, absent
+  accuracy: string   // accurate, partially_accurate, inaccurate, not_applicable
+  score: number
+}
+
+interface TestQueryResult {
+  query: TestQuery
+  provider_results: TestProviderResult[]
+}
+
+interface TestProviderSummary {
+  provider_id: string
+  provider_name: string
+  model: string
+  overall_score: number
+  mention_rate: number
+  recommend_rate: number
+  accuracy_rate: number
+  sentiment_score: number
+}
+
+interface LLMTestResult {
+  id: string
+  domain: string
+  brand_name: string
+  queries: TestQuery[]
+  results: TestQueryResult[]
+  provider_summaries: TestProviderSummary[]
+  overall_score: number
+  brand_context_used: boolean
+  generated_at: string
+}
+
 type AppState = 'idle' | 'analyzing' | 'done' | 'error'
-type ActiveTab = 'analyze' | 'status' | 'optimize' | 'todos' | 'brand' | 'video' | 'reddit' | 'search'
+type ActiveTab = 'analyze' | 'status' | 'optimize' | 'todos' | 'brand' | 'video' | 'reddit' | 'search' | 'test'
 
 const CATEGORY_COLORS = [
   'bg-primary-500/20 text-primary-300 border-primary-500/30',
@@ -660,7 +707,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
     const params = new URLSearchParams(window.location.search)
     const tab = params.get('tab')
-    const validTabs: ActiveTab[] = ['analyze', 'status', 'optimize', 'todos', 'brand', 'video', 'reddit', 'search']
+    const validTabs: ActiveTab[] = ['analyze', 'status', 'optimize', 'todos', 'brand', 'video', 'reddit', 'search', 'test']
     if (tab && validTabs.includes(tab as ActiveTab)) return tab as ActiveTab
     return 'analyze'
   })
@@ -836,6 +883,20 @@ export default function App() {
   const [searchAnalysisList, setSearchAnalysisList] = useState<SearchAnalysisSummary[]>([])
   const [confirmDeleteSearchAnalysis, setConfirmDeleteSearchAnalysis] = useState(false)
   const [searchAutoArchive, setSearchAutoArchive] = useState(true)
+
+  // LLM Test state
+  const [testView, setTestView] = useState<'input' | 'results'>('input')
+  const [testQueries, setTestQueries] = useState<TestQuery[]>([])
+  const [testSelectedProviders, setTestSelectedProviders] = useState<string[]>([])
+  const [testAvailableProviders, setTestAvailableProviders] = useState<{ provider: string; status: string; preferred_model?: string }[]>([])
+  const [testResults, setTestResults] = useState<LLMTestResult | null>(null)
+  const [testAnalyzing, setTestAnalyzing] = useState(false)
+  const [testMessages, setTestMessages] = useState<string[]>([])
+  const [testError, setTestError] = useState('')
+  const [confirmDeleteTest, setConfirmDeleteTest] = useState(false)
+  const testAbortRef = useRef<AbortController | null>(null)
+  const testMessagesEndRef = useRef<HTMLDivElement>(null)
+  const [testExpandedCells, setTestExpandedCells] = useState<Set<string>>(new Set())
 
   // Auto-scroll refs for SSE message containers
   const videoMessagesEndRef = useRef<HTMLDivElement>(null)
@@ -2206,6 +2267,107 @@ export default function App() {
     setConfirmDeleteSearchAnalysis(false)
   }, [selectedDomain, fetchSearchAnalysisList])
 
+  // LLM Test functions
+  const runLLMTest = useCallback(async (force = false) => {
+    if (!selectedDomain || testSelectedProviders.length === 0 || testQueries.length === 0) return
+    if (saasEnabled && user && apiKeyStatus !== 'active') {
+      setApiKeyModal(true)
+      return
+    }
+    const controller = new AbortController()
+    testAbortRef.current = controller
+    setTestAnalyzing(true)
+    setTestMessages([])
+    setTestError('')
+
+    try {
+      const response = await apiFetch('/api/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          domain: selectedDomain,
+          providers: testSelectedProviders,
+          queries: testQueries,
+          force,
+        }),
+        signal: controller.signal,
+      })
+
+      if (!response.ok || !response.body) {
+        setTestAnalyzing(false)
+        setTestError('Failed to start test')
+        return
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        while (true) {
+          const idx = buffer.indexOf('\n\n')
+          if (idx === -1) break
+          const message = buffer.slice(0, idx)
+          buffer = buffer.slice(idx + 2)
+
+          let eventType = '', data = ''
+          for (const line of message.split('\n')) {
+            if (line.startsWith('event: ')) eventType = line.slice(7)
+            else if (line.startsWith('data: ')) data = line.slice(6)
+          }
+          if (!data || !eventType) continue
+
+          try {
+            const parsed = JSON.parse(data)
+            if (eventType === 'status' || eventType === 'progress') {
+              setTestMessages(prev => [...prev, parsed.message])
+            } else if (eventType === 'done') {
+              const result = JSON.parse(parsed.result) as LLMTestResult
+              setTestResults(result)
+              setTestView('results')
+              setTestAnalyzing(false)
+              return
+            } else if (eventType === 'error') {
+              setTestError(parsed.message)
+              setTestMessages(prev => [...prev, `Error: ${parsed.message}`])
+              setTestAnalyzing(false)
+              return
+            }
+          } catch { /* skip malformed */ }
+        }
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setTestError(err instanceof Error ? err.message : 'Unknown error')
+      }
+    } finally {
+      setTestAnalyzing(false)
+      testAbortRef.current = null
+    }
+  }, [selectedDomain, testSelectedProviders, testQueries, saasEnabled, user, apiKeyStatus])
+
+  const stopLLMTest = useCallback(() => {
+    testAbortRef.current?.abort()
+    setTestAnalyzing(false)
+    setTestMessages(prev => [...prev, 'Test stopped by user'])
+  }, [])
+
+  const deleteLLMTest = useCallback(async () => {
+    if (!selectedDomain) return
+    try {
+      await apiFetch(`/api/test/${encodeURIComponent(selectedDomain)}`, { method: 'DELETE' })
+      setTestResults(null)
+      setTestView('input')
+    } catch (err) {
+      console.error('Failed to delete test:', err)
+    }
+    setConfirmDeleteTest(false)
+  }, [selectedDomain])
+
   // PDF Report generation
   const generatePDF = useCallback(async () => {
     if (!selectedDomain || pdfGenerating) return
@@ -2311,7 +2473,7 @@ export default function App() {
         }
       }
     }
-  }, [activeTab, selectedDomain, prepopulateRedditFromBrand, fetchRedditAnalysisList, loadRedditAnalysis])
+  }, [activeTab, selectedDomain, prepopulateRedditFromBrand, fetchRedditAnalysisList, loadRedditAnalysis, redditAnalysisList])
 
   // Auto-load search analysis when switching to search tab
   useEffect(() => {
@@ -2327,10 +2489,46 @@ export default function App() {
     }
   }, [activeTab, selectedDomain, fetchSearchAnalysisList, loadSearchAnalysis])
 
+  // Auto-load test results when switching to test tab
+  useEffect(() => {
+    if (sharedModeRef.current) return
+    if (activeTab === 'test' && selectedDomain) {
+      // Fetch available providers
+      apiFetch('/api/settings/api-keys').then(r => r.ok ? r.json() : null).then(data => {
+        if (data?.keys) {
+          const active = data.keys.filter((k: { status: string }) => k.status === 'active')
+          setTestAvailableProviders(active)
+          setTestSelectedProviders(active.map((k: { provider: string }) => k.provider))
+        }
+      }).catch(() => {})
+      // Fetch existing test results
+      apiFetch(`/api/test/${encodeURIComponent(selectedDomain)}`).then(r => {
+        if (r.ok) return r.json()
+        return null
+      }).then(data => {
+        if (data && data.id) {
+          setTestResults(data)
+          setTestView('results')
+        } else {
+          setTestView('input')
+          // Generate suggested queries
+          apiFetch('/api/test/generate-queries', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain: selectedDomain }),
+          }).then(r => r.ok ? r.json() : null).then(qData => {
+            if (qData?.queries) setTestQueries(qData.queries)
+          }).catch(() => {})
+        }
+      }).catch(() => { setTestView('input') })
+    }
+  }, [activeTab, selectedDomain])
+
   // Auto-scroll SSE message containers to bottom
   useEffect(() => { videoMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [videoMessages])
   useEffect(() => { redditMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [redditMessages])
   useEffect(() => { searchMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [searchMessages])
+  useEffect(() => { testMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [testMessages])
 
   // Auto-load domain summary when selectedDomain changes
   useEffect(() => {
@@ -3734,8 +3932,8 @@ export default function App() {
             >
               Analyze
             </button>
-            {(['todos', 'brand', 'video', 'reddit', 'search', 'optimize'] as const).map(tab => {
-              const labels: Record<string, string> = { todos: 'To-Do', brand: 'Brand', video: 'YouTube', reddit: 'Reddit', search: 'Search', optimize: 'Optimize' }
+            {(['todos', 'brand', 'video', 'reddit', 'search', 'optimize', 'test'] as const).map(tab => {
+              const labels: Record<string, string> = { todos: 'To-Do', brand: 'Brand', video: 'YouTube', reddit: 'Reddit', search: 'Search', optimize: 'Optimize', test: 'Test' }
               const disabled = !selectedDomain
               return (
                 <button
@@ -3789,6 +3987,7 @@ export default function App() {
                   {tab === 'reddit' && redditAnalyzing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
                   {tab === 'search' && searchAnalyzing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
                   {tab === 'optimize' && optimizing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
+                  {tab === 'test' && testAnalyzing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
                 </button>
               )
             })}
@@ -5269,7 +5468,7 @@ export default function App() {
                 <svg className="w-5 h-5 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
                 <div className="flex-1">
                   <p className="text-sm text-amber-300 font-medium">Configure your API key to start analyzing</p>
-                  <p className="text-xs text-dark-400 mt-0.5">You need an Anthropic API key to use LLM features.</p>
+                  <p className="text-xs text-dark-400 mt-0.5">You need an API key to use AI analysis features.</p>
                 </div>
                 <a href="/last/settings" className="px-3 py-1.5 text-sm bg-amber-500/20 text-amber-300 rounded-lg hover:bg-amber-500/30 transition-colors whitespace-nowrap">Go to Settings</a>
               </div>
@@ -5279,7 +5478,7 @@ export default function App() {
                 <span className="text-amber-400 text-lg shrink-0">$</span>
                 <div className="flex-1">
                   <p className="text-sm text-amber-300 font-medium">Your API key needs credits</p>
-                  <p className="text-xs text-dark-400 mt-0.5">Add credits to your Anthropic account to continue analyzing.</p>
+                  <p className="text-xs text-dark-400 mt-0.5">Add credits to your AI provider account to continue analyzing.</p>
                 </div>
                 <a href="/last/settings" className="px-3 py-1.5 text-sm bg-amber-500/20 text-amber-300 rounded-lg hover:bg-amber-500/30 transition-colors whitespace-nowrap">Settings</a>
               </div>
@@ -5289,7 +5488,7 @@ export default function App() {
                 <svg className="w-5 h-5 text-red-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
                 <div className="flex-1">
                   <p className="text-sm text-red-300 font-medium">Your API key is invalid</p>
-                  <p className="text-xs text-dark-400 mt-0.5">Please update your Anthropic API key in Settings.</p>
+                  <p className="text-xs text-dark-400 mt-0.5">Please update your API key in Settings.</p>
                 </div>
                 <a href="/last/settings" className="px-3 py-1.5 text-sm bg-red-500/20 text-red-300 rounded-lg hover:bg-red-500/30 transition-colors whitespace-nowrap">Settings</a>
               </div>
@@ -7828,6 +8027,45 @@ export default function App() {
 
               return (
                 <div className="space-y-6">
+                  {/* Header — back button + actions (matches YouTube pattern) */}
+                  <div className="flex items-center justify-between">
+                    <button
+                      onClick={() => { setRedditView('input'); setRedditAnalysis(null) }}
+                      className="text-dark-400 hover:text-white transition-colors cursor-pointer text-sm flex items-center gap-1"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
+                      Re-run or Change Settings
+                    </button>
+                    <div className="flex items-center gap-3">
+                      {saasEnabled && user && (user.role === 'owner' || user.role === 'admin') && selectedDomain && (
+                        <button
+                          onClick={() => { setDomainShareState(null); setShareModalDomain(selectedDomain); fetchDomainShare(selectedDomain) }}
+                          className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all cursor-pointer flex items-center gap-1.5"
+                          title="Share this domain"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0-12.814a2.25 2.25 0 1 0 0-2.186m0 2.186a2.25 2.25 0 1 0 0 2.186" /></svg>
+                          Share
+                        </button>
+                      )}
+                      {!readOnly && (
+                        <>
+                          <button
+                            onClick={() => setConfirmDeleteRedditAnalysis(true)}
+                            className="text-xs text-red-400 border border-red-500/30 rounded-lg px-3 py-1.5 hover:bg-red-500/10 transition-colors cursor-pointer"
+                          >
+                            Delete
+                          </button>
+                          <button
+                            onClick={() => { setRedditView('input'); setRedditAnalysis(null) }}
+                            className="text-xs text-primary-400 border border-primary-500/30 rounded-lg px-3 py-1.5 hover:bg-primary-500/10 transition-colors cursor-pointer"
+                          >
+                            Re-run Analysis
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
                   {/* Staleness banner */}
                   {redditStaleOptimizations.length > 0 && (
                     <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 space-y-2">
@@ -7852,48 +8090,30 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Header with overall score */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <div className={`w-16 h-16 rounded-2xl border-2 flex items-center justify-center text-2xl font-bold ${
-                        r.overall_score >= 80 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
-                        : r.overall_score >= 60 ? 'border-amber-500/40 bg-amber-500/10 text-amber-400'
-                        : r.overall_score >= 40 ? 'border-orange-500/40 bg-orange-500/10 text-orange-400'
-                        : 'border-red-500/40 bg-red-500/10 text-red-400'
-                      }`}>
-                        {r.overall_score}
-                      </div>
-                      <div>
-                        <h2 className="text-white font-bold text-lg">{redditDomain}</h2>
-                        <div className="flex items-center gap-2 text-dark-500 text-xs mt-0.5">
-                          <span>{redditAnalysis.threads?.length || 0} threads analyzed</span>
-                          <span>·</span>
-                          <span>{fmtDate(redditAnalysis.generated_at)}</span>
-                          {redditAnalysis.brand_context_used && (
-                            <>
-                              <span>·</span>
-                              <span className="text-primary-400">Brand context used</span>
-                            </>
-                          )}
-                        </div>
+                  {/* Overall score */}
+                  <div className="flex items-center gap-4">
+                    <div className={`w-16 h-16 rounded-2xl border-2 flex items-center justify-center text-2xl font-bold ${
+                      r.overall_score >= 80 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+                      : r.overall_score >= 60 ? 'border-amber-500/40 bg-amber-500/10 text-amber-400'
+                      : r.overall_score >= 40 ? 'border-orange-500/40 bg-orange-500/10 text-orange-400'
+                      : 'border-red-500/40 bg-red-500/10 text-red-400'
+                    }`}>
+                      {r.overall_score}
+                    </div>
+                    <div>
+                      <h2 className="text-white font-bold text-lg">{redditDomain}</h2>
+                      <div className="flex items-center gap-2 text-dark-500 text-xs mt-0.5">
+                        <span>{redditAnalysis.threads?.length || 0} threads analyzed</span>
+                        <span>·</span>
+                        <span>{fmtDate(redditAnalysis.generated_at)}</span>
+                        {redditAnalysis.brand_context_used && (
+                          <>
+                            <span>·</span>
+                            <span className="text-primary-400">Brand context used</span>
+                          </>
+                        )}
                       </div>
                     </div>
-                    {!readOnly && (
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => { setRedditView('input'); setRedditAnalysis(null) }}
-                          className="px-3 py-1.5 text-xs text-dark-400 border border-dark-700 rounded-lg hover:text-white cursor-pointer"
-                        >
-                          New Analysis
-                        </button>
-                        <button
-                          onClick={() => setConfirmDeleteRedditAnalysis(true)}
-                          className="px-3 py-1.5 text-xs text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/10 cursor-pointer"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    )}
                   </div>
 
                   {/* 4-Pillar Cards */}
@@ -8465,7 +8685,299 @@ export default function App() {
             })()}
           </div>
         )}
+        {activeTab === 'test' && (
+          <div className="max-w-5xl mx-auto animate-fade-in">
+
+            {/* Results view */}
+            {testView === 'results' && testResults && (() => {
+              const r = testResults
+              const scoreColor = (s: number) => s >= 70 ? 'text-emerald-400' : s >= 40 ? 'text-amber-400' : 'text-red-400'
+              const scoreBg = (s: number) => s >= 70 ? 'bg-emerald-500/10 border-emerald-500/30' : s >= 40 ? 'bg-amber-500/10 border-amber-500/30' : 'bg-red-500/10 border-red-500/30'
+              const sentimentColor = (s: string) => s === 'positive' ? 'text-emerald-400' : s === 'neutral' ? 'text-dark-400' : s === 'negative' ? 'text-red-400' : 'text-dark-600'
+              const sentimentIcon = (s: string) => s === 'positive' ? '+' : s === 'neutral' ? '~' : s === 'negative' ? '-' : '?'
+
+              return (
+                <div className="space-y-6">
+                  {/* Back button row */}
+                  <div className="flex items-center justify-between">
+                    <button
+                      onClick={() => { setTestView('input'); setTestResults(null) }}
+                      className="text-dark-400 hover:text-white transition-colors cursor-pointer text-sm flex items-center gap-1"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
+                      Re-run or Change Settings
+                    </button>
+                    <div className="flex items-center gap-3">
+                      {saasEnabled && user && (user.role === 'owner' || user.role === 'admin') && selectedDomain && (
+                        <button onClick={() => { setDomainShareState(null); setShareModalDomain(selectedDomain); fetchDomainShare(selectedDomain) }}
+                          className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all cursor-pointer flex items-center gap-1.5"
+                          title="Share this domain"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M7.217 10.907a2.25 2.25 0 100 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186l9.566-5.314m-9.566 7.5l9.566 5.314m0 0a2.25 2.25 0 103.935 2.186 2.25 2.25 0 00-3.935-2.186zm0-12.814a2.25 2.25 0 103.933-2.185 2.25 2.25 0 00-3.933 2.185z" /></svg>
+                          Share
+                        </button>
+                      )}
+                      {!readOnly && (
+                        <>
+                          <button onClick={() => setConfirmDeleteTest(true)} className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-red-400 rounded-lg hover:bg-red-900/30 hover:border-red-800 transition-all cursor-pointer">Delete</button>
+                          <button onClick={() => { setTestView('input'); setTestResults(null) }} className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-primary-400 rounded-lg hover:bg-dark-700 hover:text-primary-300 transition-all cursor-pointer">Re-run Test</button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Overall score header */}
+                  <div className="flex items-center gap-4">
+                    <div className={`w-16 h-16 rounded-xl border flex items-center justify-center ${scoreBg(r.overall_score)}`}>
+                      <span className={`text-2xl font-bold ${scoreColor(r.overall_score)}`}>{r.overall_score}</span>
+                    </div>
+                    <div>
+                      <h2 className="text-xl font-bold text-white">LLM Brand Test — {r.brand_name}</h2>
+                      <p className="text-dark-400 text-sm">{r.provider_summaries.length} provider{r.provider_summaries.length !== 1 ? 's' : ''} tested with {r.queries.length} queries &middot; {fmtDate(r.generated_at)}</p>
+                    </div>
+                  </div>
+
+                  {/* Provider summary cards */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {r.provider_summaries.map(ps => (
+                      <div key={ps.provider_id} className="bg-dark-800/50 border border-dark-700 rounded-xl p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <div>
+                            <h3 className="text-white font-semibold text-sm">{ps.provider_name}</h3>
+                            <p className="text-dark-500 text-xs">{ps.model}</p>
+                          </div>
+                          <div className={`w-12 h-12 rounded-lg border flex items-center justify-center ${scoreBg(ps.overall_score)}`}>
+                            <span className={`text-lg font-bold ${scoreColor(ps.overall_score)}`}>{ps.overall_score}</span>
+                          </div>
+                        </div>
+                        <div className="space-y-2 text-xs">
+                          <div className="flex justify-between"><span className="text-dark-400">Mention Rate</span><span className="text-white font-medium">{ps.mention_rate}%</span></div>
+                          <div className="flex justify-between"><span className="text-dark-400">Recommend Rate</span><span className="text-white font-medium">{ps.recommend_rate}%</span></div>
+                          <div className="flex justify-between"><span className="text-dark-400">Accuracy</span><span className="text-white font-medium">{ps.accuracy_rate}%</span></div>
+                          <div className="flex justify-between"><span className="text-dark-400">Sentiment</span><span className="text-white font-medium">{ps.sentiment_score}/100</span></div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Query results comparison */}
+                  <div className="space-y-4">
+                    <h3 className="text-white font-semibold text-lg">Query Results</h3>
+                    {r.results.map((qr, qi) => {
+                      const typeLabel: Record<string, string> = { brand: 'Brand', category: 'Category', comparison: 'Comparison', discovery: 'Discovery', custom: 'Custom' }
+                      return (
+                        <div key={qi} className="bg-dark-800/30 border border-dark-700 rounded-xl overflow-hidden">
+                          <div className="px-4 py-3 border-b border-dark-700 flex items-center gap-3">
+                            <span className="text-xs px-2 py-0.5 rounded bg-dark-700 text-dark-300 font-medium">{typeLabel[qr.query.type] || qr.query.type}</span>
+                            <span className="text-white text-sm font-medium">{qr.query.query}</span>
+                          </div>
+                          <div className="divide-y divide-dark-700/50">
+                            {qr.provider_results.map((pr, pi) => {
+                              const cellKey = `${qi}-${pi}`
+                              const expanded = testExpandedCells.has(cellKey)
+                              return (
+                                <div key={pi} className="px-4 py-3">
+                                  <div className="flex items-center justify-between mb-1">
+                                    <div className="flex items-center gap-3">
+                                      <span className="text-dark-400 text-xs font-medium w-20">{pr.provider_name}</span>
+                                      <div className="flex items-center gap-2 text-xs">
+                                        <span className={pr.mentioned ? 'text-emerald-400' : 'text-dark-600'} title={pr.mentioned ? 'Brand mentioned' : 'Not mentioned'}>
+                                          {pr.mentioned ? '✓ Mentioned' : '✗ Not mentioned'}
+                                        </span>
+                                        {pr.recommended && <span className="text-amber-400" title="Brand recommended">★ Recommended</span>}
+                                        <span className={sentimentColor(pr.sentiment)} title={`Sentiment: ${pr.sentiment}`}>{sentimentIcon(pr.sentiment)} {pr.sentiment}</span>
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <span className={`text-sm font-bold ${scoreColor(pr.score)}`}>{pr.score}</span>
+                                      <button
+                                        onClick={() => setTestExpandedCells(prev => {
+                                          const next = new Set(prev)
+                                          if (next.has(cellKey)) next.delete(cellKey)
+                                          else next.add(cellKey)
+                                          return next
+                                        })}
+                                        className="text-dark-500 hover:text-white transition-colors cursor-pointer"
+                                      >
+                                        <svg className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+                                      </button>
+                                    </div>
+                                  </div>
+                                  {!expanded && (
+                                    <p className="text-dark-400 text-xs line-clamp-2 cursor-pointer" onClick={() => setTestExpandedCells(prev => { const next = new Set(prev); next.add(cellKey); return next })}>{pr.response}</p>
+                                  )}
+                                  {expanded && (
+                                    <div className="mt-2 p-3 bg-dark-900/50 rounded-lg text-dark-300 text-xs whitespace-pre-wrap max-h-96 overflow-y-auto">{pr.response}</div>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* Analyzing state */}
+            {testAnalyzing && (
+              <div className="space-y-4">
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="w-5 h-5 border-2 border-primary-400 border-t-transparent rounded-full animate-spin" />
+                  <h2 className="text-lg font-semibold text-white">Testing LLMs...</h2>
+                  <button onClick={stopLLMTest} className="text-xs px-3 py-1 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:text-white transition-colors cursor-pointer ml-auto">Stop</button>
+                </div>
+                <div className="bg-dark-800/50 border border-dark-700 rounded-xl p-4 max-h-64 overflow-y-auto">
+                  {testMessages.map((m, i) => (
+                    <p key={i} className="text-dark-400 text-xs py-0.5">{m}</p>
+                  ))}
+                  <div ref={testMessagesEndRef} />
+                </div>
+              </div>
+            )}
+
+            {/* Setup view */}
+            {testView === 'input' && !testAnalyzing && !testResults && (
+              <div className="space-y-6">
+                <div>
+                  <h2 className="text-xl font-bold text-white mb-1">LLM Brand Test</h2>
+                  <p className="text-dark-400 text-sm">Test what AI models know about your brand by querying them with real-world questions. Compare results across providers.</p>
+                </div>
+
+                {testError && (
+                  <div className="bg-red-900/20 border border-red-800/30 rounded-xl p-3 text-red-400 text-sm">{testError}</div>
+                )}
+
+                {/* Provider selection */}
+                <div className="bg-dark-800/50 border border-dark-700 rounded-xl p-4">
+                  <h3 className="text-white font-semibold text-sm mb-3">Select AI Providers to Test</h3>
+                  {testAvailableProviders.length === 0 ? (
+                    <p className="text-dark-500 text-sm">No API keys configured. <button onClick={() => { window.location.href = '/last/settings' }} className="text-primary-400 hover:text-primary-300 cursor-pointer underline">Set up API keys</button> to get started.</p>
+                  ) : (
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      {testAvailableProviders.map(p => {
+                        const providerNames: Record<string, string> = { anthropic: 'Anthropic', openai: 'OpenAI', grok: 'Grok (xAI)', gemini: 'Gemini' }
+                        const checked = testSelectedProviders.includes(p.provider)
+                        return (
+                          <label key={p.provider} className={`flex items-center gap-2 p-3 rounded-lg border cursor-pointer transition-all ${
+                            checked ? 'bg-primary-500/10 border-primary-500/30' : 'bg-dark-900/50 border-dark-700 hover:border-dark-600'
+                          }`}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={e => {
+                                if (e.target.checked) setTestSelectedProviders(prev => [...prev, p.provider])
+                                else setTestSelectedProviders(prev => prev.filter(id => id !== p.provider))
+                              }}
+                              className="accent-primary-500"
+                            />
+                            <span className="text-white text-sm font-medium">{providerNames[p.provider] || p.provider}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Query editor */}
+                <div className="bg-dark-800/50 border border-dark-700 rounded-xl p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-white font-semibold text-sm">Test Queries</h3>
+                    <button
+                      onClick={() => setTestQueries(prev => [...prev, { query: '', type: 'custom', priority: 'medium' }])}
+                      className="text-xs px-2 py-1 bg-dark-700 text-dark-300 rounded hover:text-white transition-colors cursor-pointer"
+                    >+ Add Query</button>
+                  </div>
+                  {testQueries.length === 0 ? (
+                    <p className="text-dark-500 text-sm">No queries yet. Add queries or <button onClick={() => {
+                      apiFetch('/api/test/generate-queries', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ domain: selectedDomain }),
+                      }).then(r => r.ok ? r.json() : null).then(data => {
+                        if (data?.queries) setTestQueries(data.queries)
+                      }).catch(() => {})
+                    }} className="text-primary-400 hover:text-primary-300 cursor-pointer underline">generate from brand profile</button>.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {testQueries.map((q, i) => {
+                        const typeColors: Record<string, string> = {
+                          brand: 'bg-primary-500/20 text-primary-300',
+                          category: 'bg-accent-purple/20 text-purple-300',
+                          comparison: 'bg-accent-cyan/20 text-cyan-300',
+                          discovery: 'bg-accent-emerald/20 text-emerald-300',
+                          custom: 'bg-dark-700 text-dark-300',
+                        }
+                        return (
+                          <div key={i} className="flex items-center gap-2">
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${typeColors[q.type] || typeColors.custom}`}>{q.type}</span>
+                            <input
+                              type="text"
+                              value={q.query}
+                              onChange={e => setTestQueries(prev => prev.map((qq, j) => j === i ? { ...qq, query: e.target.value } : qq))}
+                              className="flex-1 bg-dark-900/50 border border-dark-700 rounded-lg px-3 py-1.5 text-white text-sm placeholder-dark-500 focus:outline-none focus:border-primary-500/50"
+                              placeholder="Enter a question..."
+                            />
+                            <select
+                              value={q.type}
+                              onChange={e => setTestQueries(prev => prev.map((qq, j) => j === i ? { ...qq, type: e.target.value } : qq))}
+                              className="bg-dark-900 border border-dark-700 rounded px-2 py-1.5 text-dark-300 text-xs cursor-pointer"
+                            >
+                              <option value="brand">Brand</option>
+                              <option value="category">Category</option>
+                              <option value="comparison">Comparison</option>
+                              <option value="discovery">Discovery</option>
+                              <option value="custom">Custom</option>
+                            </select>
+                            <button
+                              onClick={() => setTestQueries(prev => prev.filter((_, j) => j !== i))}
+                              className="text-dark-500 hover:text-red-400 transition-colors cursor-pointer shrink-0"
+                              title="Remove query"
+                            >
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Run button */}
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => runLLMTest(true)}
+                    disabled={testSelectedProviders.length === 0 || testQueries.length === 0 || testQueries.some(q => !q.query.trim())}
+                    className={`px-6 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+                      testSelectedProviders.length > 0 && testQueries.length > 0 && !testQueries.some(q => !q.query.trim())
+                        ? 'bg-gradient-to-r from-primary-600 to-primary-500 text-white hover:from-primary-500 hover:to-primary-400 cursor-pointer shadow-lg shadow-primary-500/20'
+                        : 'bg-dark-800 text-dark-500 cursor-not-allowed'
+                    }`}
+                  >
+                    Run Test ({testSelectedProviders.length} provider{testSelectedProviders.length !== 1 ? 's' : ''}, {testQueries.filter(q => q.query.trim()).length} queries)
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </main>
+
+      {/* Delete test confirmation modal */}
+      {confirmDeleteTest && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-900 border border-dark-700 rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+            <h3 className="text-white font-semibold text-lg mb-2">Delete Test Results</h3>
+            <p className="text-dark-400 text-sm mb-6">Are you sure you want to delete the LLM test results for <span className="text-white font-medium">{selectedDomain}</span>?</p>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setConfirmDeleteTest(false)} className="px-4 py-2 text-dark-400 hover:text-white text-sm transition-colors cursor-pointer">Cancel</button>
+              <button onClick={deleteLLMTest} className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-500 transition-colors cursor-pointer">Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete search analysis confirmation modal */}
       {confirmDeleteSearchAnalysis && (
@@ -8907,8 +9419,8 @@ export default function App() {
             </div>
             <p className="text-dark-400 text-sm mb-6">
               {userTenantRole === 'owner'
-                ? 'You need to configure an API key before generating reports. Set up your Anthropic API key in Manage to get started.'
-                : 'Your team needs an API key configured before you can generate reports. Ask your team owner to set up an Anthropic API key in Manage.'}
+                ? 'You need to configure an API key before generating reports. Set up your AI provider API key in Settings to get started.'
+                : 'Your team needs an API key configured before you can generate reports. Ask your team owner to set up an API key in Settings.'}
             </p>
             <div className="flex justify-end gap-3">
               <button
@@ -8938,10 +9450,10 @@ export default function App() {
               <h3 className="text-white font-semibold text-lg">Welcome! One More Step</h3>
             </div>
             <p className="text-dark-400 text-sm mb-2">
-              To start generating AI-powered reports, you'll need to connect your Anthropic API key.
+              To start generating AI-powered reports, you'll need to connect an API key from an AI provider (Anthropic, OpenAI, Grok, or Gemini).
             </p>
             <p className="text-dark-500 text-xs mb-6">
-              Don't have one yet? You can create a free account at console.anthropic.com and generate an API key in seconds.
+              You can configure your API keys in Settings. Most providers offer free tiers to get started.
             </p>
             <div className="flex justify-end">
               <button

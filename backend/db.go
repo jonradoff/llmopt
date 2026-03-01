@@ -206,6 +206,15 @@ func (m *MongoDB) ensureIndexes() {
 	if err != nil {
 		log.Printf("Warning: failed to create indexes on tenant_api_keys: %v", err)
 	}
+
+	settingsIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "tenantId", Value: 1}},
+			Options: options.Index().SetUnique(true)},
+	}
+	_, err = m.TenantSettings().Indexes().CreateMany(ctx, settingsIdx)
+	if err != nil {
+		log.Printf("Warning: failed to create indexes on tenant_settings: %v", err)
+	}
 }
 
 func (m *MongoDB) Analyses() *mongo.Collection {
@@ -266,6 +275,14 @@ func (m *MongoDB) TenantAPIKeys() *mongo.Collection {
 
 func (m *MongoDB) SearchAnalyses() *mongo.Collection {
 	return m.Database.Collection("search_analyses")
+}
+
+func (m *MongoDB) LLMTests() *mongo.Collection {
+	return m.Database.Collection("llm_tests")
+}
+
+func (m *MongoDB) TenantSettings() *mongo.Collection {
+	return m.Database.Collection("tenant_settings")
 }
 
 func (m *MongoDB) Close(ctx context.Context) error {

@@ -5,4 +5,7 @@
 backend/llmopt
 frontend/node_modules/
 frontend/dist/
+lastsaas/frontend/node_modules/
+lastsaas/frontend/dist/
+lastsaas/backend/lastsaas
 .DS_Store

@@ -1,0 +1,280 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// AnthropicProvider implements LLMProvider for the Anthropic Claude API.
+type AnthropicProvider struct{}
+
+func (p *AnthropicProvider) ProviderID() string { return "anthropic" }
+func (p *AnthropicProvider) Name() string       { return "Anthropic" }
+
+func (p *AnthropicProvider) Models() []ModelDef {
+	return []ModelDef{
+		{ID: "claude-sonnet-4-6", Name: "Sonnet 4.6"},
+		{ID: "claude-haiku-4-5-20251001", Name: "Haiku 4.5"},
+	}
+}
+
+func (p *AnthropicProvider) SmallModel() string {
+	return "claude-haiku-4-5-20251001"
+}
+
+func (p *AnthropicProvider) BuildStreamBody(model string, maxTokens int, prompt string, useWebSearch bool) ([]byte, error) {
+	body := map[string]any{
+		"model":      model,
+		"max_tokens": maxTokens,
+		"stream":     true,
+		"messages": []map[string]any{
+			{"role": "user", "content": prompt},
+		},
+	}
+	if useWebSearch {
+		body["tools"] = []map[string]any{
+			{
+				"type": "web_search_20250305",
+				"name": "web_search",
+			},
+		}
+	}
+	return json.Marshal(body)
+}
+
+func (p *AnthropicProvider) Call(ctx context.Context, apiKey, model, prompt string, maxTokens int) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"model":      model,
+		"max_tokens": maxTokens,
+		"messages": []map[string]any{
+			{"role": "user", "content": prompt},
+		},
+	})
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 529 {
+		return "", ErrOverloaded
+	}
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("Claude API error (%d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+	if len(result.Content) == 0 {
+		return "", fmt.Errorf("empty response from Claude")
+	}
+	return result.Content[0].Text, nil
+}
+
+func (p *AnthropicProvider) Stream(ctx context.Context, apiKey string, body []byte, w http.ResponseWriter, flusher http.Flusher) (*StreamResult, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 529 {
+		log.Printf("Claude API returned 529 (overloaded)")
+		return nil, ErrOverloaded
+	}
+	if resp.StatusCode != 200 {
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Claude API error (%d): %s", resp.StatusCode, string(errBody))
+	}
+
+	sendSSE(w, flusher, "status", map[string]string{
+		"message": "Connected to Claude, beginning analysis...",
+	})
+
+	var fullText strings.Builder
+	var currentBlockType string
+	searchCount := 0
+	lastProgressAt := time.Now()
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := line[6:]
+		if data == "[DONE]" {
+			break
+		}
+
+		var event map[string]any
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+
+		eventType, _ := event["type"].(string)
+
+		switch eventType {
+		case "error":
+			errObj, _ := event["error"].(map[string]any)
+			errType := ""
+			errMsg := "Claude API error"
+			if errObj != nil {
+				errType, _ = errObj["type"].(string)
+				if msg, ok := errObj["message"].(string); ok {
+					errMsg = msg
+				}
+			}
+			log.Printf("Claude API stream error: type=%s message=%s", errType, errMsg)
+			if errType == "overloaded_error" {
+				return nil, ErrOverloaded
+			}
+			return nil, fmt.Errorf("%s", errMsg)
+
+		case "content_block_start":
+			block, _ := event["content_block"].(map[string]any)
+			if block == nil {
+				continue
+			}
+			blockType, _ := block["type"].(string)
+			currentBlockType = blockType
+
+			switch blockType {
+			case "server_tool_use":
+				name, _ := block["name"].(string)
+				if name == "web_search" {
+					searchCount++
+					sendSSE(w, flusher, "status", map[string]string{
+						"message": fmt.Sprintf("Searching the web (search #%d)...", searchCount),
+					})
+				}
+			case "web_search_tool_result":
+				sendSSE(w, flusher, "status", map[string]string{
+					"message": "Processing search results...",
+				})
+			case "text":
+				sendSSE(w, flusher, "status", map[string]string{
+					"message": "Generating analysis...",
+				})
+			}
+
+		case "content_block_delta":
+			delta, _ := event["delta"].(map[string]any)
+			if delta == nil {
+				continue
+			}
+			deltaType, _ := delta["type"].(string)
+			if deltaType == "text_delta" && currentBlockType == "text" {
+				text, _ := delta["text"].(string)
+				fullText.WriteString(text)
+				sendSSE(w, flusher, "text", map[string]string{
+					"content": text,
+				})
+				if time.Since(lastProgressAt) > 3*time.Second {
+					chars := fullText.Len()
+					sendSSE(w, flusher, "progress", map[string]string{
+						"message": fmt.Sprintf("Generating analysis... (%dk chars received)", chars/1000),
+					})
+					lastProgressAt = time.Now()
+				}
+			}
+
+		case "message_stop":
+			resultJSON := extractJSON(fullText.String())
+			return &StreamResult{RawText: fullText.String(), ResultJSON: resultJSON}, nil
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("stream reading error: %w", err)
+	}
+
+	if fullText.Len() > 0 {
+		resultJSON := extractJSON(fullText.String())
+		return &StreamResult{RawText: fullText.String(), ResultJSON: resultJSON}, nil
+	}
+
+	return nil, fmt.Errorf("stream ended without results")
+}
+
+func (p *AnthropicProvider) VerifyKey(ctx context.Context, apiKey string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	body, _ := json.Marshal(map[string]any{
+		"model":      "claude-haiku-4-5-20251001",
+		"max_tokens": 10,
+		"messages": []map[string]any{
+			{"role": "user", "content": "Reply with just the word 'ok'."},
+		},
+	})
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return "error", fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return "error", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch {
+	case resp.StatusCode == 200:
+		return "active", nil
+	case resp.StatusCode == 401:
+		return "invalid", nil
+	case resp.StatusCode == 429:
+		errBody, _ := io.ReadAll(resp.Body)
+		errStr := strings.ToLower(string(errBody))
+		if strings.Contains(errStr, "credit") || strings.Contains(errStr, "billing") {
+			return "no_credits", nil
+		}
+		return "active", nil
+	case resp.StatusCode == 529:
+		return "active", nil
+	default:
+		errBody, _ := io.ReadAll(resp.Body)
+		return "error", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(errBody))
+	}
+}

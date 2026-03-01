@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -206,6 +205,12 @@ func main() {
 	mux.HandleFunc("GET /api/search/analyses", withAuth(handleListSearchAnalyses(mongoDB)))
 	mux.HandleFunc("DELETE /api/search/analyses/{domain}", withAuth(handleDeleteSearchAnalysis(mongoDB)))
 
+	// LLM Test
+	mux.HandleFunc("POST /api/test", withAuth(handleLLMTest(mongoDB, encryptionKey, apiKey, saasEnabled)))
+	mux.HandleFunc("GET /api/test/{domain}", withAuth(handleGetLLMTest(mongoDB)))
+	mux.HandleFunc("DELETE /api/test/{domain}", withAuth(handleDeleteLLMTest(mongoDB)))
+	mux.HandleFunc("POST /api/test/generate-queries", withAuth(handleGenerateTestQueries(mongoDB)))
+
 	// PDF Report
 	mux.HandleFunc("POST /api/domains/{domain}/report/pdf", withAuth(handleGeneratePDF(mongoDB)))
 	mux.HandleFunc("GET /api/domains/{domain}/report/pdf/{id}", withAuth(handleServePDF(mongoDB)))
@@ -216,6 +221,8 @@ func main() {
 	mux.HandleFunc("DELETE /api/settings/api-keys/{provider}", withAuth(handleDeleteAPIKey(mongoDB)))
 	mux.HandleFunc("POST /api/settings/api-keys/{provider}/verify", withAuth(handleVerifyAPIKey(mongoDB, encryptionKey)))
 	mux.HandleFunc("GET /api/settings/api-keys/status", withAuth(handleAPIKeyStatus(mongoDB)))
+	mux.HandleFunc("GET /api/settings/primary-provider", withAuth(handleGetPrimaryProvider(mongoDB)))
+	mux.HandleFunc("PUT /api/settings/primary-provider", withAuth(handleSetPrimaryProvider(mongoDB)))
 
 	// Public routes (no auth required)
 	mux.HandleFunc("GET /api/health/claude", handleHealthCheck(apiKey, mongoDB))
@@ -271,6 +278,9 @@ func main() {
 	mux.HandleFunc("OPTIONS /api/search/analyses", handleOptions)
 	mux.HandleFunc("OPTIONS /api/domains/{domain}/report/pdf", handleOptions)
 	mux.HandleFunc("OPTIONS /api/domains/{domain}/report/pdf/{id}", handleOptions)
+	mux.HandleFunc("OPTIONS /api/test", handleOptions)
+	mux.HandleFunc("OPTIONS /api/test/{domain}", handleOptions)
+	mux.HandleFunc("OPTIONS /api/test/generate-queries", handleOptions)
 	mux.HandleFunc("OPTIONS /api/settings/api-keys", handleOptions)
 	mux.HandleFunc("OPTIONS /api/settings/api-keys/{provider}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/settings/api-keys/{provider}/verify", handleOptions)
@@ -431,7 +441,8 @@ func saveAndSendDone(w http.ResponseWriter, flusher http.Flusher, ctx context.Co
 	}
 }
 
-var errOverloaded = fmt.Errorf("claude API overloaded")
+// errOverloaded is kept as an alias for backward compatibility within this file.
+var errOverloaded = ErrOverloaded
 
 // stripJSONFencing removes markdown code fences (```json ... ```) that Claude
 // sometimes wraps around JSON responses.
@@ -451,56 +462,9 @@ func stripJSONFencing(s string) string {
 	return s
 }
 
-// callClaude makes a non-streaming Claude API call and returns the text response.
-// Used for Phase 1 per-video assessments (no SSE needed).
-func callClaude(ctx context.Context, apiKey, model, prompt string, maxTokens int) (string, error) {
-	body, _ := json.Marshal(map[string]any{
-		"model":      model,
-		"max_tokens": maxTokens,
-		"messages": []map[string]any{
-			{"role": "user", "content": prompt},
-		},
-	})
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 529 {
-		return "", errOverloaded
-	}
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("Claude API error (%d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
-	}
-	if len(result.Content) == 0 {
-		return "", fmt.Errorf("empty response from Claude")
-	}
-	return result.Content[0].Text, nil
-}
-
-// assessVideo calls Haiku to assess a single video's transcript for LLM authority signals.
-func assessVideo(ctx context.Context, apiKey string, video YouTubeVideo, domain string, searchTerms []string) (*VideoAssessment, error) {
+// assessVideo calls the provider's small model to assess a single video's transcript for LLM authority signals.
+func assessVideo(ctx context.Context, provider LLMProvider, apiKey string, video YouTubeVideo, domain string, searchTerms []string) (*VideoAssessment, error) {
 	if video.Transcript == "" {
 		return nil, nil
 	}
@@ -548,7 +512,7 @@ Return ONLY valid JSON: {"keyword_alignment":N,"quotability":N,"info_density":N,
 			backoff *= 2
 		}
 
-		text, err := callClaude(ctx, apiKey, "claude-haiku-4-5-20251001", prompt, 1024)
+		text, err := provider.Call(ctx, apiKey, provider.SmallModel(), prompt, 1024)
 		if err == errOverloaded {
 			if attempt < maxRetries {
 				continue
@@ -579,9 +543,9 @@ Return ONLY valid JSON: {"keyword_alignment":N,"quotability":N,"info_density":N,
 	return nil, fmt.Errorf("exhausted retries")
 }
 
-// assessVideos runs Phase 1: concurrent per-video assessments with Haiku.
+// assessVideos runs Phase 1: concurrent per-video assessments with the provider's small model.
 // Returns a map of videoID -> assessment. Nil values mean no transcript or assessment failed.
-func assessVideos(ctx context.Context, apiKey string, videos []YouTubeVideo, domain string, searchTerms []string, mongoDB *MongoDB, w http.ResponseWriter, flusher http.Flusher) map[string]*VideoAssessment {
+func assessVideos(ctx context.Context, provider LLMProvider, apiKey string, videos []YouTubeVideo, domain string, searchTerms []string, mongoDB *MongoDB, w http.ResponseWriter, flusher http.Flusher) map[string]*VideoAssessment {
 	results := make(map[string]*VideoAssessment)
 	var mu sync.Mutex
 
@@ -612,7 +576,7 @@ func assessVideos(ctx context.Context, apiKey string, videos []YouTubeVideo, dom
 				return
 			}
 
-			a, err := assessVideo(ctx, apiKey, video, domain, searchTerms)
+			a, err := assessVideo(ctx, provider, apiKey, video, domain, searchTerms)
 			if err != nil {
 				log.Printf("Warning: assessment failed for %s: %v", video.VideoID, err)
 				resultsCh <- assessResult{videoID: video.VideoID, err: err}
@@ -650,153 +614,6 @@ func assessVideos(ctx context.Context, apiKey string, videos []YouTubeVideo, dom
 	}
 
 	return results
-}
-
-type claudeStreamResult struct {
-	rawText    string
-	resultJSON string
-}
-
-// streamClaude makes a Claude API call and processes the SSE stream.
-// Returns the result or errOverloaded if the API is overloaded (retryable).
-// Sends progress SSE events to the client during streaming.
-func streamClaude(ctx context.Context, apiKey string, body []byte, w http.ResponseWriter, flusher http.Flusher) (*claudeStreamResult, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 529 {
-		log.Printf("Claude API returned 529 (overloaded)")
-		return nil, errOverloaded
-	}
-	if resp.StatusCode != 200 {
-		errBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("Claude API error (%d): %s", resp.StatusCode, string(errBody))
-	}
-
-	sendSSE(w, flusher, "status", map[string]string{
-		"message": "Connected to Claude, beginning analysis...",
-	})
-
-	var fullText strings.Builder
-	var currentBlockType string
-	searchCount := 0
-	lastProgressAt := time.Now()
-
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := line[6:]
-		if data == "[DONE]" {
-			break
-		}
-
-		var event map[string]any
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			continue
-		}
-
-		eventType, _ := event["type"].(string)
-
-		switch eventType {
-		case "error":
-			errObj, _ := event["error"].(map[string]any)
-			errType := ""
-			errMsg := "Claude API error"
-			if errObj != nil {
-				errType, _ = errObj["type"].(string)
-				if msg, ok := errObj["message"].(string); ok {
-					errMsg = msg
-				}
-			}
-			log.Printf("Claude API stream error: type=%s message=%s", errType, errMsg)
-			if errType == "overloaded_error" {
-				return nil, errOverloaded
-			}
-			return nil, fmt.Errorf("%s", errMsg)
-
-		case "content_block_start":
-			block, _ := event["content_block"].(map[string]any)
-			if block == nil {
-				continue
-			}
-			blockType, _ := block["type"].(string)
-			currentBlockType = blockType
-
-			switch blockType {
-			case "server_tool_use":
-				name, _ := block["name"].(string)
-				if name == "web_search" {
-					searchCount++
-					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("Searching the web (search #%d)...", searchCount),
-					})
-				}
-			case "web_search_tool_result":
-				sendSSE(w, flusher, "status", map[string]string{
-					"message": "Processing search results...",
-				})
-			case "text":
-				sendSSE(w, flusher, "status", map[string]string{
-					"message": "Generating analysis...",
-				})
-			}
-
-		case "content_block_delta":
-			delta, _ := event["delta"].(map[string]any)
-			if delta == nil {
-				continue
-			}
-			deltaType, _ := delta["type"].(string)
-			if deltaType == "text_delta" && currentBlockType == "text" {
-				text, _ := delta["text"].(string)
-				fullText.WriteString(text)
-				sendSSE(w, flusher, "text", map[string]string{
-					"content": text,
-				})
-				// Send periodic progress updates so the UI knows we're alive
-				if time.Since(lastProgressAt) > 3*time.Second {
-					chars := fullText.Len()
-					sendSSE(w, flusher, "progress", map[string]string{
-						"message": fmt.Sprintf("Generating analysis... (%dk chars received)", chars/1000),
-					})
-					lastProgressAt = time.Now()
-				}
-			}
-
-		case "message_stop":
-			resultJSON := extractJSON(fullText.String())
-			return &claudeStreamResult{rawText: fullText.String(), resultJSON: resultJSON}, nil
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("stream reading error: %w", err)
-	}
-
-	// Fallback: stream ended without message_stop but we have text
-	if fullText.Len() > 0 {
-		resultJSON := extractJSON(fullText.String())
-		return &claudeStreamResult{rawText: fullText.String(), resultJSON: resultJSON}, nil
-	}
-
-	return nil, fmt.Errorf("stream ended without results")
 }
 
 func handleAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
@@ -854,10 +671,10 @@ func handleAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 			}
 		}
 
-		// Resolve API key for this tenant
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		// Resolve primary LLM provider and API key for this tenant
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
 
@@ -927,35 +744,16 @@ For page_urls in each question, list the specific page URL(s) from the site that
 
 Generate 15-20 diverse questions across different categories. Include questions at different levels of specificity — from broad queries to very specific ones.%s%s`, req.URL, brandInstructions, brandInfo.ContextString)
 
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
 		for mi, model := range models {
 			if mi > 0 {
 				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].name, model.name),
+					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].Name, model.Name),
 				})
 			}
 
-			claudeBody, _ := json.Marshal(map[string]any{
-				"model":      model.id,
-				"max_tokens": 16384,
-				"stream":     true,
-				"tools": []map[string]any{
-					{
-						"type": "web_search_20250305",
-						"name": "web_search",
-					},
-				},
-				"messages": []map[string]any{
-					{"role": "user", "content": prompt},
-				},
-			})
+			claudeBody, _ := provider.BuildStreamBody(model.ID, 16384, prompt, true)
 
 			const maxRetries = 3
 			backoff := 2 * time.Second
@@ -964,7 +762,7 @@ Generate 15-20 diverse questions across different categories. Include questions 
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -974,11 +772,11 @@ Generate 15-20 diverse questions across different categories. Include questions 
 					backoff *= 2
 				}
 
-				result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+				result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 				if err == errOverloaded {
 					lastErr = err
 					if attempt < maxRetries {
-						log.Printf("Claude API (%s) overloaded, will retry (attempt %d/%d)", model.id, attempt+1, maxRetries)
+						log.Printf("%s API (%s) overloaded, will retry (attempt %d/%d)", provider.Name(), model.ID, attempt+1, maxRetries)
 						continue
 					}
 					break // exhausted retries, try next model
@@ -988,15 +786,15 @@ Generate 15-20 diverse questions across different categories. Include questions 
 					return
 				}
 
-				saveAndSendDone(w, flusher, r.Context(), mongoDB, req.URL, result.rawText, result.resultJSON, model.name, brandInfo)
+				saveAndSendDone(w, flusher, r.Context(), mongoDB, req.URL, result.RawText, result.ResultJSON, model.Name, brandInfo)
 				return
 			}
 
-			log.Printf("Claude API (%s) exhausted retries: %v", model.id, lastErr)
+			log.Printf("%s API (%s) exhausted retries: %v", provider.Name(), model.ID, lastErr)
 		}
 
 		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All Claude models are currently overloaded. Please try again later.",
+			"message": "All models are currently overloaded. Please try again later.",
 		})
 	}
 }
@@ -1304,13 +1102,13 @@ func handleSetAPIKey(mongoDB *MongoDB, encKey []byte) http.HandlerFunc {
 
 		tenantID := saas.TenantIDFromContext(r.Context())
 
-		// Only Anthropic keys can be verified right now
+		// Verify key with the provider
 		status := "active"
-		if provider == "anthropic" {
+		if p := getProvider(provider); p != nil {
 			var err error
-			status, err = verifyAnthropicKey(r.Context(), req.Key)
+			status, err = p.VerifyKey(r.Context(), req.Key)
 			if err != nil {
-				log.Printf("API key verification error for tenant %s: %v", tenantID, err)
+				log.Printf("API key verification error for tenant %s (%s): %v", tenantID, provider, err)
 			}
 		}
 
@@ -1434,10 +1232,10 @@ func handleVerifyAPIKey(mongoDB *MongoDB, encKey []byte) http.HandlerFunc {
 		}
 
 		status := "active"
-		if provider == "anthropic" {
-			status, err = verifyAnthropicKey(ctx, plainKey)
+		if p := getProvider(provider); p != nil {
+			status, err = p.VerifyKey(ctx, plainKey)
 			if err != nil {
-				log.Printf("API key re-verify error for tenant %s: %v", tenantID, err)
+				log.Printf("API key re-verify error for tenant %s (%s): %v", tenantID, provider, err)
 			}
 		}
 
@@ -1505,34 +1303,143 @@ func handleAPIKeyStatus(mongoDB *MongoDB) http.HandlerFunc {
 			ownerName = resolveOwnerName(ctx, mongoDB, tenantID)
 		}
 
-		var doc TenantAPIKey
-		err := mongoDB.TenantAPIKeys().FindOne(ctx, bson.M{
-			"tenantId": tenantID,
-			"provider": "anthropic",
-		}).Decode(&doc)
-
+		// Check if ANY provider has an active key
+		cursor, err := mongoDB.TenantAPIKeys().Find(ctx, bson.M{"tenantId": tenantID})
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
-				"has_key":         false,
-				"provider":        "anthropic",
-				"status":          "unconfigured",
-				"preferred_model": "",
-				"role":            role,
-				"owner_name":      ownerName,
+				"has_key":    false,
+				"status":     "unconfigured",
+				"role":       role,
+				"owner_name": ownerName,
 			})
 			return
+		}
+		defer cursor.Close(ctx)
+
+		var keys []TenantAPIKey
+		if err := cursor.All(ctx, &keys); err != nil || len(keys) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"has_key":    false,
+				"status":     "unconfigured",
+				"role":       role,
+				"owner_name": ownerName,
+			})
+			return
+		}
+
+		// Determine primary provider
+		var settings TenantSettings
+		primaryProvider := "anthropic"
+		if err := mongoDB.TenantSettings().FindOne(ctx, bson.M{"tenantId": tenantID}).Decode(&settings); err == nil && settings.PrimaryProvider != "" {
+			primaryProvider = settings.PrimaryProvider
+		}
+
+		// has_key is true if any key exists; status is "active" if any key is active
+		hasActive := false
+		for _, k := range keys {
+			if k.Status == "active" {
+				hasActive = true
+				break
+			}
+		}
+
+		overallStatus := "inactive"
+		if hasActive {
+			overallStatus = "active"
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"has_key":          true,
-			"provider":         doc.Provider,
-			"status":           doc.Status,
-			"preferred_model":  doc.PreferredModel,
-			"last_verified_at": doc.LastVerifiedAt,
+			"status":           overallStatus,
+			"primary_provider": primaryProvider,
 			"role":             role,
 			"owner_name":       ownerName,
+		})
+	}
+}
+
+func handleGetPrimaryProvider(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenantID := saas.TenantIDFromContext(r.Context())
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		var settings TenantSettings
+		primaryProvider := "anthropic"
+		if err := mongoDB.TenantSettings().FindOne(ctx, bson.M{"tenantId": tenantID}).Decode(&settings); err == nil && settings.PrimaryProvider != "" {
+			primaryProvider = settings.PrimaryProvider
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"primary_provider": primaryProvider,
+		})
+	}
+}
+
+func handleSetPrimaryProvider(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if role := saas.MemberRoleFromContext(r.Context()); role != "owner" {
+			http.Error(w, `{"error":"forbidden","message":"Only the team owner can change the primary provider"}`, http.StatusForbidden)
+			return
+		}
+
+		var req struct {
+			Provider string `json:"provider"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+
+		if getProvider(req.Provider) == nil {
+			http.Error(w, `{"error":"invalid provider"}`, http.StatusBadRequest)
+			return
+		}
+
+		tenantID := saas.TenantIDFromContext(r.Context())
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		// Verify the tenant has an active key for this provider
+		var doc TenantAPIKey
+		err := mongoDB.TenantAPIKeys().FindOne(ctx, bson.M{
+			"tenantId": tenantID,
+			"provider": req.Provider,
+		}).Decode(&doc)
+		if err != nil {
+			http.Error(w, `{"error":"no_key","message":"You must configure an API key for this provider first"}`, http.StatusBadRequest)
+			return
+		}
+
+		now := time.Now()
+		_, err = mongoDB.TenantSettings().UpdateOne(ctx,
+			bson.M{"tenantId": tenantID},
+			bson.M{
+				"$set": bson.M{
+					"primaryProvider": req.Provider,
+					"updatedAt":       now,
+				},
+				"$setOnInsert": bson.M{
+					"tenantId": tenantID,
+				},
+			},
+			options.Update().SetUpsert(true),
+		)
+		if err != nil {
+			log.Printf("Failed to set primary provider for tenant %s: %v", tenantID, err)
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"primary_provider": req.Provider,
 		})
 	}
 }
@@ -1616,10 +1523,10 @@ func handleOptimize(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEna
 			}
 		}
 
-		// Resolve API key for this tenant
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		// Resolve primary LLM provider and API key for this tenant
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
 
@@ -1729,32 +1636,16 @@ Return your analysis as JSON in exactly this format (no markdown code fences, ju
 
 Be specific and evidence-based in your scoring. Reference actual content you found on the pages. The overall_score should be the weighted average: content_authority*0.30 + structural_optimization*0.20 + source_authority*0.30 + knowledge_persistence*0.20.%s%s`, analysis.Domain, question.Question, pageURLsList, brandStatusNote, optBrandInfo.ContextString)
 
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
 		for mi, model := range models {
 			if mi > 0 {
 				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].name, model.name),
+					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].Name, model.Name),
 				})
 			}
 
-			claudeBody, _ := json.Marshal(map[string]any{
-				"model":      model.id,
-				"max_tokens": 16384,
-				"stream":     true,
-				"tools": []map[string]any{
-					{"type": "web_search_20250305", "name": "web_search"},
-				},
-				"messages": []map[string]any{
-					{"role": "user", "content": prompt},
-				},
-			})
+			claudeBody, _ := provider.BuildStreamBody(model.ID, 16384, prompt, true)
 
 			const maxRetries = 3
 			backoff := 2 * time.Second
@@ -1763,7 +1654,7 @@ Be specific and evidence-based in your scoring. Reference actual content you fou
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -1773,11 +1664,11 @@ Be specific and evidence-based in your scoring. Reference actual content you fou
 					backoff *= 2
 				}
 
-				result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+				result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 				if err == errOverloaded {
 					lastErr = err
 					if attempt < maxRetries {
-						log.Printf("Claude API (%s) overloaded for optimization, will retry (attempt %d/%d)", model.id, attempt+1, maxRetries)
+						log.Printf("%s API (%s) overloaded for optimization, will retry (attempt %d/%d)", provider.Name(), model.ID, attempt+1, maxRetries)
 						continue
 					}
 					break
@@ -1788,11 +1679,11 @@ Be specific and evidence-based in your scoring. Reference actual content you fou
 				}
 
 				// Parse and save
-				cleanJSON := stripJSONFencing(result.resultJSON)
+				cleanJSON := stripJSONFencing(result.ResultJSON)
 				var optResult OptimizationResult
 				if err := json.Unmarshal([]byte(cleanJSON), &optResult); err != nil {
 					log.Printf("Failed to parse optimization result: %v", err)
-					sendSSE(w, flusher, "done", map[string]string{"result": result.resultJSON})
+					sendSSE(w, flusher, "done", map[string]string{"result": result.ResultJSON})
 					return
 				}
 
@@ -1804,9 +1695,9 @@ Be specific and evidence-based in your scoring. Reference actual content you fou
 					TenantID:              saas.TenantIDFromContext(r.Context()),
 					PageURLs:              question.PageURLs,
 					Result:                optResult,
-					RawText:               result.rawText,
+					RawText:               result.RawText,
 					BrandStatus:           question.BrandStatus,
-					Model:                 model.name,
+					Model:                 model.Name,
 					BrandContextUsed:      optBrandInfo.Used,
 					BrandProfileUpdatedAt: optBrandInfo.ProfileUpdatedAt,
 					CreatedAt:             time.Now(),
@@ -1821,10 +1712,10 @@ Be specific and evidence-based in your scoring. Reference actual content you fou
 				}
 
 				sendSSE(w, flusher, "done", map[string]any{
-					"result":                   result.resultJSON,
+					"result":                   result.ResultJSON,
 					"id":                       savedID,
 					"cached":                   false,
-					"model":                    model.name,
+					"model":                    model.Name,
 					"created_at":               opt.CreatedAt,
 					"brand_context_used":       optBrandInfo.Used,
 					"brand_profile_updated_at": optBrandInfo.ProfileUpdatedAt,
@@ -1833,11 +1724,11 @@ Be specific and evidence-based in your scoring. Reference actual content you fou
 				return
 			}
 
-			log.Printf("Claude API (%s) exhausted retries for optimization: %v", model.id, lastErr)
+			log.Printf("%s API (%s) exhausted retries for optimization: %v", provider.Name(), model.ID, lastErr)
 		}
 
 		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All Claude models are currently overloaded. Please try again later.",
+			"message": "All models are currently overloaded. Please try again later.",
 		})
 	}
 }
@@ -3074,13 +2965,13 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 			return
 		}
 
-		// Resolve API key for this tenant
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		// Resolve primary LLM provider and API key for this tenant
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
-		_ = apiKey // used by streamClaude below
+		_ = apiKey // used by provider.Stream below
 
 		// Load all optimizations for this domain (max 30)
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -3164,30 +3055,17 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 
 		prompt := buildDomainSummaryPrompt(domain, optimizations, analysis, videoAnalysis, redditAnalysis, brandInfo)
 
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
 		for mi, model := range models {
 			if mi > 0 {
 				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].name, model.name),
+					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].Name, model.Name),
 				})
 			}
 
 			// No tools needed — pure synthesis of existing data
-			claudeBody, _ := json.Marshal(map[string]any{
-				"model":      model.id,
-				"max_tokens": 8192,
-				"stream":     true,
-				"messages": []map[string]any{
-					{"role": "user", "content": prompt},
-				},
-			})
+			claudeBody, _ := provider.BuildStreamBody(model.ID, 8192, prompt, false)
 
 			const maxRetries = 3
 			backoff := 2 * time.Second
@@ -3196,7 +3074,7 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -3206,7 +3084,7 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 					backoff *= 2
 				}
 
-				result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+				result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 				if err == errOverloaded {
 					lastErr = err
 					if attempt < maxRetries {
@@ -3220,7 +3098,7 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 				}
 
 				// Parse and save the summary
-				cleanJSON := stripJSONFencing(result.resultJSON)
+				cleanJSON := stripJSONFencing(result.ResultJSON)
 				var summaryResult DomainSummaryResult
 				if err := json.Unmarshal([]byte(cleanJSON), &summaryResult); err != nil {
 					sendSSE(w, flusher, "error", map[string]string{"message": "Failed to parse summary results"})
@@ -3236,8 +3114,8 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 					Domain:           domain,
 					TenantID:         saas.TenantIDFromContext(r.Context()),
 					Result:           summaryResult,
-					RawText:          result.rawText,
-					Model:            model.name,
+					RawText:          result.RawText,
+					Model:            model.Name,
 					OptimizationIDs:  optIDs,
 					ReportCount:      len(optimizations),
 					IncludesAnalysis: analysis != nil,
@@ -3258,8 +3136,8 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 				}
 
 				sendSSE(w, flusher, "done", map[string]any{
-					"result":            result.resultJSON,
-					"model":             model.name,
+					"result":            result.ResultJSON,
+					"model":             model.Name,
 					"generated_at":      summary.GeneratedAt,
 					"report_count":      summary.ReportCount,
 					"includes_analysis": summary.IncludesAnalysis,
@@ -3270,11 +3148,11 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 				return
 			}
 
-			log.Printf("Claude API (%s) exhausted retries for domain summary: %v", model.id, lastErr)
+			log.Printf("%s API (%s) exhausted retries for domain summary: %v", provider.Name(), model.ID, lastErr)
 		}
 
 		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All Claude models are currently overloaded. Please try again later.",
+			"message": "All models are currently overloaded. Please try again later.",
 		})
 	}
 }
@@ -3293,9 +3171,9 @@ func handleDiscoverCompetitors(mongoDB *MongoDB, encKey []byte, fallbackKey stri
 			return
 		}
 
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
 		_ = apiKey
@@ -3355,32 +3233,16 @@ Return your findings as JSON (no markdown code fences, just raw JSON):
 - source: "search" (found in web search results), "review_site" (found on G2/Capterra/etc), "llm_knowledge" (from your training data), or "multiple" (found in multiple places)
 - confidence: 0.0-1.0 how confident you are this is a real competitor`, domain, brandContext, domain)
 
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
 		for mi, model := range models {
 			if mi > 0 {
 				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].name, model.name),
+					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].Name, model.Name),
 				})
 			}
 
-			claudeBody, _ := json.Marshal(map[string]any{
-				"model":      model.id,
-				"max_tokens": 16384,
-				"stream":     true,
-				"tools": []map[string]any{
-					{"type": "web_search_20250305", "name": "web_search"},
-				},
-				"messages": []map[string]any{
-					{"role": "user", "content": prompt},
-				},
-			})
+			claudeBody, _ := provider.BuildStreamBody(model.ID, 16384, prompt, true)
 
 			const maxRetries = 3
 			backoff := 2 * time.Second
@@ -3389,7 +3251,7 @@ Return your findings as JSON (no markdown code fences, just raw JSON):
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -3399,7 +3261,7 @@ Return your findings as JSON (no markdown code fences, just raw JSON):
 					backoff *= 2
 				}
 
-				result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+				result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 				if err == errOverloaded {
 					lastErr = err
 					if attempt < maxRetries {
@@ -3414,17 +3276,17 @@ Return your findings as JSON (no markdown code fences, just raw JSON):
 
 				// Send results (not saved to DB — user reviews first)
 				sendSSE(w, flusher, "done", map[string]any{
-					"result": result.resultJSON,
-					"model":  model.name,
+					"result": result.ResultJSON,
+					"model":  model.Name,
 				})
 				return
 			}
 
-			log.Printf("Claude API (%s) exhausted retries for competitor discovery: %v", model.id, lastErr)
+			log.Printf("%s API (%s) exhausted retries for competitor discovery: %v", provider.Name(), model.ID, lastErr)
 		}
 
 		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All Claude models are currently overloaded. Please try again later.",
+			"message": "All models are currently overloaded. Please try again later.",
 		})
 	}
 }
@@ -3443,9 +3305,9 @@ func handleSuggestQueries(mongoDB *MongoDB, encKey []byte, fallbackKey string, s
 			return
 		}
 
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
 		_ = apiKey
@@ -3512,29 +3374,16 @@ Return as JSON (no markdown code fences, just raw JSON):
 			strings.Join(brand.KeyUseCases, ", "),
 			strings.Join(competitorNames, ", "))
 
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
 		for mi, model := range models {
 			if mi > 0 {
 				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].name, model.name),
+					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].Name, model.Name),
 				})
 			}
 
-			claudeBody, _ := json.Marshal(map[string]any{
-				"model":      model.id,
-				"max_tokens": 16384,
-				"stream":     true,
-				"messages": []map[string]any{
-					{"role": "user", "content": prompt},
-				},
-			})
+			claudeBody, _ := provider.BuildStreamBody(model.ID, 16384, prompt, false)
 
 			const maxRetries = 3
 			backoff := 2 * time.Second
@@ -3543,7 +3392,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -3553,7 +3402,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 					backoff *= 2
 				}
 
-				result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+				result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 				if err == errOverloaded {
 					lastErr = err
 					if attempt < maxRetries {
@@ -3567,17 +3416,17 @@ Return as JSON (no markdown code fences, just raw JSON):
 				}
 
 				sendSSE(w, flusher, "done", map[string]any{
-					"result": result.resultJSON,
-					"model":  model.name,
+					"result": result.ResultJSON,
+					"model":  model.Name,
 				})
 				return
 			}
 
-			log.Printf("Claude API (%s) exhausted retries for query suggestion: %v", model.id, lastErr)
+			log.Printf("%s API (%s) exhausted retries for query suggestion: %v", provider.Name(), model.ID, lastErr)
 		}
 
 		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All Claude models are currently overloaded. Please try again later.",
+			"message": "All models are currently overloaded. Please try again later.",
 		})
 	}
 }
@@ -3596,9 +3445,9 @@ func handleGenerateDescription(mongoDB *MongoDB, encKey []byte, fallbackKey stri
 			return
 		}
 
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
 		_ = apiKey
@@ -3621,32 +3470,16 @@ Return as JSON (no markdown code fences, just raw JSON):
   "products": ["product1", "feature1"]
 }`, domain, domain)
 
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
 		for mi, model := range models {
 			if mi > 0 {
 				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].name, model.name),
+					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].Name, model.Name),
 				})
 			}
 
-			claudeBody, _ := json.Marshal(map[string]any{
-				"model":      model.id,
-				"max_tokens": 4096,
-				"stream":     true,
-				"tools": []map[string]any{
-					{"type": "web_search_20250305", "name": "web_search"},
-				},
-				"messages": []map[string]any{
-					{"role": "user", "content": prompt},
-				},
-			})
+			claudeBody, _ := provider.BuildStreamBody(model.ID, 4096, prompt, true)
 
 			const maxRetries = 3
 			backoff := 2 * time.Second
@@ -3655,7 +3488,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -3665,7 +3498,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 					backoff *= 2
 				}
 
-				result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+				result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 				if err == errOverloaded {
 					lastErr = err
 					if attempt < maxRetries {
@@ -3679,17 +3512,17 @@ Return as JSON (no markdown code fences, just raw JSON):
 				}
 
 				sendSSE(w, flusher, "done", map[string]any{
-					"result": result.resultJSON,
-					"model":  model.name,
+					"result": result.ResultJSON,
+					"model":  model.Name,
 				})
 				return
 			}
 
-			log.Printf("Claude API (%s) exhausted retries for description generation: %v", model.id, lastErr)
+			log.Printf("%s API (%s) exhausted retries for description generation: %v", provider.Name(), model.ID, lastErr)
 		}
 
 		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All Claude models are currently overloaded. Please try again later.",
+			"message": "All models are currently overloaded. Please try again later.",
 		})
 	}
 }
@@ -3708,9 +3541,9 @@ func handlePredictAudience(mongoDB *MongoDB, encKey []byte, fallbackKey string, 
 			return
 		}
 
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
 		_ = apiKey
@@ -3755,32 +3588,16 @@ Return as JSON (no markdown code fences, just raw JSON):
   "key_use_cases": ["specific use case 1", "specific use case 2", "..."]
 }`, domain, brandContext, domain)
 
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
 		for mi, model := range models {
 			if mi > 0 {
 				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].name, model.name),
+					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].Name, model.Name),
 				})
 			}
 
-			claudeBody, _ := json.Marshal(map[string]any{
-				"model":      model.id,
-				"max_tokens": 4096,
-				"stream":     true,
-				"tools": []map[string]any{
-					{"type": "web_search_20250305", "name": "web_search"},
-				},
-				"messages": []map[string]any{
-					{"role": "user", "content": prompt},
-				},
-			})
+			claudeBody, _ := provider.BuildStreamBody(model.ID, 4096, prompt, true)
 
 			const maxRetries = 3
 			backoff := 2 * time.Second
@@ -3789,7 +3606,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -3799,7 +3616,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 					backoff *= 2
 				}
 
-				result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+				result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 				if err == errOverloaded {
 					lastErr = err
 					if attempt < maxRetries {
@@ -3813,17 +3630,17 @@ Return as JSON (no markdown code fences, just raw JSON):
 				}
 
 				sendSSE(w, flusher, "done", map[string]any{
-					"result": result.resultJSON,
-					"model":  model.name,
+					"result": result.ResultJSON,
+					"model":  model.Name,
 				})
 				return
 			}
 
-			log.Printf("Claude API (%s) exhausted retries for audience prediction: %v", model.id, lastErr)
+			log.Printf("%s API (%s) exhausted retries for audience prediction: %v", provider.Name(), model.ID, lastErr)
 		}
 
 		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All Claude models are currently overloaded. Please try again later.",
+			"message": "All models are currently overloaded. Please try again later.",
 		})
 	}
 }
@@ -3842,9 +3659,9 @@ func handleSuggestClaims(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 			return
 		}
 
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
 		_ = apiKey
@@ -3896,32 +3713,16 @@ Return as JSON (no markdown code fences, just raw JSON):
 
 Include 5-15 claims, prioritizing the most prominent and verifiable ones.`, domain, brandContext, domain)
 
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
 		for mi, model := range models {
 			if mi > 0 {
 				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].name, model.name),
+					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].Name, model.Name),
 				})
 			}
 
-			claudeBody, _ := json.Marshal(map[string]any{
-				"model":      model.id,
-				"max_tokens": 8192,
-				"stream":     true,
-				"tools": []map[string]any{
-					{"type": "web_search_20250305", "name": "web_search"},
-				},
-				"messages": []map[string]any{
-					{"role": "user", "content": prompt},
-				},
-			})
+			claudeBody, _ := provider.BuildStreamBody(model.ID, 8192, prompt, true)
 
 			const maxRetries = 3
 			backoff := 2 * time.Second
@@ -3930,7 +3731,7 @@ Include 5-15 claims, prioritizing the most prominent and verifiable ones.`, doma
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -3940,7 +3741,7 @@ Include 5-15 claims, prioritizing the most prominent and verifiable ones.`, doma
 					backoff *= 2
 				}
 
-				result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+				result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 				if err == errOverloaded {
 					lastErr = err
 					if attempt < maxRetries {
@@ -3954,17 +3755,17 @@ Include 5-15 claims, prioritizing the most prominent and verifiable ones.`, doma
 				}
 
 				sendSSE(w, flusher, "done", map[string]any{
-					"result": result.resultJSON,
-					"model":  model.name,
+					"result": result.ResultJSON,
+					"model":  model.Name,
 				})
 				return
 			}
 
-			log.Printf("Claude API (%s) exhausted retries for claim suggestion: %v", model.id, lastErr)
+			log.Printf("%s API (%s) exhausted retries for claim suggestion: %v", provider.Name(), model.ID, lastErr)
 		}
 
 		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All Claude models are currently overloaded. Please try again later.",
+			"message": "All models are currently overloaded. Please try again later.",
 		})
 	}
 }
@@ -3983,9 +3784,9 @@ func handlePredictDifferentiators(mongoDB *MongoDB, encKey []byte, fallbackKey s
 			return
 		}
 
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
 		_ = apiKey
@@ -4047,32 +3848,16 @@ Return as JSON (no markdown code fences, just raw JSON):
 
 Include 5-12 differentiators, ordered by distinctiveness.`, domain, brandContext, domain)
 
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
 		for mi, model := range models {
 			if mi > 0 {
 				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].name, model.name),
+					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].Name, model.Name),
 				})
 			}
 
-			claudeBody, _ := json.Marshal(map[string]any{
-				"model":      model.id,
-				"max_tokens": 8192,
-				"stream":     true,
-				"tools": []map[string]any{
-					{"type": "web_search_20250305", "name": "web_search"},
-				},
-				"messages": []map[string]any{
-					{"role": "user", "content": prompt},
-				},
-			})
+			claudeBody, _ := provider.BuildStreamBody(model.ID, 8192, prompt, true)
 
 			const maxRetries = 3
 			backoff := 2 * time.Second
@@ -4081,7 +3866,7 @@ Include 5-12 differentiators, ordered by distinctiveness.`, domain, brandContext
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -4091,7 +3876,7 @@ Include 5-12 differentiators, ordered by distinctiveness.`, domain, brandContext
 					backoff *= 2
 				}
 
-				result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+				result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 				if err == errOverloaded {
 					lastErr = err
 					if attempt < maxRetries {
@@ -4105,17 +3890,17 @@ Include 5-12 differentiators, ordered by distinctiveness.`, domain, brandContext
 				}
 
 				sendSSE(w, flusher, "done", map[string]any{
-					"result": result.resultJSON,
-					"model":  model.name,
+					"result": result.ResultJSON,
+					"model":  model.Name,
 				})
 				return
 			}
 
-			log.Printf("Claude API (%s) exhausted retries for differentiator prediction: %v", model.id, lastErr)
+			log.Printf("%s API (%s) exhausted retries for differentiator prediction: %v", provider.Name(), model.ID, lastErr)
 		}
 
 		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All Claude models are currently overloaded. Please try again later.",
+			"message": "All models are currently overloaded. Please try again later.",
 		})
 	}
 }
@@ -4421,9 +4206,9 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 			return
 		}
 
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
 		_ = apiKey
@@ -4587,31 +4372,18 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 
 		usedModel := ""
 
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
-		// Helper to run a Claude analysis with retries and fallback
+		// Helper to run an LLM analysis with retries and fallback
 		runAnalysis := func(prompt, phaseName string) (string, string, error) {
 			for mi, model := range models {
 				if mi > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s unavailable, falling back to %s for %s...", models[mi-1].name, model.name, phaseName),
+						"message": fmt.Sprintf("%s unavailable, falling back to %s for %s...", models[mi-1].Name, model.Name, phaseName),
 					})
 				}
 
-				claudeBody, _ := json.Marshal(map[string]any{
-					"model":      model.id,
-					"max_tokens": 65536,
-					"stream":     true,
-					"messages": []map[string]any{
-						{"role": "user", "content": prompt},
-					},
-				})
+				claudeBody, _ := provider.BuildStreamBody(model.ID, 65536, prompt, false)
 
 				const maxRetries = 3
 				backoff := 2 * time.Second
@@ -4620,7 +4392,7 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 				for attempt := 0; attempt <= maxRetries; attempt++ {
 					if attempt > 0 {
 						sendSSE(w, flusher, "status", map[string]string{
-							"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+							"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 						})
 						select {
 						case <-time.After(backoff):
@@ -4630,7 +4402,7 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 						backoff *= 2
 					}
 
-					result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+					result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 					if err == errOverloaded {
 						lastErr = err
 						if attempt < maxRetries {
@@ -4642,12 +4414,12 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 						return "", "", err
 					}
 
-					return result.resultJSON, model.name, nil
+					return result.ResultJSON, model.Name, nil
 				}
 
-				log.Printf("Claude API (%s) exhausted retries for %s: %v", model.id, phaseName, lastErr)
+				log.Printf("%s API (%s) exhausted retries for %s: %v", provider.Name(), model.ID, phaseName, lastErr)
 			}
-			return "", "", fmt.Errorf("all Claude models overloaded")
+			return "", "", fmt.Errorf("all models overloaded")
 		}
 
 		// Extract competitor names from brand context
@@ -4667,7 +4439,7 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 		sendSSE(w, flusher, "status", map[string]string{
 			"message": "Phase 1: Assessing individual transcripts...",
 		})
-		assessments := assessVideos(r.Context(), apiKey, videos, req.Domain, req.Config.SearchTerms, mongoDB, w, flusher)
+		assessments := assessVideos(r.Context(), provider, apiKey, videos, req.Domain, req.Config.SearchTerms, mongoDB, w, flusher)
 
 		assessedCount := 0
 		for _, a := range assessments {
@@ -5090,9 +4862,9 @@ func handleRedditAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 			return
 		}
 
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
 		_ = apiKey
@@ -5162,30 +4934,17 @@ func handleRedditAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 
 		// Model fallback chain (same as video)
 		usedModel := ""
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
 		runAnalysis := func(prompt, phaseName string) (string, string, error) {
 			for mi, model := range models {
 				if mi > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s unavailable, falling back to %s for %s...", models[mi-1].name, model.name, phaseName),
+						"message": fmt.Sprintf("%s unavailable, falling back to %s for %s...", models[mi-1].Name, model.Name, phaseName),
 					})
 				}
 
-				claudeBody, _ := json.Marshal(map[string]any{
-					"model":      model.id,
-					"max_tokens": 65536,
-					"stream":     true,
-					"messages": []map[string]any{
-						{"role": "user", "content": prompt},
-					},
-				})
+				claudeBody, _ := provider.BuildStreamBody(model.ID, 65536, prompt, false)
 
 				const maxRetries = 3
 				backoff := 2 * time.Second
@@ -5194,7 +4953,7 @@ func handleRedditAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 				for attempt := 0; attempt <= maxRetries; attempt++ {
 					if attempt > 0 {
 						sendSSE(w, flusher, "status", map[string]string{
-							"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+							"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 						})
 						select {
 						case <-time.After(backoff):
@@ -5204,7 +4963,7 @@ func handleRedditAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 						backoff *= 2
 					}
 
-					result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+					result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 					if err == errOverloaded {
 						lastErr = err
 						if attempt < maxRetries {
@@ -5216,12 +4975,12 @@ func handleRedditAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 						return "", "", err
 					}
 
-					return result.resultJSON, model.name, nil
+					return result.ResultJSON, model.Name, nil
 				}
 
-				log.Printf("Claude API (%s) exhausted retries for %s: %v", model.id, phaseName, lastErr)
+				log.Printf("%s API (%s) exhausted retries for %s: %v", provider.Name(), model.ID, phaseName, lastErr)
 			}
-			return "", "", fmt.Errorf("all Claude models overloaded")
+			return "", "", fmt.Errorf("all models overloaded")
 		}
 
 		resultJSON, modelName, err := runAnalysis(prompt, "Reddit Authority")
@@ -5753,9 +5512,9 @@ func handleSearchAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 			return
 		}
 
-		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure an API key in Settings", "code": "api_key_required"})
 			return
 		}
 
@@ -5824,33 +5583,17 @@ func handleSearchAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 
 		// Model fallback chain
 		usedModel := ""
-		type modelDef struct {
-			id, name string
-		}
-		models := []modelDef{
-			{"claude-sonnet-4-6", "Sonnet 4.6"},
-			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
-		}
+		models := provider.Models()
 
 		var resultJSON string
 		for mi, model := range models {
 			if mi > 0 {
 				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].name, model.name),
+					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].Name, model.Name),
 				})
 			}
 
-			claudeBody, _ := json.Marshal(map[string]any{
-				"model":      model.id,
-				"max_tokens": 65536,
-				"stream":     true,
-				"tools": []map[string]any{
-					{"type": "web_search_20250305", "name": "web_search", "max_uses": 15},
-				},
-				"messages": []map[string]any{
-					{"role": "user", "content": prompt},
-				},
-			})
+			claudeBody, _ := provider.BuildStreamBody(model.ID, 65536, prompt, true)
 
 			const maxRetries = 3
 			backoff := 2 * time.Second
@@ -5859,7 +5602,7 @@ func handleSearchAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -5870,7 +5613,7 @@ func handleSearchAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 					backoff *= 2
 				}
 
-				result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+				result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
 				if err == errOverloaded {
 					lastErr = err
 					if attempt < maxRetries {
@@ -5883,16 +5626,16 @@ func handleSearchAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 					return
 				}
 
-				resultJSON = result.resultJSON
-				usedModel = model.name
+				resultJSON = result.ResultJSON
+				usedModel = model.Name
 				goto done
 			}
 
-			log.Printf("Claude API (%s) exhausted retries: %v", model.id, lastErr)
+			log.Printf("%s API (%s) exhausted retries: %v", provider.Name(), model.ID, lastErr)
 		}
 
 		if usedModel == "" {
-			sendSSE(w, flusher, "error", map[string]string{"message": "All Claude models overloaded"})
+			sendSSE(w, flusher, "error", map[string]string{"message": "All models overloaded"})
 			return
 		}
 
@@ -6250,4 +5993,491 @@ func extractJSON(text string) string {
 	}
 
 	return text
+}
+
+// ==================== LLM Test Handlers ====================
+
+type testRawResponse struct {
+	providerID   string
+	providerName string
+	model        string
+	queryIdx     int
+	response     string
+	err          error
+}
+
+func handleGenerateTestQueries(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Domain string `json:"domain"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		req.Domain = normalizeDomain(req.Domain)
+		if req.Domain == "" {
+			http.Error(w, `{"error":"domain is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		tenantID := saas.TenantIDFromContext(r.Context())
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		filter := bson.D{{Key: "domain", Value: req.Domain}}
+		if tenantID != "" {
+			filter = append(filter, bson.E{Key: "tenantId", Value: tenantID})
+		}
+		var brand BrandProfile
+		err := mongoDB.BrandProfiles().FindOne(ctx, filter).Decode(&brand)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"queries":    []LLMTestQuery{},
+				"brand_name": req.Domain,
+			})
+			return
+		}
+
+		var queries []LLMTestQuery
+
+		// Use existing target queries from brand profile
+		for _, tq := range brand.TargetQueries {
+			queries = append(queries, LLMTestQuery{
+				Query:    tq.Query,
+				Type:     tq.Type,
+				Priority: tq.Priority,
+			})
+		}
+
+		brandName := brand.BrandName
+		if brandName == "" {
+			brandName = req.Domain
+		}
+
+		// Auto-generate queries if target queries are sparse
+		if len(queries) < 3 {
+			// Brand awareness
+			queries = append(queries, LLMTestQuery{
+				Query:    fmt.Sprintf("What is %s?", brandName),
+				Type:     "brand",
+				Priority: "high",
+			})
+
+			// Category discovery
+			if len(brand.Categories) > 0 {
+				queries = append(queries, LLMTestQuery{
+					Query:    fmt.Sprintf("What are the best %s tools?", brand.Categories[0]),
+					Type:     "category",
+					Priority: "high",
+				})
+			}
+
+			// Competitor comparison
+			if len(brand.Competitors) > 0 {
+				queries = append(queries, LLMTestQuery{
+					Query:    fmt.Sprintf("How does %s compare to %s?", brandName, brand.Competitors[0].Name),
+					Type:     "comparison",
+					Priority: "medium",
+				})
+			}
+
+			// Use case discovery
+			if len(brand.KeyUseCases) > 0 {
+				queries = append(queries, LLMTestQuery{
+					Query:    fmt.Sprintf("How do I %s?", strings.ToLower(brand.KeyUseCases[0])),
+					Type:     "discovery",
+					Priority: "medium",
+				})
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"queries":    queries,
+			"brand_name": brandName,
+		})
+	}
+}
+
+func handleGetLLMTest(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := normalizeDomain(r.PathValue("domain"))
+		if domain == "" {
+			http.Error(w, `{"error":"domain is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		var test LLMTest
+		err := mongoDB.LLMTests().FindOne(ctx,
+			tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}}),
+			options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}),
+		).Decode(&test)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"error":"not found"}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(test)
+	}
+}
+
+func handleDeleteLLMTest(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := normalizeDomain(r.PathValue("domain"))
+		if domain == "" {
+			http.Error(w, `{"error":"domain is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		_, err := mongoDB.LLMTests().DeleteMany(ctx,
+			tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}}),
+		)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}
+}
+
+func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		var req struct {
+			Domain    string         `json:"domain"`
+			Providers []string       `json:"providers"`
+			Queries   []LLMTestQuery `json:"queries"`
+			Force     bool           `json:"force"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Invalid request body"})
+			return
+		}
+		req.Domain = normalizeDomain(req.Domain)
+		if req.Domain == "" {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Domain is required"})
+			return
+		}
+		if len(req.Providers) == 0 {
+			sendSSE(w, flusher, "error", map[string]string{"message": "At least one provider is required"})
+			return
+		}
+		if len(req.Queries) == 0 {
+			sendSSE(w, flusher, "error", map[string]string{"message": "At least one query is required"})
+			return
+		}
+
+		// Validate providers and resolve API keys
+		type providerWithKey struct {
+			provider LLMProvider
+			apiKey   string
+		}
+		var providerKeys []providerWithKey
+		for _, pid := range req.Providers {
+			p := getProvider(pid)
+			if p == nil {
+				sendSSE(w, flusher, "error", map[string]string{"message": fmt.Sprintf("Unknown provider: %s", pid)})
+				return
+			}
+			key, err := resolveProviderKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled, pid)
+			if err != nil {
+				sendSSE(w, flusher, "error", map[string]string{"message": fmt.Sprintf("No API key configured for %s", p.Name())})
+				return
+			}
+			providerKeys = append(providerKeys, providerWithKey{provider: p, apiKey: key})
+		}
+
+		// Look up brand context
+		brandInfo := lookupBrandContext(mongoDB, req.Domain, saas.TenantIDFromContext(r.Context()))
+		brandName := req.Domain
+		if brandInfo.Used {
+			for _, line := range strings.Split(brandInfo.ContextString, "\n") {
+				if strings.HasPrefix(line, "Company: ") {
+					brandName = strings.TrimPrefix(line, "Company: ")
+					break
+				}
+			}
+		}
+
+		totalCalls := len(req.Providers) * len(req.Queries)
+		completedCalls := 0
+
+		sendSSE(w, flusher, "status", map[string]string{
+			"message": fmt.Sprintf("Testing %d queries across %d providers (%d total calls)...", len(req.Queries), len(req.Providers), totalCalls),
+		})
+
+		// Phase 1: Query each provider with each query
+		responses := make([]testRawResponse, 0, totalCalls)
+
+		for _, pk := range providerKeys {
+			model := pk.provider.Models()[0] // primary model
+			for qi, q := range req.Queries {
+				completedCalls++
+				sendSSE(w, flusher, "status", map[string]string{
+					"message": fmt.Sprintf("[%d/%d] Querying %s: \"%s\"...", completedCalls, totalCalls, pk.provider.Name(), truncateStr(q.Query, 60)),
+				})
+
+				resp, err := pk.provider.Call(r.Context(), pk.apiKey, model.ID, q.Query, 4096)
+				responses = append(responses, testRawResponse{
+					providerID:   pk.provider.ProviderID(),
+					providerName: pk.provider.Name(),
+					model:        model.Name,
+					queryIdx:     qi,
+					response:     resp,
+					err:          err,
+				})
+			}
+		}
+
+		// Phase 2: Evaluate all responses using the primary LLM
+		sendSSE(w, flusher, "status", map[string]string{
+			"message": "Evaluating responses against brand profile...",
+		})
+
+		primaryProvider, primaryKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Could not resolve primary LLM for evaluation"})
+			return
+		}
+
+		// Build evaluation prompt
+		evalPrompt := buildTestEvaluationPrompt(brandName, req.Domain, brandInfo, req.Queries, responses)
+
+		evalModel := primaryProvider.Models()[0].ID
+		evalResp, err := primaryProvider.Call(r.Context(), primaryKey, evalModel, evalPrompt, 16384)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Evaluation failed: " + err.Error()})
+			return
+		}
+
+		// Parse evaluation results
+		evalJSON := stripJSONFencing(evalResp)
+		var evalResult struct {
+			Evaluations []struct {
+				QueryIndex  int    `json:"query_index"`
+				ProviderID  string `json:"provider_id"`
+				Mentioned   bool   `json:"mentioned"`
+				Recommended bool   `json:"recommended"`
+				Sentiment   string `json:"sentiment"`
+				Accuracy    string `json:"accuracy"`
+				Score       int    `json:"score"`
+			} `json:"evaluations"`
+		}
+		if err := json.Unmarshal([]byte(evalJSON), &evalResult); err != nil {
+			log.Printf("Failed to parse evaluation result: %v — raw: %s", err, evalJSON[:min(200, len(evalJSON))])
+			sendSSE(w, flusher, "error", map[string]string{"message": "Failed to parse evaluation results"})
+			return
+		}
+
+		// Build structured results
+		queryResults := make([]LLMTestQueryResult, len(req.Queries))
+		for qi, q := range req.Queries {
+			queryResults[qi] = LLMTestQueryResult{
+				Query:           q,
+				ProviderResults: []LLMTestProviderResult{},
+			}
+		}
+
+		// Map responses into query results
+		for _, resp := range responses {
+			pr := LLMTestProviderResult{
+				ProviderID:   resp.providerID,
+				ProviderName: resp.providerName,
+				Model:        resp.model,
+				Response:     resp.response,
+			}
+			if resp.err != nil {
+				pr.Response = fmt.Sprintf("Error: %s", resp.err.Error())
+				pr.Sentiment = "absent"
+				pr.Accuracy = "not_applicable"
+			}
+			queryResults[resp.queryIdx].ProviderResults = append(queryResults[resp.queryIdx].ProviderResults, pr)
+		}
+
+		// Apply evaluation scores to results
+		for _, eval := range evalResult.Evaluations {
+			if eval.QueryIndex < 0 || eval.QueryIndex >= len(queryResults) {
+				continue
+			}
+			qr := &queryResults[eval.QueryIndex]
+			for i := range qr.ProviderResults {
+				if qr.ProviderResults[i].ProviderID == eval.ProviderID {
+					qr.ProviderResults[i].Mentioned = eval.Mentioned
+					qr.ProviderResults[i].Recommended = eval.Recommended
+					qr.ProviderResults[i].Sentiment = eval.Sentiment
+					qr.ProviderResults[i].Accuracy = eval.Accuracy
+					qr.ProviderResults[i].Score = eval.Score
+					break
+				}
+			}
+		}
+
+		// Compute per-provider summaries
+		summaryMap := map[string]*LLMTestSummary{}
+		for _, pk := range providerKeys {
+			summaryMap[pk.provider.ProviderID()] = &LLMTestSummary{
+				ProviderID:   pk.provider.ProviderID(),
+				ProviderName: pk.provider.Name(),
+				Model:        pk.provider.Models()[0].Name,
+			}
+		}
+
+		for _, qr := range queryResults {
+			for _, pr := range qr.ProviderResults {
+				s := summaryMap[pr.ProviderID]
+				if s == nil {
+					continue
+				}
+				s.OverallScore += pr.Score
+				if pr.Mentioned {
+					s.MentionRate++
+				}
+				if pr.Recommended {
+					s.RecommendRate++
+				}
+				if pr.Accuracy == "accurate" {
+					s.AccuracyRate++
+				}
+				switch pr.Sentiment {
+				case "positive":
+					s.SentimentScore += 100
+				case "neutral":
+					s.SentimentScore += 50
+				case "negative":
+					s.SentimentScore += 10
+				}
+			}
+		}
+
+		numQueries := len(req.Queries)
+		var summaries []LLMTestSummary
+		overallTotal := 0
+		for _, pid := range req.Providers {
+			s := summaryMap[pid]
+			if numQueries > 0 {
+				s.OverallScore = s.OverallScore / numQueries
+				s.MentionRate = s.MentionRate * 100 / numQueries
+				s.RecommendRate = s.RecommendRate * 100 / numQueries
+				s.AccuracyRate = s.AccuracyRate * 100 / numQueries
+				s.SentimentScore = s.SentimentScore / numQueries
+			}
+			overallTotal += s.OverallScore
+			summaries = append(summaries, *s)
+		}
+
+		overallScore := 0
+		if len(summaries) > 0 {
+			overallScore = overallTotal / len(summaries)
+		}
+
+		test := LLMTest{
+			TenantID:          saas.TenantIDFromContext(r.Context()),
+			Domain:            req.Domain,
+			BrandName:         brandName,
+			Queries:           req.Queries,
+			Results:           queryResults,
+			ProviderSummaries: summaries,
+			OverallScore:      overallScore,
+			BrandContextUsed:  brandInfo.Used,
+			GeneratedAt:       time.Now(),
+		}
+
+		// Save to DB (upsert by domain)
+		saveCtx, saveCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		_, saveErr := mongoDB.LLMTests().ReplaceOne(saveCtx,
+			tenantFilter(r.Context(), bson.D{{Key: "domain", Value: req.Domain}}),
+			test,
+			options.Replace().SetUpsert(true),
+		)
+		saveCancel()
+		if saveErr != nil {
+			log.Printf("Failed to save LLM test: %v", saveErr)
+		}
+
+		sendSSE(w, flusher, "status", map[string]string{
+			"message": fmt.Sprintf("Test complete — Overall Score: %d/100", overallScore),
+		})
+
+		testJSON, _ := json.Marshal(test)
+		sendSSE(w, flusher, "done", map[string]any{
+			"result": string(testJSON),
+		})
+	}
+}
+
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+func buildTestEvaluationPrompt(brandName, domain string, brandInfo BrandContextInfo, queries []LLMTestQuery, responses []testRawResponse) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(`You are evaluating how well different AI assistants represent a brand in their responses to user queries.
+
+## Brand Information
+**Brand**: %s
+**Domain**: %s
+`, brandName, domain))
+
+	if brandInfo.Used {
+		sb.WriteString(fmt.Sprintf("\n%s\n", brandInfo.ContextString))
+	}
+
+	sb.WriteString(`
+## Instructions
+
+For each query-response pair, evaluate:
+1. **mentioned**: Is the brand explicitly mentioned by name? (boolean)
+2. **recommended**: Is the brand recommended, suggested, or positioned as a good option? (boolean)
+3. **sentiment**: Overall sentiment toward the brand in the response. Use "absent" if the brand isn't mentioned at all. (positive/neutral/negative/absent)
+4. **accuracy**: Are factual claims about the brand accurate based on the brand information above? Use "not_applicable" if brand isn't discussed. (accurate/partially_accurate/inaccurate/not_applicable)
+5. **score**: Overall brand representation quality 0-100. Consider: Is the brand mentioned? Positioned favorably? Information accurate? Recommended when relevant?
+
+## Query-Response Pairs
+
+`)
+
+	for _, resp := range responses {
+		if resp.err != nil {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf(`### Query %d (asked to %s)
+**Query**: %s
+**Response**: %s
+
+`, resp.queryIdx, resp.providerName, queries[resp.queryIdx].Query, resp.response))
+	}
+
+	sb.WriteString(`## Output Format
+
+Return ONLY a JSON object with this exact structure:
+{"evaluations": [{"query_index": 0, "provider_id": "anthropic", "mentioned": true, "recommended": false, "sentiment": "neutral", "accuracy": "accurate", "score": 65}, ...]}
+
+Include one evaluation entry per query-response pair. Return ONLY the JSON object, no markdown fencing.`)
+
+	return sb.String()
 }

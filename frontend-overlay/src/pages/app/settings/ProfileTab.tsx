@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { User, KeyRound, CheckCircle, AlertCircle, Download, Trash2, HelpCircle, RefreshCw, X, DollarSign } from 'lucide-react';
+import { User, KeyRound, CheckCircle, AlertCircle, Download, Trash2, HelpCircle, RefreshCw, X, DollarSign, Star } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '../../../contexts/AuthContext';
 import { useTenant } from '../../../contexts/TenantContext';
@@ -111,41 +111,146 @@ async function verifyAPIKey(provider: string): Promise<{ status: string }> {
   return resp.json();
 }
 
+async function fetchPrimaryProvider(): Promise<string> {
+  const resp = await fetch('/api/settings/primary-provider', { headers: getAuthHeaders() });
+  if (!resp.ok) return 'anthropic';
+  const data = await resp.json();
+  return data.primary_provider || 'anthropic';
+}
+
+async function setPrimaryProvider(provider: string): Promise<void> {
+  const resp = await fetch('/api/settings/primary-provider', {
+    method: 'PUT',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ provider }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ message: 'Failed to set primary provider' }));
+    throw new Error(err.message || 'Failed to set primary provider');
+  }
+}
+
+// --- Provider definitions ---
+
+interface ProviderDef {
+  id: string;
+  name: string;
+  description: string;
+  models: { id: string; name: string }[];
+  placeholder: string;
+  helpSteps: { text: string; link?: { url: string; label: string } }[];
+  billingUrl: string;
+  billingLabel: string;
+}
+
+const PROVIDERS: ProviderDef[] = [
+  {
+    id: 'anthropic',
+    name: 'Anthropic',
+    description: 'Claude models for analysis',
+    models: [
+      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Recommended)' },
+      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 (Faster, lower cost)' },
+    ],
+    placeholder: 'sk-ant-...',
+    helpSteps: [
+      { text: 'Go to console.anthropic.com and sign in (or create an account).', link: { url: 'https://console.anthropic.com', label: 'console.anthropic.com' } },
+      { text: 'Navigate to Manage \u2192 API Keys.' },
+      { text: 'Click Create Key, give it a name, and copy the key.' },
+      { text: 'Paste the key here. Your key is encrypted and stored securely.' },
+    ],
+    billingUrl: 'https://console.anthropic.com/settings/billing',
+    billingLabel: 'console.anthropic.com/settings/billing',
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    description: 'GPT models for analysis',
+    models: [
+      { id: 'gpt-4o', name: 'GPT-4o (Recommended)' },
+      { id: 'gpt-4o-mini', name: 'GPT-4o Mini (Faster, lower cost)' },
+    ],
+    placeholder: 'sk-...',
+    helpSteps: [
+      { text: 'Go to platform.openai.com and sign in (or create an account).', link: { url: 'https://platform.openai.com', label: 'platform.openai.com' } },
+      { text: 'Navigate to API Keys in the left sidebar.' },
+      { text: 'Click Create new secret key, give it a name, and copy the key.' },
+      { text: 'Paste the key here. Your key is encrypted and stored securely.' },
+    ],
+    billingUrl: 'https://platform.openai.com/settings/organization/billing/overview',
+    billingLabel: 'platform.openai.com billing',
+  },
+  {
+    id: 'grok',
+    name: 'Grok',
+    description: 'xAI models for analysis',
+    models: [
+      { id: 'grok-3', name: 'Grok 3 (Recommended)' },
+      { id: 'grok-3-mini', name: 'Grok 3 Mini (Faster, lower cost)' },
+    ],
+    placeholder: 'xai-...',
+    helpSteps: [
+      { text: 'Go to console.x.ai and sign in (or create an account).', link: { url: 'https://console.x.ai', label: 'console.x.ai' } },
+      { text: 'Navigate to API Keys.' },
+      { text: 'Click Create API Key, give it a name, and copy the key.' },
+      { text: 'Paste the key here. Your key is encrypted and stored securely.' },
+    ],
+    billingUrl: 'https://console.x.ai/billing',
+    billingLabel: 'console.x.ai/billing',
+  },
+  {
+    id: 'gemini',
+    name: 'Gemini',
+    description: 'Google AI models for analysis',
+    models: [
+      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Recommended)' },
+      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash (Faster, lower cost)' },
+    ],
+    placeholder: 'AIza...',
+    helpSteps: [
+      { text: 'Go to aistudio.google.com and sign in with your Google account.', link: { url: 'https://aistudio.google.com', label: 'aistudio.google.com' } },
+      { text: 'Click Get API key in the left sidebar.' },
+      { text: 'Click Create API key, select a project, and copy the key.' },
+      { text: 'Paste the key here. Your key is encrypted and stored securely.' },
+    ],
+    billingUrl: 'https://aistudio.google.com',
+    billingLabel: 'aistudio.google.com',
+  },
+];
+
 // --- Help Modal ---
 
-function APIKeyHelpModal({ onClose }: { onClose: () => void }) {
+function ProviderHelpModal({ provider, onClose }: { provider: ProviderDef; onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
       <div className="relative bg-dark-900 rounded-2xl border border-dark-700 p-6 w-full max-w-lg" role="dialog" aria-modal="true">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-white">How to Get an Anthropic API Key</h3>
+          <h3 className="text-lg font-semibold text-white">How to Get a {provider.name} API Key</h3>
           <button onClick={onClose} className="text-dark-400 hover:text-white transition-colors">
             <X className="w-5 h-5" />
           </button>
         </div>
         <ol className="space-y-3 text-sm text-dark-300">
-          <li className="flex gap-3">
-            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary-500/20 text-primary-400 flex items-center justify-center text-xs font-bold">1</span>
-            <span>Go to <a href="https://console.anthropic.com" target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:text-primary-300 underline">console.anthropic.com</a> and sign in (or create an account).</span>
-          </li>
-          <li className="flex gap-3">
-            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary-500/20 text-primary-400 flex items-center justify-center text-xs font-bold">2</span>
-            <span>Navigate to <strong className="text-white">Manage &rarr; API Keys</strong>.</span>
-          </li>
-          <li className="flex gap-3">
-            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary-500/20 text-primary-400 flex items-center justify-center text-xs font-bold">3</span>
-            <span>Click <strong className="text-white">Create Key</strong>, give it a name, and copy the key.</span>
-          </li>
-          <li className="flex gap-3">
-            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary-500/20 text-primary-400 flex items-center justify-center text-xs font-bold">4</span>
-            <span>Paste the key here. Your key is encrypted and stored securely.</span>
-          </li>
+          {provider.helpSteps.map((step, i) => (
+            <li key={i} className="flex gap-3">
+              <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary-500/20 text-primary-400 flex items-center justify-center text-xs font-bold">{i + 1}</span>
+              <span>
+                {step.link ? (
+                  <>
+                    {step.text.split(step.link.label)[0]}
+                    <a href={step.link.url} target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:text-primary-300 underline">{step.link.label}</a>
+                    {step.text.split(step.link.label)[1]}
+                  </>
+                ) : step.text}
+              </span>
+            </li>
+          ))}
         </ol>
         <div className="mt-4 p-3 bg-dark-800 rounded-lg">
           <p className="text-xs text-dark-400">
-            You'll need credits on your Anthropic account. New accounts get a small free credit.
-            To add more, go to <strong className="text-dark-300">Settings &rarr; Billing</strong> in the Anthropic Console.
+            You'll need credits on your {provider.name} account.{' '}
+            Go to <a href={provider.billingUrl} target="_blank" rel="noopener noreferrer" className="text-dark-300 underline hover:text-white">{provider.billingLabel}</a> to manage billing.
           </p>
         </div>
         <button
@@ -159,37 +264,7 @@ function APIKeyHelpModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-// --- Credit Refill Helper ---
-
-function CreditRefillHelper() {
-  return (
-    <div className="mt-2 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-      <div className="flex items-start gap-2">
-        <DollarSign className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
-        <div className="text-xs text-amber-300">
-          <p className="font-medium mb-1">Your API key needs credits</p>
-          <p className="text-amber-400">
-            Go to <a href="https://console.anthropic.com/settings/billing" target="_blank" rel="noopener noreferrer" className="underline hover:text-amber-300">console.anthropic.com/settings/billing</a> to add credits to your Anthropic account.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// --- Provider Card ---
-
-const ANTHROPIC_MODELS = [
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Recommended)' },
-  { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 (Faster, lower cost)' },
-];
-
-const PROVIDERS = [
-  { id: 'anthropic', name: 'Anthropic', enabled: true, description: 'Claude models for analysis and optimization' },
-  { id: 'openai', name: 'OpenAI', enabled: false, description: 'GPT models' },
-  { id: 'grok', name: 'Grok', enabled: false, description: 'xAI models' },
-  { id: 'gemini', name: 'Gemini', enabled: false, description: 'Google AI models' },
-];
+// --- Status Badge ---
 
 function statusBadge(status: string) {
   switch (status) {
@@ -204,9 +279,35 @@ function statusBadge(status: string) {
   }
 }
 
-function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo | null; onUpdate: () => void }) {
+// --- Credit Refill Helper ---
+
+function CreditRefillHelper({ provider }: { provider: ProviderDef }) {
+  return (
+    <div className="mt-2 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+      <div className="flex items-start gap-2">
+        <DollarSign className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
+        <div className="text-xs text-amber-300">
+          <p className="font-medium mb-1">Your API key needs credits</p>
+          <p className="text-amber-400">
+            Go to <a href={provider.billingUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-amber-300">{provider.billingLabel}</a> to add credits.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Generalized Provider Card ---
+
+function ProviderKeyCard({ provider, existingKey, isPrimary, onUpdate, onSetPrimary }: {
+  provider: ProviderDef;
+  existingKey: APIKeyInfo | null;
+  isPrimary: boolean;
+  onUpdate: () => void;
+  onSetPrimary: () => void;
+}) {
   const [keyInput, setKeyInput] = useState('');
-  const [model, setModel] = useState(existingKey?.preferred_model || 'claude-sonnet-4-6');
+  const [model, setModel] = useState(existingKey?.preferred_model || provider.models[0].id);
   const [saving, setSaving] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -222,9 +323,9 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
     if (!keyInput.trim()) return;
     setSaving(true);
     try {
-      await saveAPIKey('anthropic', keyInput.trim(), model);
+      await saveAPIKey(provider.id, keyInput.trim(), model);
       setKeyInput('');
-      toast.success('API key saved and verified');
+      toast.success(`${provider.name} API key saved and verified`);
       onUpdate();
       window.dispatchEvent(new Event('apikey-updated'));
     } catch (err) {
@@ -237,8 +338,8 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
   const handleVerify = async () => {
     setVerifying(true);
     try {
-      const result = await verifyAPIKey('anthropic');
-      toast.success(`Key status: ${result.status}`);
+      const result = await verifyAPIKey(provider.id);
+      toast.success(`${provider.name} key status: ${result.status}`);
       onUpdate();
       window.dispatchEvent(new Event('apikey-updated'));
     } catch (err) {
@@ -251,8 +352,8 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
   const handleRemove = async () => {
     setRemoving(true);
     try {
-      await deleteAPIKey('anthropic');
-      toast.success('API key removed');
+      await deleteAPIKey(provider.id);
+      toast.success(`${provider.name} API key removed`);
       onUpdate();
       window.dispatchEvent(new Event('apikey-updated'));
     } catch (err) {
@@ -263,15 +364,31 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
   };
 
   return (
-    <div className="bg-dark-800/50 border border-dark-700 rounded-xl p-4">
+    <div className={`bg-dark-800/50 border rounded-xl p-4 ${isPrimary ? 'border-primary-500/50' : 'border-dark-700'}`}>
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-white">Anthropic</span>
+          <span className="text-sm font-medium text-white">{provider.name}</span>
           {existingKey && statusBadge(existingKey.status)}
+          {isPrimary && (
+            <span className="flex items-center gap-1 text-xs text-primary-400 bg-primary-500/10 px-1.5 py-0.5 rounded">
+              <Star className="w-3 h-3" /> Primary
+            </span>
+          )}
         </div>
-        <button onClick={() => setShowHelp(true)} className="text-dark-400 hover:text-white transition-colors" title="How to get an API key">
-          <HelpCircle className="w-4 h-4" />
-        </button>
+        <div className="flex items-center gap-2">
+          {existingKey && existingKey.status === 'active' && !isPrimary && (
+            <button
+              onClick={onSetPrimary}
+              className="text-xs text-dark-400 hover:text-primary-400 transition-colors"
+              title="Set as primary provider"
+            >
+              Set Primary
+            </button>
+          )}
+          <button onClick={() => setShowHelp(true)} className="text-dark-400 hover:text-white transition-colors" title="How to get an API key">
+            <HelpCircle className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
       {existingKey ? (
@@ -298,7 +415,7 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
             </div>
           </div>
 
-          {existingKey.status === 'no_credits' && <CreditRefillHelper />}
+          {existingKey.status === 'no_credits' && <CreditRefillHelper provider={provider} />}
 
           <div>
             <label className="block text-xs text-dark-400 mb-1">Preferred Model</label>
@@ -308,16 +425,15 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
                 const newModel = e.target.value;
                 setModel(newModel);
                 try {
-                  await saveAPIKey('anthropic', '', newModel);
+                  await saveAPIKey(provider.id, '', newModel);
                   onUpdate();
                 } catch {
                   // Model update without key change needs the existing key
-                  // Just update the UI state
                 }
               }}
               className="w-full px-3 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white focus:outline-none focus:border-primary-500 transition-colors"
             >
-              {ANTHROPIC_MODELS.map(m => (
+              {provider.models.map(m => (
                 <option key={m.id} value={m.id}>{m.name}</option>
               ))}
             </select>
@@ -330,7 +446,7 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
                 type="password"
                 value={keyInput}
                 onChange={e => setKeyInput(e.target.value)}
-                placeholder="sk-ant-..."
+                placeholder={provider.placeholder}
                 className="flex-1 px-3 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white placeholder-dark-500 focus:outline-none focus:border-primary-500 transition-colors"
               />
               <button
@@ -345,7 +461,7 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
         </div>
       ) : (
         <div className="space-y-3">
-          <p className="text-xs text-dark-400">Enter your Anthropic API key to start analyzing domains.</p>
+          <p className="text-xs text-dark-400">Enter your {provider.name} API key to use {provider.name} for analysis.</p>
           <div>
             <label className="block text-xs text-dark-400 mb-1">Preferred Model</label>
             <select
@@ -353,7 +469,7 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
               onChange={e => setModel(e.target.value)}
               className="w-full px-3 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white focus:outline-none focus:border-primary-500 transition-colors"
             >
-              {ANTHROPIC_MODELS.map(m => (
+              {provider.models.map(m => (
                 <option key={m.id} value={m.id}>{m.name}</option>
               ))}
             </select>
@@ -363,7 +479,7 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
               type="password"
               value={keyInput}
               onChange={e => setKeyInput(e.target.value)}
-              placeholder="sk-ant-api03-..."
+              placeholder={provider.placeholder}
               className="flex-1 px-3 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white placeholder-dark-500 focus:outline-none focus:border-primary-500 transition-colors"
             />
             <button
@@ -377,20 +493,30 @@ function AnthropicKeyCard({ existingKey, onUpdate }: { existingKey: APIKeyInfo |
         </div>
       )}
 
-      {showHelp && <APIKeyHelpModal onClose={() => setShowHelp(false)} />}
+      {showHelp && <ProviderHelpModal provider={provider} onClose={() => setShowHelp(false)} />}
     </div>
   );
 }
 
 // --- Read-Only Provider Card (for non-owners) ---
 
-function AnthropicKeyCardReadOnly({ existingKey, ownerName }: { existingKey: APIKeyInfo | null; ownerName: string }) {
+function ProviderKeyCardReadOnly({ provider, existingKey, isPrimary, ownerName }: {
+  provider: ProviderDef;
+  existingKey: APIKeyInfo | null;
+  isPrimary: boolean;
+  ownerName: string;
+}) {
   return (
-    <div className="bg-dark-800/50 border border-dark-700 rounded-xl p-4">
+    <div className={`bg-dark-800/50 border rounded-xl p-4 ${isPrimary ? 'border-primary-500/50' : 'border-dark-700'}`}>
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-white">Anthropic</span>
+          <span className="text-sm font-medium text-white">{provider.name}</span>
           {existingKey && statusBadge(existingKey.status)}
+          {isPrimary && (
+            <span className="flex items-center gap-1 text-xs text-primary-400 bg-primary-500/10 px-1.5 py-0.5 rounded">
+              <Star className="w-3 h-3" /> Primary
+            </span>
+          )}
         </div>
       </div>
 
@@ -425,19 +551,12 @@ function AnthropicKeyCardReadOnly({ existingKey, ownerName }: { existingKey: API
           <div>
             <label className="block text-xs text-dark-400 mb-1">Preferred Model</label>
             <div className="px-3 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-sm text-dark-300">
-              {ANTHROPIC_MODELS.find(m => m.id === existingKey.preferred_model)?.name || existingKey.preferred_model || 'Default'}
+              {provider.models.find(m => m.id === existingKey.preferred_model)?.name || existingKey.preferred_model || 'Default'}
             </div>
           </div>
         </div>
       ) : (
-        <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-          <div className="flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
-            <p className="text-xs text-amber-300">
-              No API key configured. {ownerName ? `Contact ${ownerName} to set up an Anthropic API key.` : 'Contact the team owner to set up an Anthropic API key.'}
-            </p>
-          </div>
-        </div>
+        <div className="text-xs text-dark-500">No key configured</div>
       )}
     </div>
   );
@@ -462,13 +581,15 @@ export default function ProfileTab() {
   const [apiKeys, setApiKeys] = useState<APIKeyInfo[]>([]);
   const [keysLoading, setKeysLoading] = useState(true);
   const [ownerName, setOwnerName] = useState('');
+  const [primaryProvider, setPrimaryProviderState] = useState('anthropic');
 
   const isOwner = role === 'owner';
 
   const loadKeys = useCallback(async () => {
     try {
-      const keys = await fetchAPIKeys();
+      const [keys, primary] = await Promise.all([fetchAPIKeys(), fetchPrimaryProvider()]);
       setApiKeys(keys);
+      setPrimaryProviderState(primary);
     } catch {
       // ignore
     } finally {
@@ -489,7 +610,15 @@ export default function ProfileTab() {
     }
   }, [loadKeys, isOwner]);
 
-  const anthropicKey = apiKeys.find(k => k.provider === 'anthropic') || null;
+  const handleSetPrimary = async (providerId: string) => {
+    try {
+      await setPrimaryProvider(providerId);
+      setPrimaryProviderState(providerId);
+      toast.success(`${PROVIDERS.find(p => p.id === providerId)?.name} set as primary provider`);
+    } catch (err) {
+      toast.error(getErrorMessage(err));
+    }
+  };
 
   const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -607,11 +736,11 @@ export default function ProfileTab() {
       <div id="api-keys" className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
         <h2 className="text-lg font-semibold text-white flex items-center gap-2 mb-4">
           <KeyRound className="w-5 h-5 text-dark-400" />
-          API Keys
+          AI Providers
         </h2>
         <p className="text-sm text-dark-400 mb-4">
           {isOwner
-            ? 'Connect your own API keys to power AI analysis. Your keys are encrypted and stored securely.'
+            ? 'Connect your API keys to power AI analysis. Configure at least one provider to get started. The primary provider is used for all analyses.'
             : 'API keys are managed by the team owner.'}
         </p>
 
@@ -619,33 +748,28 @@ export default function ProfileTab() {
           <div className="text-sm text-dark-500">Loading...</div>
         ) : (
           <div className="space-y-3">
-            {PROVIDERS.map(provider => (
-              provider.enabled ? (
-                isOwner ? (
-                  <AnthropicKeyCard
-                    key={provider.id}
-                    existingKey={anthropicKey}
-                    onUpdate={loadKeys}
-                  />
-                ) : (
-                  <AnthropicKeyCardReadOnly
-                    key={provider.id}
-                    existingKey={anthropicKey}
-                    ownerName={ownerName}
-                  />
-                )
+            {PROVIDERS.map(provider => {
+              const existingKey = apiKeys.find(k => k.provider === provider.id) || null;
+              const isPrimary = primaryProvider === provider.id;
+              return isOwner ? (
+                <ProviderKeyCard
+                  key={provider.id}
+                  provider={provider}
+                  existingKey={existingKey}
+                  isPrimary={isPrimary}
+                  onUpdate={loadKeys}
+                  onSetPrimary={() => handleSetPrimary(provider.id)}
+                />
               ) : (
-                <div key={provider.id} className="bg-dark-800/30 border border-dark-700/50 rounded-xl p-4 opacity-50">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-sm font-medium text-dark-400">{provider.name}</span>
-                      <p className="text-xs text-dark-500 mt-0.5">{provider.description}</p>
-                    </div>
-                    <span className="text-xs text-dark-500 bg-dark-800 px-2 py-0.5 rounded">Coming Soon</span>
-                  </div>
-                </div>
-              )
-            ))}
+                <ProviderKeyCardReadOnly
+                  key={provider.id}
+                  provider={provider}
+                  existingKey={existingKey}
+                  isPrimary={isPrimary}
+                  ownerName={ownerName}
+                />
+              );
+            })}
           </div>
         )}
       </div>

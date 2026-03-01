@@ -1,0 +1,274 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// GeminiProvider implements LLMProvider for the Google Gemini API.
+type GeminiProvider struct{}
+
+func (p *GeminiProvider) ProviderID() string { return "gemini" }
+func (p *GeminiProvider) Name() string       { return "Gemini" }
+
+func (p *GeminiProvider) Models() []ModelDef {
+	return []ModelDef{
+		{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro"},
+		{ID: "gemini-2.0-flash", Name: "Gemini 2.0 Flash"},
+	}
+}
+
+func (p *GeminiProvider) SmallModel() string {
+	return "gemini-2.0-flash"
+}
+
+// BuildStreamBody for Gemini is special — the model goes in the URL, not the body.
+// We embed the model in a wrapper field so Stream() can extract it.
+func (p *GeminiProvider) BuildStreamBody(model string, maxTokens int, prompt string, useWebSearch bool) ([]byte, error) {
+	contents := []map[string]any{
+		{
+			"parts": []map[string]any{
+				{"text": prompt},
+			},
+		},
+	}
+
+	body := map[string]any{
+		"contents": contents,
+		"generationConfig": map[string]any{
+			"maxOutputTokens": maxTokens,
+		},
+		// Embed model for Stream() to extract
+		"_model": model,
+	}
+
+	if useWebSearch {
+		body["tools"] = []map[string]any{
+			{
+				"google_search": map[string]any{},
+			},
+		}
+	}
+
+	return json.Marshal(body)
+}
+
+func (p *GeminiProvider) Call(ctx context.Context, apiKey, model, prompt string, maxTokens int) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"contents": []map[string]any{
+			{
+				"parts": []map[string]any{
+					{"text": prompt},
+				},
+			},
+		},
+		"generationConfig": map[string]any{
+			"maxOutputTokens": maxTokens,
+		},
+	})
+
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, apiKey)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 429 || resp.StatusCode == 529 || resp.StatusCode == 503 {
+		return "", ErrOverloaded
+	}
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("Gemini API error (%d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+	if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
+		return "", fmt.Errorf("empty response from Gemini")
+	}
+	return result.Candidates[0].Content.Parts[0].Text, nil
+}
+
+func (p *GeminiProvider) Stream(ctx context.Context, apiKey string, body []byte, w http.ResponseWriter, flusher http.Flusher) (*StreamResult, error) {
+	// Extract model from the body wrapper
+	var wrapper struct {
+		Model string `json:"_model"`
+	}
+	json.Unmarshal(body, &wrapper)
+	model := wrapper.Model
+	if model == "" {
+		model = "gemini-2.5-pro"
+	}
+
+	// Remove the _model field before sending to the API
+	var bodyMap map[string]any
+	json.Unmarshal(body, &bodyMap)
+	delete(bodyMap, "_model")
+	cleanBody, _ := json.Marshal(bodyMap)
+
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", model, apiKey)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(cleanBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 429 || resp.StatusCode == 529 || resp.StatusCode == 503 {
+		log.Printf("Gemini API returned %d (overloaded/rate-limited)", resp.StatusCode)
+		return nil, ErrOverloaded
+	}
+	if resp.StatusCode != 200 {
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Gemini API error (%d): %s", resp.StatusCode, string(errBody))
+	}
+
+	sendSSE(w, flusher, "status", map[string]string{
+		"message": "Connected to Gemini, beginning analysis...",
+	})
+
+	var fullText strings.Builder
+	lastProgressAt := time.Now()
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := line[6:]
+		if data == "[DONE]" {
+			break
+		}
+
+		var event struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+
+		if len(event.Candidates) > 0 && len(event.Candidates[0].Content.Parts) > 0 {
+			text := event.Candidates[0].Content.Parts[0].Text
+			if text != "" {
+				fullText.WriteString(text)
+				sendSSE(w, flusher, "text", map[string]string{
+					"content": text,
+				})
+				if time.Since(lastProgressAt) > 3*time.Second {
+					chars := fullText.Len()
+					sendSSE(w, flusher, "progress", map[string]string{
+						"message": fmt.Sprintf("Generating analysis... (%dk chars received)", chars/1000),
+					})
+					lastProgressAt = time.Now()
+				}
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("stream reading error: %w", err)
+	}
+
+	if fullText.Len() > 0 {
+		resultJSON := extractJSON(fullText.String())
+		return &StreamResult{RawText: fullText.String(), ResultJSON: resultJSON}, nil
+	}
+
+	return nil, fmt.Errorf("stream ended without results")
+}
+
+func (p *GeminiProvider) VerifyKey(ctx context.Context, apiKey string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	body, _ := json.Marshal(map[string]any{
+		"contents": []map[string]any{
+			{
+				"parts": []map[string]any{
+					{"text": "Reply with just the word 'ok'."},
+				},
+			},
+		},
+		"generationConfig": map[string]any{
+			"maxOutputTokens": 10,
+		},
+	})
+
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", apiKey)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "error", fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return "error", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch {
+	case resp.StatusCode == 200:
+		return "active", nil
+	case resp.StatusCode == 400:
+		errBody, _ := io.ReadAll(resp.Body)
+		errStr := strings.ToLower(string(errBody))
+		if strings.Contains(errStr, "api_key_invalid") || strings.Contains(errStr, "api key not valid") {
+			return "invalid", nil
+		}
+		return "error", fmt.Errorf("bad request: %s", string(errBody))
+	case resp.StatusCode == 403:
+		return "invalid", nil
+	case resp.StatusCode == 429:
+		errBody, _ := io.ReadAll(resp.Body)
+		errStr := strings.ToLower(string(errBody))
+		if strings.Contains(errStr, "quota") || strings.Contains(errStr, "billing") {
+			return "no_credits", nil
+		}
+		return "active", nil
+	default:
+		errBody, _ := io.ReadAll(resp.Body)
+		return "error", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(errBody))
+	}
+}

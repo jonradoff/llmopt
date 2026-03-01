@@ -506,6 +506,15 @@ type TenantAPIKey struct {
 	UpdatedAt      time.Time          `json:"updated_at" bson:"updatedAt"`
 }
 
+// Tenant settings (primary provider, etc.)
+
+type TenantSettings struct {
+	ID              primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	TenantID        string             `json:"tenant_id" bson:"tenantId"`
+	PrimaryProvider string             `json:"primary_provider" bson:"primaryProvider"` // "anthropic", "openai", "grok", "gemini"
+	UpdatedAt       time.Time          `json:"updated_at" bson:"updatedAt"`
+}
+
 // YouTube API cache
 
 type YouTubeCache struct {
@@ -748,4 +757,53 @@ type ReportFingerprint struct {
 	VideoExists          bool       `json:"video_exists" bson:"videoExists"`
 	RedditExists         bool       `json:"reddit_exists" bson:"redditExists"`
 	SearchExists         bool       `json:"search_exists" bson:"searchExists"`
+}
+
+// LLM Test types — multi-provider brand knowledge testing
+
+type LLMTestQuery struct {
+	Query    string `json:"query" bson:"query"`
+	Type     string `json:"type" bson:"type"`         // brand, category, comparison, discovery, custom
+	Priority string `json:"priority" bson:"priority"` // high, medium, low
+}
+
+type LLMTestProviderResult struct {
+	ProviderID   string `json:"provider_id" bson:"providerId"`
+	ProviderName string `json:"provider_name" bson:"providerName"`
+	Model        string `json:"model" bson:"model"`
+	Response     string `json:"response" bson:"response"`
+	Mentioned    bool   `json:"mentioned" bson:"mentioned"`
+	Recommended  bool   `json:"recommended" bson:"recommended"`
+	Sentiment    string `json:"sentiment" bson:"sentiment"` // positive, neutral, negative, absent
+	Accuracy     string `json:"accuracy" bson:"accuracy"`   // accurate, partially_accurate, inaccurate, not_applicable
+	Score        int    `json:"score" bson:"score"`
+}
+
+type LLMTestQueryResult struct {
+	Query           LLMTestQuery            `json:"query" bson:"query"`
+	ProviderResults []LLMTestProviderResult `json:"provider_results" bson:"providerResults"`
+}
+
+type LLMTestSummary struct {
+	ProviderID     string `json:"provider_id" bson:"providerId"`
+	ProviderName   string `json:"provider_name" bson:"providerName"`
+	Model          string `json:"model" bson:"model"`
+	OverallScore   int    `json:"overall_score" bson:"overallScore"`
+	MentionRate    int    `json:"mention_rate" bson:"mentionRate"`
+	RecommendRate  int    `json:"recommend_rate" bson:"recommendRate"`
+	AccuracyRate   int    `json:"accuracy_rate" bson:"accuracyRate"`
+	SentimentScore int    `json:"sentiment_score" bson:"sentimentScore"`
+}
+
+type LLMTest struct {
+	ID                primitive.ObjectID   `json:"id" bson:"_id,omitempty"`
+	TenantID          string               `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
+	Domain            string               `json:"domain" bson:"domain"`
+	BrandName         string               `json:"brand_name" bson:"brandName"`
+	Queries           []LLMTestQuery       `json:"queries" bson:"queries"`
+	Results           []LLMTestQueryResult `json:"results" bson:"results"`
+	ProviderSummaries []LLMTestSummary     `json:"provider_summaries" bson:"providerSummaries"`
+	OverallScore      int                  `json:"overall_score" bson:"overallScore"`
+	BrandContextUsed  bool                 `json:"brand_context_used" bson:"brandContextUsed"`
+	GeneratedAt       time.Time            `json:"generated_at" bson:"generatedAt"`
 }
