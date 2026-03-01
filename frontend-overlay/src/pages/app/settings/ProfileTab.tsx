@@ -65,9 +65,17 @@ function getAuthHeaders(): Record<string, string> {
   return headers;
 }
 
+function handleAuthError(resp: Response): void {
+  if (resp.status === 401) {
+    localStorage.removeItem('lastsaas_access_token');
+    localStorage.removeItem('lastsaas_refresh_token');
+    window.location.href = '/login';
+  }
+}
+
 async function fetchAPIKeys(): Promise<APIKeyInfo[]> {
   const resp = await fetch('/api/settings/api-keys', { headers: getAuthHeaders() });
-  if (!resp.ok) return [];
+  if (!resp.ok) { handleAuthError(resp); return []; }
   const data = await resp.json();
   return data.keys || [];
 }
@@ -79,6 +87,7 @@ async function saveAPIKey(provider: string, key: string, preferredModel: string)
     body: JSON.stringify({ key, preferred_model: preferredModel }),
   });
   if (!resp.ok) {
+    handleAuthError(resp);
     const err = await resp.json().catch(() => ({ error: 'Failed to save key' }));
     throw new Error(err.error || 'Failed to save key');
   }
@@ -90,7 +99,7 @@ async function deleteAPIKey(provider: string): Promise<void> {
     method: 'DELETE',
     headers: getAuthHeaders(),
   });
-  if (!resp.ok) throw new Error('Failed to remove key');
+  if (!resp.ok) { handleAuthError(resp); throw new Error('Failed to remove key'); }
 }
 
 async function verifyAPIKey(provider: string): Promise<{ status: string }> {
@@ -98,7 +107,7 @@ async function verifyAPIKey(provider: string): Promise<{ status: string }> {
     method: 'POST',
     headers: getAuthHeaders(),
   });
-  if (!resp.ok) throw new Error('Verification failed');
+  if (!resp.ok) { handleAuthError(resp); throw new Error('Verification failed'); }
   return resp.json();
 }
 
@@ -122,7 +131,7 @@ function APIKeyHelpModal({ onClose }: { onClose: () => void }) {
           </li>
           <li className="flex gap-3">
             <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary-500/20 text-primary-400 flex items-center justify-center text-xs font-bold">2</span>
-            <span>Navigate to <strong className="text-white">Settings &rarr; API Keys</strong>.</span>
+            <span>Navigate to <strong className="text-white">Manage &rarr; API Keys</strong>.</span>
           </li>
           <li className="flex gap-3">
             <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary-500/20 text-primary-400 flex items-center justify-center text-xs font-bold">3</span>

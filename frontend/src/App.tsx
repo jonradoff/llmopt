@@ -8907,8 +8907,8 @@ export default function App() {
             </div>
             <p className="text-dark-400 text-sm mb-6">
               {userTenantRole === 'owner'
-                ? 'You need to configure an API key before generating reports. Set up your Anthropic API key in Settings to get started.'
-                : 'Your team needs an API key configured before you can generate reports. Ask your team owner to set up an Anthropic API key in Settings.'}
+                ? 'You need to configure an API key before generating reports. Set up your Anthropic API key in Manage to get started.'
+                : 'Your team needs an API key configured before you can generate reports. Ask your team owner to set up an Anthropic API key in Manage.'}
             </p>
             <div className="flex justify-end gap-3">
               <button
