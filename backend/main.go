@@ -205,8 +205,14 @@ func main() {
 	mux.HandleFunc("GET /api/search/analyses", withAuth(handleListSearchAnalyses(mongoDB)))
 	mux.HandleFunc("DELETE /api/search/analyses/{domain}", withAuth(handleDeleteSearchAnalysis(mongoDB)))
 
+	// Visibility Score
+	mux.HandleFunc("GET /api/visibility-score/{domain}", withAuth(handleVisibilityScore(mongoDB)))
+
 	// LLM Test
+	mux.HandleFunc("GET /api/providers/models", withAuth(handleListProviderModels()))
 	mux.HandleFunc("POST /api/test", withAuth(handleLLMTest(mongoDB, encryptionKey, apiKey, saasEnabled)))
+	mux.HandleFunc("GET /api/test/{domain}/history", withAuth(handleGetLLMTestHistory(mongoDB)))
+	mux.HandleFunc("GET /api/test/{domain}/competitors", withAuth(handleGetCompetitorTests(mongoDB)))
 	mux.HandleFunc("GET /api/test/{domain}", withAuth(handleGetLLMTest(mongoDB)))
 	mux.HandleFunc("DELETE /api/test/{domain}", withAuth(handleDeleteLLMTest(mongoDB)))
 	mux.HandleFunc("POST /api/test/generate-queries", withAuth(handleGenerateTestQueries(mongoDB)))
@@ -278,7 +284,11 @@ func main() {
 	mux.HandleFunc("OPTIONS /api/search/analyses", handleOptions)
 	mux.HandleFunc("OPTIONS /api/domains/{domain}/report/pdf", handleOptions)
 	mux.HandleFunc("OPTIONS /api/domains/{domain}/report/pdf/{id}", handleOptions)
+	mux.HandleFunc("OPTIONS /api/visibility-score/{domain}", handleOptions)
+	mux.HandleFunc("OPTIONS /api/providers/models", handleOptions)
 	mux.HandleFunc("OPTIONS /api/test", handleOptions)
+	mux.HandleFunc("OPTIONS /api/test/{domain}/history", handleOptions)
+	mux.HandleFunc("OPTIONS /api/test/{domain}/competitors", handleOptions)
 	mux.HandleFunc("OPTIONS /api/test/{domain}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/test/generate-queries", handleOptions)
 	mux.HandleFunc("OPTIONS /api/settings/api-keys", handleOptions)
@@ -1906,6 +1916,9 @@ func createTodosFromOptimization(mongoDB *MongoDB, optimizationID, analysisID pr
 	if err != nil {
 		log.Printf("Failed to create todos from optimization: %v", err)
 	}
+
+	// Deduplicate todos for this domain
+	go deduplicateTodos(mongoDB, domain, tenantID)
 }
 
 func createTodosFromVideoAnalysis(mongoDB *MongoDB, videoAnalysisID primitive.ObjectID, domain, tenantID string, recommendations []VideoRecommendation) {
@@ -1954,6 +1967,142 @@ func createTodosFromVideoAnalysis(mongoDB *MongoDB, videoAnalysisID primitive.Ob
 	_, err := mongoDB.Todos().InsertMany(ctx, todos)
 	if err != nil {
 		log.Printf("Failed to create todos from video analysis: %v", err)
+	}
+
+	// Deduplicate todos for this domain
+	go deduplicateTodos(mongoDB, domain, tenantID)
+}
+
+// deduplicateTodos finds semantically similar open todos for a domain and archives duplicates.
+// Uses normalized word overlap (Jaccard similarity) to detect similar actions.
+func deduplicateTodos(mongoDB *MongoDB, domain, tenantID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	filter := bson.D{
+		{Key: "domain", Value: domain},
+		{Key: "status", Value: "todo"},
+	}
+	if tenantID != "" {
+		filter = append(filter, bson.E{Key: "tenantId", Value: tenantID})
+	}
+
+	cursor, err := mongoDB.Todos().Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "createdAt", Value: 1}}))
+	if err != nil {
+		log.Printf("deduplicateTodos: find error: %v", err)
+		return
+	}
+	var todos []TodoItem
+	if err := cursor.All(ctx, &todos); err != nil {
+		log.Printf("deduplicateTodos: cursor error: %v", err)
+		return
+	}
+
+	if len(todos) < 2 {
+		return
+	}
+
+	// Normalize and tokenize action text for Jaccard similarity
+	tokenize := func(s string) map[string]bool {
+		words := map[string]bool{}
+		for _, w := range strings.Fields(strings.ToLower(s)) {
+			w = strings.Trim(w, ".,;:!?\"'()-")
+			if len(w) > 2 { // skip small words
+				words[w] = true
+			}
+		}
+		return words
+	}
+	jaccard := func(a, b map[string]bool) float64 {
+		if len(a) == 0 || len(b) == 0 {
+			return 0
+		}
+		intersection := 0
+		for w := range a {
+			if b[w] {
+				intersection++
+			}
+		}
+		union := len(a) + len(b) - intersection
+		if union == 0 {
+			return 0
+		}
+		return float64(intersection) / float64(union)
+	}
+
+	type group struct {
+		keepIdx int
+		dupes   []int
+	}
+
+	tokens := make([]map[string]bool, len(todos))
+	for i, t := range todos {
+		tokens[i] = tokenize(t.Action)
+	}
+
+	merged := map[int]bool{}
+	var groups []group
+
+	for i := 0; i < len(todos); i++ {
+		if merged[i] {
+			continue
+		}
+		g := group{keepIdx: i}
+		for j := i + 1; j < len(todos); j++ {
+			if merged[j] {
+				continue
+			}
+			// Same dimension and high textual similarity
+			if todos[i].Dimension == todos[j].Dimension && jaccard(tokens[i], tokens[j]) > 0.6 {
+				g.dupes = append(g.dupes, j)
+				merged[j] = true
+			}
+		}
+		if len(g.dupes) > 0 {
+			groups = append(groups, g)
+		}
+	}
+
+	if len(groups) == 0 {
+		return
+	}
+
+	// Archive duplicates, keeping the highest-priority version
+	priorityRank := map[string]int{"high": 3, "medium": 2, "low": 1}
+	for _, g := range groups {
+		bestIdx := g.keepIdx
+		bestRank := priorityRank[todos[bestIdx].Priority]
+		for _, di := range g.dupes {
+			if priorityRank[todos[di].Priority] > bestRank {
+				bestRank = priorityRank[todos[di].Priority]
+				bestIdx = di
+			}
+		}
+
+		// Archive all dupes except the best
+		for _, idx := range append([]int{g.keepIdx}, g.dupes...) {
+			if idx == bestIdx {
+				continue
+			}
+			_, err := mongoDB.Todos().UpdateOne(ctx,
+				bson.D{{Key: "_id", Value: todos[idx].ID}},
+				bson.D{{Key: "$set", Value: bson.D{
+					{Key: "status", Value: "archived"},
+					{Key: "archivedReason", Value: fmt.Sprintf("Merged: similar to existing todo")},
+				}}},
+			)
+			if err != nil {
+				log.Printf("deduplicateTodos: archive error: %v", err)
+			}
+		}
+	}
+
+	totalArchived := 0
+	for _, g := range groups {
+		totalArchived += len(g.dupes)
+	}
+	if totalArchived > 0 {
+		log.Printf("deduplicateTodos: archived %d duplicate todos for %s", totalArchived, domain)
 	}
 }
 
@@ -5094,6 +5243,9 @@ func createTodosFromRedditAnalysis(mongoDB *MongoDB, domain, tenantID string, re
 			log.Printf("Failed to create reddit todo: %v", err)
 		}
 	}
+
+	// Deduplicate todos for this domain
+	go deduplicateTodos(mongoDB, domain, tenantID)
 }
 
 func buildRedditAuthorityPrompt(domain string, threads []RedditThread, competitors, searchTerms []string, brandInfo BrandContextInfo) string {
@@ -5720,6 +5872,9 @@ func createTodosFromSearchAnalysis(mongoDB *MongoDB, domain, tenantID string, re
 			log.Printf("Failed to create search todo: %v", err)
 		}
 	}
+
+	// Deduplicate todos for this domain
+	go deduplicateTodos(mongoDB, domain, tenantID)
 }
 
 func handleGetSearchAnalysis(mongoDB *MongoDB) http.HandlerFunc {
@@ -6056,41 +6211,81 @@ func handleGenerateTestQueries(mongoDB *MongoDB) http.HandlerFunc {
 			brandName = req.Domain
 		}
 
-		// Auto-generate queries if target queries are sparse
-		if len(queries) < 3 {
-			// Brand awareness
-			queries = append(queries, LLMTestQuery{
-				Query:    fmt.Sprintf("What is %s?", brandName),
-				Type:     "brand",
-				Priority: "high",
-			})
-
-			// Category discovery
-			if len(brand.Categories) > 0 {
-				queries = append(queries, LLMTestQuery{
-					Query:    fmt.Sprintf("What are the best %s tools?", brand.Categories[0]),
-					Type:     "category",
-					Priority: "high",
-				})
+		// Auto-generate additional queries from brand profile fields
+		seen := map[string]bool{}
+		for _, q := range queries {
+			seen[strings.ToLower(q.Query)] = true
+		}
+		addQuery := func(query, qType, priority string) {
+			if len(queries) >= 12 {
+				return
 			}
-
-			// Competitor comparison
-			if len(brand.Competitors) > 0 {
-				queries = append(queries, LLMTestQuery{
-					Query:    fmt.Sprintf("How does %s compare to %s?", brandName, brand.Competitors[0].Name),
-					Type:     "comparison",
-					Priority: "medium",
-				})
+			lower := strings.ToLower(query)
+			if seen[lower] {
+				return
 			}
+			seen[lower] = true
+			queries = append(queries, LLMTestQuery{Query: query, Type: qType, Priority: priority})
+		}
 
-			// Use case discovery
-			if len(brand.KeyUseCases) > 0 {
-				queries = append(queries, LLMTestQuery{
-					Query:    fmt.Sprintf("How do I %s?", strings.ToLower(brand.KeyUseCases[0])),
-					Type:     "discovery",
-					Priority: "medium",
-				})
+		// Brand awareness (always)
+		if len(queries) == 0 {
+			addQuery(fmt.Sprintf("What is %s?", brandName), "brand", "high")
+		}
+
+		// Category discovery
+		for i, cat := range brand.Categories {
+			if i >= 2 {
+				break
 			}
+			addQuery(fmt.Sprintf("What are the best %s tools?", cat), "category", "high")
+		}
+
+		// Product-specific queries
+		for i, prod := range brand.Products {
+			if i >= 2 {
+				break
+			}
+			addQuery(fmt.Sprintf("What is %s?", prod), "brand", "medium")
+		}
+
+		// Audience-targeted queries
+		if brand.PrimaryAudience != "" && len(brand.Categories) > 0 {
+			addQuery(fmt.Sprintf("Best %s for %s", brand.Categories[0], strings.ToLower(brand.PrimaryAudience)), "category", "medium")
+		}
+
+		// Competitor comparisons
+		for i, comp := range brand.Competitors {
+			if i >= 2 {
+				break
+			}
+			addQuery(fmt.Sprintf("How does %s compare to %s?", brandName, comp.Name), "comparison", "medium")
+		}
+
+		// Use case / discovery queries
+		for i, uc := range brand.KeyUseCases {
+			if i >= 2 {
+				break
+			}
+			addQuery(fmt.Sprintf("How do I %s?", strings.ToLower(uc)), "discovery", "medium")
+		}
+
+		// Key message verification
+		for i, km := range brand.KeyMessages {
+			if i >= 1 {
+				break
+			}
+			addQuery(fmt.Sprintf("Is it true that %s?", strings.ToLower(km.Claim)), "brand", "low")
+		}
+
+		// Differentiator queries
+		if len(brand.Differentiators) > 0 {
+			addQuery(fmt.Sprintf("What makes %s different from competitors?", brandName), "comparison", "medium")
+		}
+
+		// Reddit presence queries
+		if len(brand.Presence.Subreddits) > 0 {
+			addQuery(fmt.Sprintf("What does Reddit say about %s?", brandName), "discovery", "low")
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -6098,6 +6293,34 @@ func handleGenerateTestQueries(mongoDB *MongoDB) http.HandlerFunc {
 			"queries":    queries,
 			"brand_name": brandName,
 		})
+	}
+}
+
+func handleListProviderModels() http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		type modelInfo struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		type providerModels struct {
+			ID     string      `json:"id"`
+			Name   string      `json:"name"`
+			Models []modelInfo `json:"models"`
+		}
+		var result []providerModels
+		for _, pid := range validProviderIDs() {
+			p := getProvider(pid)
+			if p == nil {
+				continue
+			}
+			var models []modelInfo
+			for _, m := range p.Models() {
+				models = append(models, modelInfo{ID: m.ID, Name: m.Name})
+			}
+			result = append(result, providerModels{ID: pid, Name: p.Name(), Models: models})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
 	}
 }
 
@@ -6114,7 +6337,10 @@ func handleGetLLMTest(mongoDB *MongoDB) http.HandlerFunc {
 
 		var test LLMTest
 		err := mongoDB.LLMTests().FindOne(ctx,
-			tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}}),
+			tenantFilter(r.Context(), bson.D{
+				{Key: "domain", Value: domain},
+				{Key: "competitorOf", Value: bson.D{{Key: "$in", Value: bson.A{"", nil}}}},
+			}),
 			options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}),
 		).Decode(&test)
 		if err != nil {
@@ -6126,6 +6352,93 @@ func handleGetLLMTest(mongoDB *MongoDB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(test)
+	}
+}
+
+func handleGetLLMTestHistory(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := normalizeDomain(r.PathValue("domain"))
+		if domain == "" {
+			http.Error(w, `{"error":"domain is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		// Return all test runs (excluding competitor tests), sorted newest first, limit 20
+		// Project out full response text for compactness
+		cursor, err := mongoDB.LLMTests().Find(ctx,
+			tenantFilter(r.Context(), bson.D{
+				{Key: "domain", Value: domain},
+				{Key: "competitorOf", Value: bson.D{{Key: "$in", Value: bson.A{"", nil}}}},
+			}),
+			options.Find().
+				SetSort(bson.D{{Key: "generatedAt", Value: -1}}).
+				SetLimit(20).
+				SetProjection(bson.D{
+					{Key: "results.provider_results.response", Value: 0},
+				}),
+		)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		var tests []LLMTest
+		if err := cursor.All(ctx, &tests); err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tests)
+	}
+}
+
+func handleGetCompetitorTests(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := normalizeDomain(r.PathValue("domain"))
+		if domain == "" {
+			http.Error(w, `{"error":"domain is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		// Find all competitor tests where competitorOf matches the primary domain
+		// Return only the most recent test per competitor domain
+		pipeline := mongo.Pipeline{
+			{{Key: "$match", Value: bson.D{
+				{Key: "competitorOf", Value: domain},
+				{Key: "tenantId", Value: saas.TenantIDFromContext(r.Context())},
+			}}},
+			{{Key: "$sort", Value: bson.D{{Key: "generatedAt", Value: -1}}}},
+			{{Key: "$group", Value: bson.D{
+				{Key: "_id", Value: "$domain"},
+				{Key: "doc", Value: bson.D{{Key: "$first", Value: "$$ROOT"}}},
+			}}},
+			{{Key: "$replaceRoot", Value: bson.D{{Key: "newRoot", Value: "$doc"}}}},
+			{{Key: "$project", Value: bson.D{
+				{Key: "results.provider_results.response", Value: 0},
+			}}},
+		}
+
+		cursor, err := mongoDB.LLMTests().Aggregate(ctx, pipeline)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		var tests []LLMTest
+		if err := cursor.All(ctx, &tests); err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tests)
 	}
 }
 
@@ -6166,10 +6479,12 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 		}
 
 		var req struct {
-			Domain    string         `json:"domain"`
-			Providers []string       `json:"providers"`
-			Queries   []LLMTestQuery `json:"queries"`
-			Force     bool           `json:"force"`
+			Domain       string            `json:"domain"`
+			Providers    []string          `json:"providers"`
+			Queries      []LLMTestQuery    `json:"queries"`
+			Models       map[string]string `json:"models"`        // providerID → modelID override
+			CompetitorOf string            `json:"competitor_of"` // if set, this is a competitor test for the given primary domain
+			Force        bool              `json:"force"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			sendSSE(w, flusher, "error", map[string]string{"message": "Invalid request body"})
@@ -6232,11 +6547,20 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 		responses := make([]testRawResponse, 0, totalCalls)
 
 		for _, pk := range providerKeys {
-			model := pk.provider.Models()[0] // primary model
+			// Use model override if specified, otherwise use primary model
+			model := pk.provider.Models()[0]
+			if overrideID, ok := req.Models[pk.provider.ProviderID()]; ok && overrideID != "" {
+				for _, m := range pk.provider.Models() {
+					if m.ID == overrideID {
+						model = m
+						break
+					}
+				}
+			}
 			for qi, q := range req.Queries {
 				completedCalls++
 				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("[%d/%d] Querying %s: \"%s\"...", completedCalls, totalCalls, pk.provider.Name(), truncateStr(q.Query, 60)),
+					"message": fmt.Sprintf("[%d/%d] Querying %s (%s): \"%s\"...", completedCalls, totalCalls, pk.provider.Name(), model.Name, truncateStr(q.Query, 60)),
 				})
 
 				resp, err := pk.provider.Call(r.Context(), pk.apiKey, model.ID, q.Query, 4096)
@@ -6337,10 +6661,19 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 		// Compute per-provider summaries
 		summaryMap := map[string]*LLMTestSummary{}
 		for _, pk := range providerKeys {
+			modelName := pk.provider.Models()[0].Name
+			if overrideID, ok := req.Models[pk.provider.ProviderID()]; ok && overrideID != "" {
+				for _, m := range pk.provider.Models() {
+					if m.ID == overrideID {
+						modelName = m.Name
+						break
+					}
+				}
+			}
 			summaryMap[pk.provider.ProviderID()] = &LLMTestSummary{
 				ProviderID:   pk.provider.ProviderID(),
 				ProviderName: pk.provider.Name(),
-				Model:        pk.provider.Models()[0].Name,
+				Model:        modelName,
 			}
 		}
 
@@ -6392,10 +6725,24 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 			overallScore = overallTotal / len(summaries)
 		}
 
+		// Determine run number
+		runNumber := 1
+		runCtx, runCancel := context.WithTimeout(r.Context(), 5*time.Second)
+		var prevTest LLMTest
+		if err := mongoDB.LLMTests().FindOne(runCtx,
+			tenantFilter(r.Context(), bson.D{{Key: "domain", Value: req.Domain}}),
+			options.FindOne().SetSort(bson.D{{Key: "runNumber", Value: -1}}),
+		).Decode(&prevTest); err == nil {
+			runNumber = prevTest.RunNumber + 1
+		}
+		runCancel()
+
 		test := LLMTest{
 			TenantID:          saas.TenantIDFromContext(r.Context()),
 			Domain:            req.Domain,
 			BrandName:         brandName,
+			RunNumber:         runNumber,
+			CompetitorOf:      normalizeDomain(req.CompetitorOf),
 			Queries:           req.Queries,
 			Results:           queryResults,
 			ProviderSummaries: summaries,
@@ -6404,16 +6751,14 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 			GeneratedAt:       time.Now(),
 		}
 
-		// Save to DB (upsert by domain)
+		// Save to DB (insert new document for history tracking)
 		saveCtx, saveCancel := context.WithTimeout(r.Context(), 10*time.Second)
-		_, saveErr := mongoDB.LLMTests().ReplaceOne(saveCtx,
-			tenantFilter(r.Context(), bson.D{{Key: "domain", Value: req.Domain}}),
-			test,
-			options.Replace().SetUpsert(true),
-		)
+		insertResult, saveErr := mongoDB.LLMTests().InsertOne(saveCtx, test)
 		saveCancel()
 		if saveErr != nil {
 			log.Printf("Failed to save LLM test: %v", saveErr)
+		} else if oid, ok := insertResult.InsertedID.(primitive.ObjectID); ok {
+			test.ID = oid
 		}
 
 		sendSSE(w, flusher, "status", map[string]string{
@@ -6423,6 +6768,143 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 		testJSON, _ := json.Marshal(test)
 		sendSSE(w, flusher, "done", map[string]any{
 			"result": string(testJSON),
+		})
+	}
+}
+
+func handleVisibilityScore(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := normalizeDomain(r.PathValue("domain"))
+		if domain == "" {
+			http.Error(w, `{"error":"domain is required"}`, http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		tenantID := saas.TenantIDFromContext(r.Context())
+
+		type component struct {
+			Name      string  `json:"name"`
+			Score     int     `json:"score"`
+			Weight    float64 `json:"weight"`
+			Available bool    `json:"available"`
+		}
+
+		components := []component{
+			{Name: "Optimization", Weight: 0.30},
+			{Name: "Video Authority", Weight: 0.20},
+			{Name: "Reddit Authority", Weight: 0.20},
+			{Name: "Search Visibility", Weight: 0.15},
+			{Name: "LLM Test", Weight: 0.15},
+		}
+
+		// 1. Optimization average score
+		cursor, err := mongoDB.Optimizations().Find(ctx,
+			tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}}),
+			options.Find().SetProjection(bson.D{{Key: "result.overallScore", Value: 1}}),
+		)
+		if err == nil {
+			var opts []struct {
+				Result struct {
+					OverallScore int `bson:"overallScore"`
+				} `bson:"result"`
+			}
+			if cursor.All(ctx, &opts) == nil && len(opts) > 0 {
+				total := 0
+				for _, o := range opts {
+					total += o.Result.OverallScore
+				}
+				components[0].Score = total / len(opts)
+				components[0].Available = true
+			}
+		}
+
+		// 2. Video authority (latest)
+		var va struct {
+			Result *struct {
+				OverallScore int `bson:"overallScore"`
+			} `bson:"result"`
+		}
+		if mongoDB.VideoAnalyses().FindOne(ctx,
+			bson.D{{Key: "domain", Value: domain}, {Key: "tenantId", Value: tenantID}},
+			options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}).SetProjection(bson.D{{Key: "result.overallScore", Value: 1}}),
+		).Decode(&va) == nil && va.Result != nil {
+			components[1].Score = va.Result.OverallScore
+			components[1].Available = true
+		}
+
+		// 3. Reddit authority (latest)
+		var ra struct {
+			Result *struct {
+				OverallScore int `bson:"overallScore"`
+			} `bson:"result"`
+		}
+		if mongoDB.RedditAnalyses().FindOne(ctx,
+			bson.D{{Key: "domain", Value: domain}, {Key: "tenantId", Value: tenantID}},
+			options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}).SetProjection(bson.D{{Key: "result.overallScore", Value: 1}}),
+		).Decode(&ra) == nil && ra.Result != nil {
+			components[2].Score = ra.Result.OverallScore
+			components[2].Available = true
+		}
+
+		// 4. Search visibility (latest)
+		var sa struct {
+			Result *struct {
+				OverallScore int `bson:"overallScore"`
+			} `bson:"result"`
+		}
+		if mongoDB.SearchAnalyses().FindOne(ctx,
+			bson.D{{Key: "domain", Value: domain}, {Key: "tenantId", Value: tenantID}},
+			options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}).SetProjection(bson.D{{Key: "result.overallScore", Value: 1}}),
+		).Decode(&sa) == nil && sa.Result != nil {
+			components[3].Score = sa.Result.OverallScore
+			components[3].Available = true
+		}
+
+		// 5. LLM Test (latest non-competitor)
+		var lt struct {
+			OverallScore int `bson:"overallScore"`
+		}
+		if mongoDB.LLMTests().FindOne(ctx,
+			bson.D{
+				{Key: "domain", Value: domain},
+				{Key: "tenantId", Value: tenantID},
+				{Key: "competitorOf", Value: bson.D{{Key: "$in", Value: bson.A{"", nil}}}},
+			},
+			options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}).SetProjection(bson.D{{Key: "overallScore", Value: 1}}),
+		).Decode(&lt) == nil {
+			components[4].Score = lt.OverallScore
+			components[4].Available = true
+		}
+
+		// Compute weighted score (re-weight proportionally for available components only)
+		totalWeight := 0.0
+		weightedSum := 0.0
+		for _, c := range components {
+			if c.Available {
+				totalWeight += c.Weight
+				weightedSum += float64(c.Score) * c.Weight
+			}
+		}
+
+		score := 0
+		if totalWeight > 0 {
+			score = int(weightedSum / totalWeight)
+		}
+
+		availableCount := 0
+		for _, c := range components {
+			if c.Available {
+				availableCount++
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"score":      score,
+			"components": components,
+			"available":  availableCount,
+			"total":      len(components),
 		})
 	}
 }

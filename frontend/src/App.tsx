@@ -104,7 +104,7 @@ interface TodoItem {
 }
 
 type TodoSubTab = 'todo' | 'completed' | 'backlogged' | 'archived'
-type TodoSortMode = 'priority' | 'question'
+type TodoSortMode = 'priority' | 'question' | 'dimension'
 
 interface OptimizationListItem {
   id: string
@@ -643,11 +643,13 @@ interface LLMTestResult {
   id: string
   domain: string
   brand_name: string
+  run_number: number
   queries: TestQuery[]
   results: TestQueryResult[]
   provider_summaries: TestProviderSummary[]
   overall_score: number
   brand_context_used: boolean
+  competitor_of?: string
   generated_at: string
 }
 
@@ -677,6 +679,23 @@ function safePathname(urlStr: string): string {
 /** Format a date string as "Mon DD, h:mm AM" */
 function fmtDate(d: string) {
   return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+/** Score color helpers (80/60/40 thresholds) */
+function scoreTextColor(s: number): string {
+  return s >= 80 ? 'text-emerald-400' : s >= 60 ? 'text-amber-400' : s >= 40 ? 'text-orange-400' : 'text-red-400'
+}
+function scoreBgSolid(s: number): string {
+  return s >= 80 ? 'bg-emerald-500' : s >= 60 ? 'bg-amber-500' : s >= 40 ? 'bg-orange-500' : 'bg-red-500'
+}
+function scoreBadge(s: number): string {
+  return s >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+    : s >= 60 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+    : s >= 40 ? 'bg-orange-500/15 text-orange-400 border-orange-500/30'
+    : 'bg-red-500/15 text-red-400 border-red-500/30'
+}
+function scoreLabel(s: number): string {
+  return s >= 80 ? 'Strong Position' : s >= 60 ? 'Moderate — Room for Improvement' : s >= 40 ? 'Weak — Significant Improvements Needed' : 'Poor — Immediate Action Required'
 }
 
 /** Extract the hostname from a domain/URL string for grouping and comparison */
@@ -765,6 +784,10 @@ export default function App() {
   const sharedModeRef = useRef(isShareURL)
   const [sharedOptimizations, setSharedOptimizations] = useState<FullOptimization[]>([])
 
+  // Batch optimize
+  const [batchOptimizing, setBatchOptimizing] = useState(false)
+  const [batchOptProgress, setBatchOptProgress] = useState({ current: 0, total: 0 })
+
   // Modals for optimize question click + auth/subscription gating
   const [optimizeConfirmQ, setOptimizeConfirmQ] = useState<number | null>(null) // question index for confirmation
   const [readOnlyOptModal, setReadOnlyOptModal] = useState<string | null>(null) // brand name for "not ready" modal
@@ -819,6 +842,8 @@ export default function App() {
   const [suggestDiffSelected, setSuggestDiffSelected] = useState<Set<number>>(new Set())
   const [brandPresenceComplete, setBrandPresenceComplete] = useState(false)
   const [brandSections, setBrandSections] = useState({ audience: false, competitors: true, queries: false, presence: false })
+  const [quickSetupRunning, setQuickSetupRunning] = useState(false)
+  const [quickSetupStep, setQuickSetupStep] = useState('')
 
   const [confirmDeleteBrand, setConfirmDeleteBrand] = useState(false)
   const [confirmDeleteAnalysis, setConfirmDeleteAnalysis] = useState<string | null>(null)
@@ -894,9 +919,20 @@ export default function App() {
   const [testMessages, setTestMessages] = useState<string[]>([])
   const [testError, setTestError] = useState('')
   const [confirmDeleteTest, setConfirmDeleteTest] = useState(false)
+  const [testHistory, setTestHistory] = useState<LLMTestResult[]>([])
+  const [testProviderModels, setTestProviderModels] = useState<{ id: string; name: string; models: { id: string; name: string }[] }[]>([])
+  const [testModelSelections, setTestModelSelections] = useState<Record<string, string>>({})
+  const [competitorTests, setCompetitorTests] = useState<LLMTestResult[]>([])
+  const [showCompetitorOverlay, setShowCompetitorOverlay] = useState(false)
+  const [competitorDomain, setCompetitorDomain] = useState('')
+  const [showCompetitorModal, setShowCompetitorModal] = useState(false)
+  const [testCompareRun, setTestCompareRun] = useState<LLMTestResult | null>(null)
+  const [dismissedInsights, setDismissedInsights] = useState<Set<string>>(new Set())
   const testAbortRef = useRef<AbortController | null>(null)
   const testMessagesEndRef = useRef<HTMLDivElement>(null)
   const [testExpandedCells, setTestExpandedCells] = useState<Set<string>>(new Set())
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
+  const [visibilityScore, setVisibilityScore] = useState<{ score: number; components: { name: string; score: number; weight: number; available: boolean }[]; available: number } | null>(null)
 
   // Auto-scroll refs for SSE message containers
   const videoMessagesEndRef = useRef<HTMLDivElement>(null)
@@ -1915,6 +1951,59 @@ export default function App() {
     )
   }, [optList])
 
+  // Search stale detection: newer optimizations since analysis
+  const searchStaleOptimizations = useMemo(() => {
+    if (!searchAnalysis?.generated_at || !selectedDomain) return []
+    const analysisDate = new Date(searchAnalysis.generated_at)
+    const seen = new Set<string>()
+    return optList
+      .filter(o =>
+        domainKey(o.domain) === domainKey(selectedDomain) &&
+        new Date(o.created_at) > analysisDate
+      )
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .filter(o => {
+        const q = o.question.toLowerCase()
+        if (seen.has(q)) return false
+        seen.add(q)
+        return true
+      })
+  }, [searchAnalysis, selectedDomain, optList])
+
+  // Cross-report insights: data-driven suggestions connecting tabs
+  const crossInsights = useMemo(() => {
+    const insights: { tab: string; message: string; cta: string; targetTab: string }[] = []
+    if (!selectedDomain) return insights
+
+    // After Optimize: suggest video if content authority is low
+    if (activeSummary?.result?.average_score && activeSummary.result.average_score < 60) {
+      if (!videoAnalysis) insights.push({ tab: 'optimize', message: 'Your overall LLM visibility score is low. YouTube content can strengthen your brand narrative in training data.', cta: 'Run Video Analysis', targetTab: 'video' })
+      if (!redditAnalysis) insights.push({ tab: 'optimize', message: 'Community discussions on Reddit contribute to LLM training data. Analyzing your Reddit presence may reveal opportunities.', cta: 'Run Reddit Analysis', targetTab: 'reddit' })
+    }
+
+    // After Video: if score is low, suggest optimization
+    if (videoAnalysis?.result && videoAnalysis.result.overall_score < 50) {
+      insights.push({ tab: 'video', message: 'Video authority is below average. Optimizing your content for specific queries can improve how LLMs reference your brand.', cta: 'View Optimization Reports', targetTab: 'optimize' })
+    }
+
+    // After Reddit: if sentiment is mixed, suggest brand profile review
+    if (redditAnalysis?.result && redditAnalysis.result.overall_score < 50) {
+      insights.push({ tab: 'reddit', message: 'Reddit sentiment needs attention. Review your brand messaging to address community concerns.', cta: 'Review Brand Profile', targetTab: 'brand' })
+    }
+
+    // After Test: if overall score is low, suggest running optimizations
+    if (testResults && testResults.overall_score < 50) {
+      insights.push({ tab: 'test', message: `LLMs mention your brand in only ${testResults.provider_summaries.reduce((s, p) => s + p.mention_rate, 0) / Math.max(testResults.provider_summaries.length, 1)}% of queries. Optimization reports provide actionable recommendations.`, cta: 'View Optimizations', targetTab: 'optimize' })
+    }
+
+    // If search is missing but other analyses exist
+    if (!searchAnalysis && (videoAnalysis || redditAnalysis)) {
+      insights.push({ tab: 'video', message: 'Search visibility affects whether AI systems discover your content. Run a search analysis for a complete picture.', cta: 'Run Search Analysis', targetTab: 'search' })
+    }
+
+    return insights
+  }, [selectedDomain, activeSummary, videoAnalysis, redditAnalysis, searchAnalysis, testResults])
+
   const redditDiscover = useCallback(async () => {
     if (!redditDomain.trim()) return
     setRedditDiscovering(true)
@@ -2288,6 +2377,7 @@ export default function App() {
           domain: selectedDomain,
           providers: testSelectedProviders,
           queries: testQueries,
+          models: Object.keys(testModelSelections).length > 0 ? testModelSelections : undefined,
           force,
         }),
         signal: controller.signal,
@@ -2355,6 +2445,87 @@ export default function App() {
     setTestAnalyzing(false)
     setTestMessages(prev => [...prev, 'Test stopped by user'])
   }, [])
+
+  // Run competitor test: same queries/providers but for a competitor domain
+  const runCompetitorTest = useCallback(async (compDomain: string) => {
+    if (!selectedDomain || !testResults || testSelectedProviders.length === 0) return
+    if (saasEnabled && user && apiKeyStatus !== 'active') { setApiKeyModal(true); return }
+    const controller = new AbortController()
+    testAbortRef.current = controller
+    setTestAnalyzing(true)
+    setTestMessages([`Testing competitor: ${compDomain}...`])
+    setTestError('')
+    setShowCompetitorModal(false)
+
+    try {
+      const response = await apiFetch('/api/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          domain: compDomain,
+          providers: testResults.provider_summaries.map(ps => ps.provider_id),
+          queries: testResults.queries,
+          models: Object.keys(testModelSelections).length > 0 ? testModelSelections : undefined,
+          competitor_of: selectedDomain,
+          force: false,
+        }),
+        signal: controller.signal,
+      })
+
+      if (!response.ok || !response.body) { setTestAnalyzing(false); setTestError('Failed to start competitor test'); return }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        while (true) {
+          const idx = buffer.indexOf('\n\n')
+          if (idx === -1) break
+          const message = buffer.slice(0, idx)
+          buffer = buffer.slice(idx + 2)
+
+          let eventType = '', data = ''
+          for (const line of message.split('\n')) {
+            if (line.startsWith('event: ')) eventType = line.slice(7)
+            else if (line.startsWith('data: ')) data = line.slice(6)
+          }
+          if (!data || !eventType) continue
+
+          try {
+            const parsed = JSON.parse(data)
+            if (eventType === 'status' || eventType === 'progress') {
+              setTestMessages(prev => [...prev, parsed.message])
+            } else if (eventType === 'done') {
+              const result = JSON.parse(parsed.result) as LLMTestResult
+              setCompetitorTests(prev => {
+                const filtered = prev.filter(c => c.domain !== result.domain)
+                return [...filtered, result]
+              })
+              setShowCompetitorOverlay(true)
+              setTestAnalyzing(false)
+              setTestView('results')
+              return
+            } else if (eventType === 'error') {
+              setTestError(parsed.message)
+              setTestMessages(prev => [...prev, `Error: ${parsed.message}`])
+              setTestAnalyzing(false)
+              return
+            }
+          } catch { /* skip malformed */ }
+        }
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) setTestError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setTestAnalyzing(false)
+      testAbortRef.current = null
+    }
+  }, [selectedDomain, testResults, testSelectedProviders, testModelSelections, saasEnabled, user, apiKeyStatus])
 
   const deleteLLMTest = useCallback(async () => {
     if (!selectedDomain) return
@@ -2501,6 +2672,10 @@ export default function App() {
           setTestSelectedProviders(active.map((k: { provider: string }) => k.provider))
         }
       }).catch(() => {})
+      // Fetch provider models for model selection dropdowns
+      apiFetch('/api/providers/models').then(r => r.ok ? r.json() : []).then(data => {
+        if (Array.isArray(data)) setTestProviderModels(data)
+      }).catch(() => {})
       // Fetch existing test results
       apiFetch(`/api/test/${encodeURIComponent(selectedDomain)}`).then(r => {
         if (r.ok) return r.json()
@@ -2509,8 +2684,17 @@ export default function App() {
         if (data && data.id) {
           setTestResults(data)
           setTestView('results')
+          // Fetch history for trend display
+          apiFetch(`/api/test/${encodeURIComponent(selectedDomain)}/history`).then(r => r.ok ? r.json() : []).then(hist => {
+            if (Array.isArray(hist)) setTestHistory(hist)
+          }).catch(() => {})
+          // Fetch competitor test results
+          apiFetch(`/api/test/${encodeURIComponent(selectedDomain)}/competitors`).then(r => r.ok ? r.json() : []).then(comp => {
+            if (Array.isArray(comp)) setCompetitorTests(comp)
+          }).catch(() => {})
         } else {
           setTestView('input')
+          setTestHistory([])
           // Generate suggested queries
           apiFetch('/api/test/generate-queries', {
             method: 'POST',
@@ -2530,13 +2714,18 @@ export default function App() {
   useEffect(() => { searchMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [searchMessages])
   useEffect(() => { testMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [testMessages])
 
-  // Auto-load domain summary when selectedDomain changes
+  // Auto-load domain summary and visibility score when selectedDomain changes
   useEffect(() => {
     if (selectedDomain) {
       loadSummaryForDomain(selectedDomain)
+      apiFetch(`/api/visibility-score/${encodeURIComponent(selectedDomain)}`).then(r => r.ok ? r.json() : null).then(data => {
+        if (data) setVisibilityScore(data)
+        else setVisibilityScore(null)
+      }).catch(() => setVisibilityScore(null))
     } else {
       setActiveSummary(null)
       setActiveSummaryStale(false)
+      setVisibilityScore(null)
     }
   }, [selectedDomain, loadSummaryForDomain])
 
@@ -2701,6 +2890,98 @@ export default function App() {
     setBrandForm(prev => ({ ...prev, differentiators: merged.join(', ') }))
     setSuggestedDiffs([])
   }, [suggestedDiffs, suggestDiffSelected, brandForm.differentiators])
+
+  // Quick Setup: chain brand discovery steps sequentially
+  const quickSetupBrand = useCallback(async () => {
+    if (!brandDomain.trim() || quickSetupRunning) return
+    setQuickSetupRunning(true)
+    try {
+      // Step 1: Generate description (populates name, description, categories, products)
+      setQuickSetupStep('Analyzing site and generating description...')
+      await brandSSE(
+        `/api/brands/${encodeURIComponent(brandDomain.trim())}/generate-description`,
+        setGenerateMessages, setGeneratingDesc,
+        (result) => {
+          try {
+            const parsed = JSON.parse(result)
+            setBrandForm(prev => ({
+              ...prev,
+              ...(parsed.description ? { description: parsed.description } : {}),
+              ...(parsed.brand_name && !prev.brand_name ? { brand_name: parsed.brand_name } : {}),
+              ...(parsed.categories?.length && !prev.categories ? { categories: parsed.categories.join(', ') } : {}),
+              ...(parsed.products?.length && !prev.products ? { products: parsed.products.join(', ') } : {}),
+            }))
+          } catch { /* ignore */ }
+        },
+      )
+
+      // Step 2: Predict audience
+      setQuickSetupStep('Predicting target audience...')
+      await brandSSE(
+        `/api/brands/${encodeURIComponent(brandDomain.trim())}/predict-audience`,
+        setPredictAudienceMessages, setPredictingAudience,
+        (result) => {
+          try {
+            const parsed = JSON.parse(result)
+            setBrandForm(prev => ({
+              ...prev,
+              ...(parsed.primary_audience && !prev.primary_audience ? { primary_audience: parsed.primary_audience } : {}),
+              ...(parsed.key_use_cases?.length && !prev.key_use_cases ? { key_use_cases: parsed.key_use_cases.join(', ') } : {}),
+            }))
+          } catch { /* ignore */ }
+        },
+      )
+
+      // Step 3: Predict differentiators (auto-add)
+      setQuickSetupStep('Identifying differentiators...')
+      await brandSSE(
+        `/api/brands/${encodeURIComponent(brandDomain.trim())}/predict-differentiators`,
+        setPredictDiffMessages, setPredictingDiffs,
+        (result) => {
+          try {
+            const parsed = JSON.parse(result)
+            const raw = parsed.differentiators || []
+            const diffs: string[] = raw.map((d: string | { differentiator: string }) =>
+              typeof d === 'string' ? d : d.differentiator
+            ).filter(Boolean)
+            if (diffs.length) {
+              setBrandForm(prev => {
+                const current = prev.differentiators ? prev.differentiators.split(',').map(s => s.trim()).filter(Boolean) : []
+                const existLower = new Set(current.map(d => d.toLowerCase()))
+                const merged = [...current, ...diffs.filter(d => !existLower.has(d.toLowerCase()))]
+                return { ...prev, differentiators: merged.join(', ') }
+              })
+            }
+          } catch { /* ignore */ }
+        },
+      )
+
+      // Step 4: Suggest claims (auto-add)
+      setQuickSetupStep('Discovering brand claims...')
+      await brandSSE(
+        `/api/brands/${encodeURIComponent(brandDomain.trim())}/suggest-claims`,
+        setSuggestClaimMessages, setSuggestingClaims,
+        (result) => {
+          try {
+            const parsed = JSON.parse(result)
+            const claims = (parsed.claims || []) as SuggestedClaim[]
+            if (claims.length) {
+              setBrandMessages(prev => {
+                const existing = new Set(prev.map(m => m.claim.toLowerCase()))
+                const newOnes = claims
+                  .map(c => ({ claim: c.claim, evidence_url: c.evidence_url || '', priority: c.priority || 'medium' }))
+                  .filter(c => !existing.has(c.claim.toLowerCase()))
+                return [...prev, ...newOnes]
+              })
+            }
+          } catch { /* ignore */ }
+        },
+      )
+
+      setQuickSetupStep('Done! Review and save your profile.')
+    } catch { /* ignore */ }
+    setQuickSetupRunning(false)
+  }, [brandDomain, quickSetupRunning, brandSSE])
 
   // Brand completeness score
   const brandCompleteness = (() => {
@@ -3360,6 +3641,54 @@ export default function App() {
     setOptimizeConfirmQ(questionIdx)
   }
 
+  // Batch optimize: run optimization for all un-optimized questions
+  const batchOptimize = useCallback(async () => {
+    if (!result || !resultMeta?.id) return
+    if (saasEnabled && user && apiKeyStatus !== 'active') {
+      setApiKeyModal(true)
+      return
+    }
+
+    const optimized = new Set(optList.filter(o => domainKey(o.domain) === domainKey(selectedDomain)).map(o => o.question))
+    const unoptimized = result.questions.map((q, i) => ({ q, i })).filter(({ q }) => !optimized.has(q.question))
+
+    if (unoptimized.length === 0) return
+
+    setBatchOptimizing(true)
+    setBatchOptProgress({ current: 0, total: unoptimized.length })
+
+    for (let idx = 0; idx < unoptimized.length; idx++) {
+      const { i: questionIdx } = unoptimized[idx]
+      setBatchOptProgress({ current: idx + 1, total: unoptimized.length })
+
+      try {
+        const response = await apiFetch(`/api/analyses/${resultMeta.id}/questions/${questionIdx}/optimize`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force: false }),
+        })
+        if (!response.ok || !response.body) continue
+
+        // Consume the SSE stream to completion
+        const reader = response.body.getReader()
+        while (true) {
+          const { done } = await reader.read()
+          if (done) break
+        }
+      } catch { /* continue with next question */ }
+    }
+
+    setBatchOptimizing(false)
+    // Reload optimizations list
+    apiFetch(`/api/optimizations?domain=${encodeURIComponent(selectedDomain)}`).then(r => r.ok ? r.json() : []).then(data => {
+      if (Array.isArray(data)) setOptList(data)
+    }).catch(() => {})
+    // Reload todos
+    apiFetch('/api/todos').then(r => r.ok ? r.json() : []).then(data => {
+      if (Array.isArray(data)) setTodos(data)
+    }).catch(() => {})
+  }, [result, resultMeta, selectedDomain, optList, saasEnabled, user, apiKeyStatus])
+
   // Shared mode: loading / not-found states
   if (sharedLoading) {
     return (
@@ -3486,7 +3815,7 @@ export default function App() {
             <div className="space-y-4">
               {[
                 {
-                  name: 'Content Authority Signals', weight: '30%', color: 'primary',
+                  name: 'Content Authority', weight: '30%', color: 'primary',
                   source: 'GEO (Princeton/KDD 2024)',
                   desc: 'Measures the presence of quotations from authoritative sources (+41% visibility), statistical evidence (+33%), source citations (+28%), fluency (+29%), and technical terminology (+19%). Penalizes keyword stuffing (-9%).',
                 },
@@ -3858,8 +4187,8 @@ export default function App() {
         )}
 
         {/* Tab Navigation — Domain List + tab pills */}
-        <div className="flex justify-center mb-6">
-          <div className="inline-flex items-center bg-dark-900/50 border border-dark-800 rounded-lg p-1 gap-1">
+        <div className="flex justify-center mb-6 px-2">
+          <div className="inline-flex items-center bg-dark-900/50 border border-dark-800 rounded-lg p-1 gap-1 max-w-full overflow-x-auto scrollbar-hide">
             {/* Back button — shown when viewing a report, navigates to default home view */}
             {selectedDomain && (
               <button
@@ -3924,7 +4253,7 @@ export default function App() {
                 }
                 activeTab === 'brand' && brandEditing ? guardBrandNav(doSwitch) : doSwitch()
               }}
-              className={`px-5 py-2 rounded-md text-sm font-medium transition-all cursor-pointer ${
+              className={`px-5 py-2 rounded-md text-sm font-medium transition-all cursor-pointer shrink-0 ${
                 activeTab === 'analyze'
                   ? 'bg-primary-600 text-white'
                   : 'text-dark-400 hover:text-white'
@@ -3946,7 +4275,7 @@ export default function App() {
                       setActiveTab(tab)
                     }
                   }}
-                  className={`px-5 py-2 rounded-md text-sm font-medium transition-all relative flex items-center gap-2 ${
+                  className={`px-5 py-2 rounded-md text-sm font-medium transition-all relative flex items-center gap-2 shrink-0 ${
                     disabled
                       ? 'text-dark-600 cursor-not-allowed'
                       : activeTab === tab
@@ -4116,12 +4445,7 @@ export default function App() {
                       <div className="p-4">
                         <div className="flex items-center gap-3">
                           {pd.avg_score > 0 ? (
-                            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 border ${
-                              pd.avg_score >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' :
-                              pd.avg_score >= 60 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' :
-                              pd.avg_score >= 40 ? 'bg-orange-500/15 text-orange-400 border-orange-500/30' :
-                              'bg-red-500/15 text-red-400 border-red-500/30'
-                            }`}>
+                            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 border ${scoreBadge(pd.avg_score)}`}>
                               {pd.avg_score}
                             </div>
                           ) : (
@@ -4188,6 +4512,47 @@ export default function App() {
             {/* Results */}
             {result && (
               <div className="space-y-8 animate-slide-up">
+
+                {/* Dashboard Scorecard */}
+                {visibilityScore && visibilityScore.available > 0 && (
+                  <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
+                    <div className="flex items-center gap-6 mb-4">
+                      <div className={`w-20 h-20 rounded-2xl border-2 flex flex-col items-center justify-center ${
+                        visibilityScore.score >= 70 ? 'border-emerald-500/40 bg-emerald-500/10' : visibilityScore.score >= 40 ? 'border-amber-500/40 bg-amber-500/10' : 'border-red-500/40 bg-red-500/10'
+                      }`}>
+                        <span className={`text-3xl font-bold ${scoreTextColor(visibilityScore.score)}`}>{visibilityScore.score}</span>
+                        <span className="text-dark-500 text-[10px]">/100</span>
+                      </div>
+                      <div>
+                        <h3 className="text-white font-semibold text-lg">LLM Visibility Score</h3>
+                        <p className="text-dark-400 text-sm">{scoreLabel(visibilityScore.score)} &middot; Based on {visibilityScore.available} of {visibilityScore.components.length} dimensions</p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                      {visibilityScore.components.map(c => {
+                        const tabMap: Record<string, string> = { 'Optimization': 'optimize', 'Video Authority': 'video', 'Reddit Authority': 'reddit', 'Search Visibility': 'search', 'LLM Test': 'test' }
+                        return (
+                          <button
+                            key={c.name}
+                            onClick={() => { if (c.available && tabMap[c.name]) setActiveTab(tabMap[c.name] as typeof activeTab) }}
+                            className={`rounded-xl p-3 text-center transition-all ${
+                              c.available
+                                ? 'bg-dark-800/50 border border-dark-700 hover:border-primary-500/30 cursor-pointer'
+                                : 'bg-dark-900/30 border border-dark-800/50 opacity-50'
+                            }`}
+                          >
+                            <div className={`text-xl font-bold ${c.available ? scoreTextColor(c.score) : 'text-dark-600'}`}>
+                              {c.available ? c.score : '--'}
+                            </div>
+                            <div className="text-dark-400 text-[10px] mt-0.5">{c.name}</div>
+                            <div className="text-dark-600 text-[9px]">{Math.round(c.weight * 100)}% weight</div>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 {/* Result metadata bar */}
                 {resultMeta && (
                   <div className="flex items-center justify-between flex-wrap gap-3">
@@ -4339,19 +4704,28 @@ export default function App() {
                         </div>
                       )}
 
-                      <div className="text-dark-300 text-sm leading-relaxed whitespace-pre-line mb-4">
-                        {activeSummary.result.executive_summary}
+                      <div className="mb-4">
+                        <div className={`text-dark-300 text-sm leading-relaxed whitespace-pre-line ${!expandedSections.has('domain-summary') ? 'line-clamp-3' : ''}`}>
+                          {activeSummary.result.executive_summary}
+                        </div>
+                        {activeSummary.result.executive_summary.split('\n').length > 3 && (
+                          <button
+                            onClick={() => setExpandedSections(prev => {
+                              const next = new Set(prev)
+                              next.has('domain-summary') ? next.delete('domain-summary') : next.add('domain-summary')
+                              return next
+                            })}
+                            className="text-xs text-primary-400 hover:text-primary-300 transition-colors cursor-pointer mt-1"
+                          >
+                            {expandedSections.has('domain-summary') ? 'Show less' : 'Show more'}
+                          </button>
+                        )}
                       </div>
 
                       {/* Score + dimension bars */}
                       {activeSummary.result.average_score > 0 && (
                         <div className="flex items-start gap-4 pt-4 border-t border-dark-800">
-                          <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-lg font-bold border shrink-0 ${
-                            activeSummary.result.average_score >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' :
-                            activeSummary.result.average_score >= 60 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' :
-                            activeSummary.result.average_score >= 40 ? 'bg-orange-500/15 text-orange-400 border-orange-500/30' :
-                            'bg-red-500/15 text-red-400 border-red-500/30'
-                          }`}>
+                          <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-lg font-bold border shrink-0 ${scoreBadge(activeSummary.result.average_score)}`}>
                             {activeSummary.result.average_score}
                           </div>
                           <div className="flex-1">
@@ -4455,15 +4829,28 @@ export default function App() {
                   </div>
 
                   {!readOnly && (
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={optimizeAutoArchive}
-                        onChange={e => setOptimizeAutoArchive(e.target.checked)}
-                        className="w-3.5 h-3.5 rounded border-dark-600 bg-dark-800 text-primary-500 focus:ring-primary-500/30 cursor-pointer"
-                      />
-                      <span className="text-dark-400 text-xs">Automatically archive incomplete optimization recommendations when re-running a question</span>
-                    </label>
+                    <div className="flex items-center justify-between gap-3">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={optimizeAutoArchive}
+                          onChange={e => setOptimizeAutoArchive(e.target.checked)}
+                          className="w-3.5 h-3.5 rounded border-dark-600 bg-dark-800 text-primary-500 focus:ring-primary-500/30 cursor-pointer"
+                        />
+                        <span className="text-dark-400 text-xs">Automatically archive incomplete optimization recommendations when re-running a question</span>
+                      </label>
+                      {resultMeta?.id && result.questions.some((q) => !optList.some(o => domainKey(o.domain) === domainKey(selectedDomain) && o.question === q.question)) && (
+                        <button
+                          onClick={batchOptimize}
+                          disabled={batchOptimizing || optimizing}
+                          className="text-xs px-3 py-1.5 rounded-lg transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0 bg-accent-purple/10 border border-accent-purple/20 text-purple-300 hover:bg-accent-purple/20 hover:text-purple-200"
+                        >
+                          {batchOptimizing
+                            ? `Optimizing ${batchOptProgress.current}/${batchOptProgress.total}...`
+                            : 'Optimize All'}
+                        </button>
+                      )}
+                    </div>
                   )}
 
                   <div className="grid gap-3">
@@ -4478,12 +4865,7 @@ export default function App() {
                           </p>
                           <div className="flex items-center gap-2 shrink-0">
                             {optScores[i] !== undefined && (
-                              <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${
-                                optScores[i] >= 80 ? 'bg-emerald-500/20 text-emerald-400' :
-                                optScores[i] >= 60 ? 'bg-amber-500/20 text-amber-400' :
-                                optScores[i] >= 40 ? 'bg-orange-500/20 text-orange-400' :
-                                'bg-red-500/20 text-red-400'
-                              }`}>
+                              <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${scoreBadge(optScores[i])}`}>
                                 {optScores[i]}
                               </span>
                             )}
@@ -4584,6 +4966,17 @@ export default function App() {
         {activeTab === 'optimize' && (
           <div className="max-w-2xl mx-auto animate-fade-in space-y-6">
 
+            {/* Cross-report insights */}
+            {crossInsights.filter(i => i.tab === 'optimize' && !dismissedInsights.has(i.message)).map(insight => (
+              <div key={insight.message} className="flex items-center justify-between bg-primary-500/5 border border-primary-500/20 rounded-xl px-4 py-3">
+                <span className="text-dark-300 text-xs flex-1 mr-3">{insight.message}</span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={() => setActiveTab(insight.targetTab as typeof activeTab)} className="text-xs px-3 py-1 bg-primary-500/10 border border-primary-500/20 text-primary-400 rounded-lg hover:bg-primary-500/20 transition-all cursor-pointer">{insight.cta}</button>
+                  <button onClick={() => setDismissedInsights(prev => new Set([...prev, insight.message]))} className="text-dark-600 hover:text-dark-400 cursor-pointer"><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg></button>
+                </div>
+              </div>
+            ))}
+
             {/* === Running view: SSE progress === */}
             {optimizeView === 'running' && (
               <>
@@ -4645,19 +5038,17 @@ export default function App() {
                   const filtered = optList.filter(o => domainKey(o.domain) === domainKey(selectedDomain))
                   const avgScore = filtered.length > 0 ? Math.round(filtered.reduce((s, o) => s + o.overall_score, 0) / filtered.length) : 0
                   return filtered.length === 0 ? (
-                    <div className="text-center text-dark-500 py-16">
-                      No optimization reports for this domain yet.
+                    <div className="text-center py-16 max-w-md mx-auto">
+                      <svg className="w-12 h-12 mx-auto text-dark-600 mb-4" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5M9 11.25v1.5M12 9v3.75m3-6v6" /></svg>
+                      <h3 className="text-white font-semibold text-lg mb-2">No Optimization Reports Yet</h3>
+                      <p className="text-dark-400 text-sm mb-4">Optimization reports analyze how well your content performs across key LLM visibility dimensions and provide actionable recommendations.</p>
+                      <button onClick={() => setActiveTab('analyze')} className="text-sm px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-500 transition-colors cursor-pointer">Go to Analyze Tab</button>
                     </div>
                   ) : (
                     <div className="space-y-4">
                       {/* Domain header */}
                       <div className="flex items-center gap-3">
-                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-sm font-bold shrink-0 border ${
-                          avgScore >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' :
-                          avgScore >= 60 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' :
-                          avgScore >= 40 ? 'bg-orange-500/15 text-orange-400 border-orange-500/30' :
-                          'bg-red-500/15 text-red-400 border-red-500/30'
-                        }`}>
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-sm font-bold shrink-0 border ${scoreBadge(avgScore)}`}>
                           {avgScore}
                         </div>
                         <div>
@@ -4674,12 +5065,7 @@ export default function App() {
                             className="w-full text-left bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-xl p-4 hover:border-primary-500/40 transition-all cursor-pointer group"
                           >
                             <div className="flex items-start gap-3">
-                              <div className={`w-9 h-9 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 ${
-                                item.overall_score >= 80 ? 'bg-emerald-500/15 text-emerald-400' :
-                                item.overall_score >= 60 ? 'bg-amber-500/15 text-amber-400' :
-                                item.overall_score >= 40 ? 'bg-orange-500/15 text-orange-400' :
-                                'bg-red-500/15 text-red-400'
-                              }`}>
+                              <div className={`w-9 h-9 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 ${scoreBadge(item.overall_score)}`}>
                                 {item.overall_score}
                               </div>
                               <div className="flex-1 min-w-0">
@@ -4854,20 +5240,12 @@ export default function App() {
 
                 {/* Overall Score */}
                 <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6 flex items-center gap-6">
-                  <div className={`w-20 h-20 rounded-2xl flex items-center justify-center text-2xl font-bold shrink-0 ${
-                    optimization.overall_score >= 80 ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' :
-                    optimization.overall_score >= 60 ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' :
-                    optimization.overall_score >= 40 ? 'bg-orange-500/15 text-orange-400 border border-orange-500/30' :
-                    'bg-red-500/15 text-red-400 border border-red-500/30'
-                  }`}>
+                  <div className={`w-20 h-20 rounded-2xl flex items-center justify-center text-2xl font-bold shrink-0 border ${scoreBadge(optimization.overall_score)}`}>
                     {optimization.overall_score}
                   </div>
                   <div>
                     <h3 className="text-white font-semibold text-lg mb-1">
-                      {optimization.overall_score >= 80 ? 'Strong Position' :
-                       optimization.overall_score >= 60 ? 'Moderate — Room for Improvement' :
-                       optimization.overall_score >= 40 ? 'Weak — Significant Improvements Needed' :
-                       'Poor — Major Gaps to Address'}
+                      {scoreLabel(optimization.overall_score)}
                     </h3>
                     <p className="text-dark-400 text-sm">
                       Overall LLM Visibility Score based on content authority, structure, source authority, and knowledge persistence.
@@ -4891,21 +5269,11 @@ export default function App() {
                             <h4 className="text-white font-medium text-sm">{dim.name}</h4>
                             <span className="text-dark-500 text-xs">{dim.weight} weight</span>
                           </div>
-                          <span className={`text-lg font-bold ${
-                            d.score >= 80 ? 'text-emerald-400' :
-                            d.score >= 60 ? 'text-amber-400' :
-                            d.score >= 40 ? 'text-orange-400' :
-                            'text-red-400'
-                          }`}>{d.score}</span>
+                          <span className={`text-lg font-bold ${scoreTextColor(d.score)}`}>{d.score}</span>
                         </div>
                         <div className="h-1.5 bg-dark-800 rounded-full mb-4 overflow-hidden">
                           <div
-                            className={`h-full rounded-full transition-all ${
-                              d.score >= 80 ? 'bg-emerald-500' :
-                              d.score >= 60 ? 'bg-amber-500' :
-                              d.score >= 40 ? 'bg-orange-500' :
-                              'bg-red-500'
-                            }`}
+                            className={`h-full rounded-full transition-all ${scoreBgSolid(d.score)}`}
                             style={{ width: `${d.score}%` }}
                           />
                         </div>
@@ -4949,12 +5317,7 @@ export default function App() {
                     <div className="grid gap-3">
                       {optimization.competitors.map((comp, i) => (
                         <div key={i} className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-4 flex items-center gap-4">
-                          <span className={`text-lg font-bold shrink-0 w-10 text-center ${
-                            comp.score_estimate >= 80 ? 'text-emerald-400' :
-                            comp.score_estimate >= 60 ? 'text-amber-400' :
-                            comp.score_estimate >= 40 ? 'text-orange-400' :
-                            'text-red-400'
-                          }`}>{comp.score_estimate}</span>
+                          <span className={`text-lg font-bold shrink-0 w-10 text-center ${scoreTextColor(comp.score_estimate)}`}>{comp.score_estimate}</span>
                           <div className="min-w-0">
                             <p className="text-white font-medium text-sm truncate">{comp.domain}</p>
                             <p className="text-dark-400 text-xs leading-relaxed">{comp.strengths}</p>
@@ -5056,7 +5419,7 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <span className="text-dark-500 text-xs">Sort by</span>
                 <div className="inline-flex bg-dark-900/50 border border-dark-800 rounded-md p-0.5">
-                  {(['priority', 'question'] as const).map(mode => (
+                  {(['priority', 'question', 'dimension'] as const).map(mode => (
                     <button
                       key={mode}
                       onClick={() => setTodoSortMode(mode)}
@@ -5186,9 +5549,22 @@ export default function App() {
               if (filtered.length === 0) {
                 // Don't show empty state for todo/completed if brand intel items filled the gap
                 if (todoSubTab === 'backlogged') {
-                  return <div className="text-center text-dark-500 py-16">No backlogged items.</div>
+                  return (
+                    <div className="text-center py-16 max-w-md mx-auto">
+                      <svg className="w-12 h-12 mx-auto text-dark-600 mb-4" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m6 4.125l2.25 2.25m0 0l2.25 2.25M12 13.875l2.25-2.25M12 13.875l-2.25 2.25M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
+                      <h3 className="text-white font-semibold text-lg mb-2">No Backlogged Items</h3>
+                      <p className="text-dark-400 text-sm">Items that are deferred or archived will appear here.</p>
+                    </div>
+                  )
                 }
                 // For todo/completed, only show empty state if there are also no brand intel virtual items
+                if (todoSubTab === 'completed') {
+                  return (
+                    <div className="text-center py-12 text-dark-500">
+                      <p className="text-sm">No completed items yet. Complete a to-do to see it here.</p>
+                    </div>
+                  )
+                }
                 return null
               }
 
@@ -5259,37 +5635,24 @@ export default function App() {
                                   </p>
                                 </button>
                                 <div className="flex items-center gap-1.5 shrink-0">
-                                  {todo.source_type === 'video' ? (
-                                    <span className="text-[9px] px-1 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 font-medium">YouTube</span>
-                                  ) : todo.source_type === 'reddit' ? (
-                                    <span className="text-[9px] px-1 py-0.5 rounded bg-orange-500/20 text-orange-300 border border-orange-500/30 font-medium">Reddit</span>
-                                  ) : (
-                                    <span className="text-[9px] px-1 py-0.5 rounded bg-primary-500/20 text-primary-300 border border-primary-500/30 font-medium">Site</span>
-                                  )}
+                                  <button
+                                    onClick={() => {
+                                      if (todo.source_type === 'video') { loadVideoAnalysis(todo.domain); setActiveTab('video') }
+                                      else if (todo.source_type === 'reddit') { loadRedditAnalysis(todo.domain); setActiveTab('reddit') }
+                                      else if (todo.source_type === 'search') { setActiveTab('search') }
+                                      else if (todo.optimization_id) { loadOptimizationDetail(todo.optimization_id); setActiveTab('optimize') }
+                                    }}
+                                    className={`text-[9px] px-1.5 py-0.5 rounded font-medium cursor-pointer transition-colors ${
+                                      todo.source_type === 'video' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30 hover:bg-purple-500/30'
+                                      : todo.source_type === 'reddit' ? 'bg-orange-500/20 text-orange-300 border border-orange-500/30 hover:bg-orange-500/30'
+                                      : todo.source_type === 'search' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/30'
+                                      : 'bg-primary-500/20 text-primary-300 border border-primary-500/30 hover:bg-primary-500/30'
+                                    }`}
+                                  >
+                                    {todo.source_type === 'video' ? 'YouTube' : todo.source_type === 'reddit' ? 'Reddit' : todo.source_type === 'search' ? 'Search' : 'Optimize'}
+                                  </button>
                                   <span className="text-dark-500 text-xs capitalize hidden sm:inline">{todo.dimension.replace(/_/g, ' ')}</span>
                                   <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    {(todo.optimization_id || todo.video_analysis_id) && (
-                                      <button
-                                        onClick={() => {
-                                          if (todo.source_type === 'video') {
-                                            loadVideoAnalysis(todo.domain)
-                                            setActiveTab('video')
-                                          } else if (todo.source_type === 'reddit') {
-                                            loadRedditAnalysis(todo.domain)
-                                            setActiveTab('reddit')
-                                          } else {
-                                            loadOptimizationDetail(todo.optimization_id)
-                                            setActiveTab('optimize')
-                                          }
-                                        }}
-                                        title="View report"
-                                        className="p-1 text-dark-500 hover:text-primary-400 transition-colors cursor-pointer"
-                                      >
-                                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                          <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
-                                        </svg>
-                                      </button>
-                                    )}
                                     {!readOnly && todo.status !== 'backlogged' && todo.status !== 'archived' && (
                                       <button onClick={() => updateTodoStatus(todo.id, 'backlogged')} title="Backlog" className="p-1 text-dark-500 hover:text-amber-400 transition-colors cursor-pointer">
                                         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
@@ -5327,6 +5690,136 @@ export default function App() {
                             </div>
                           )})}
 
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )
+              }
+
+              /* ---- Sort by Dimension: grouped by dimension ---- */
+              if (todoSortMode === 'dimension') {
+                const byDim: Record<string, TodoItem[]> = {}
+                for (const t of filtered) {
+                  const d = t.dimension || 'other'
+                  if (!byDim[d]) byDim[d] = []
+                  byDim[d].push(t)
+                }
+                // Sort within each group by priority
+                for (const items of Object.values(byDim)) {
+                  items.sort((a, b) => (priorityOrder[a.priority] ?? 3) - (priorityOrder[b.priority] ?? 3))
+                }
+                const dimLabels: Record<string, string> = {
+                  content_authority: 'Content Authority',
+                  source_authority: 'Source Authority',
+                  structural_optimization: 'Structural Optimization',
+                  knowledge_persistence: 'Knowledge Persistence',
+                  other: 'Other',
+                }
+                const dimColors: Record<string, string> = {
+                  content_authority: 'text-primary-400',
+                  source_authority: 'text-accent-purple',
+                  structural_optimization: 'text-accent-cyan',
+                  knowledge_persistence: 'text-accent-emerald',
+                  other: 'text-dark-400',
+                }
+                const dimOrder = ['content_authority', 'source_authority', 'structural_optimization', 'knowledge_persistence', 'other']
+                return (
+                  <div className="space-y-6">
+                    {dimOrder.filter(d => byDim[d]?.length).map(d => (
+                      <div key={d}>
+                        <p className={`text-xs font-semibold uppercase tracking-widest mb-3 ${dimColors[d] || 'text-dark-400'}`}>
+                          {dimLabels[d] || d.replace(/_/g, ' ')} ({byDim[d].length})
+                        </p>
+                        <div className="space-y-1.5">
+                          {byDim[d].map(todo => {
+                            const isExpanded = expandedTodos.has(todo.id)
+                            return (
+                            <div
+                              key={todo.id}
+                              className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-xl overflow-hidden group hover:border-dark-700 transition-colors"
+                            >
+                              <div className="flex items-center gap-3 px-4 py-2.5">
+                                {!readOnly && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); updateTodoStatus(todo.id, todo.status === 'completed' ? 'todo' : 'completed') }}
+                                    className={`w-4.5 h-4.5 rounded border-2 shrink-0 flex items-center justify-center transition-all cursor-pointer ${
+                                      todo.status === 'completed'
+                                        ? 'bg-emerald-500/20 border-emerald-500/50'
+                                        : 'border-dark-600 hover:border-primary-500'
+                                    }`}
+                                  >
+                                    {todo.status === 'completed' && (
+                                      <svg className="w-2.5 h-2.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                                      </svg>
+                                    )}
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => setExpandedTodos(prev => { const next = new Set(prev); next.has(todo.id) ? next.delete(todo.id) : next.add(todo.id); return next })}
+                                  className="flex-1 min-w-0 text-left cursor-pointer"
+                                >
+                                  <p className={`text-sm leading-snug truncate ${
+                                    todo.status === 'completed' ? 'text-dark-500 line-through' : 'text-white'
+                                  }`}>
+                                    {todo.summary || todo.action}
+                                  </p>
+                                </button>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    onClick={() => {
+                                      if (todo.source_type === 'video') { loadVideoAnalysis(todo.domain); setActiveTab('video') }
+                                      else if (todo.source_type === 'reddit') { loadRedditAnalysis(todo.domain); setActiveTab('reddit') }
+                                      else if (todo.source_type === 'search') { setActiveTab('search') }
+                                      else if (todo.optimization_id) { loadOptimizationDetail(todo.optimization_id); setActiveTab('optimize') }
+                                    }}
+                                    className={`text-[9px] px-1.5 py-0.5 rounded font-medium cursor-pointer transition-colors ${
+                                      todo.source_type === 'video' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30 hover:bg-purple-500/30'
+                                      : todo.source_type === 'reddit' ? 'bg-orange-500/20 text-orange-300 border border-orange-500/30 hover:bg-orange-500/30'
+                                      : todo.source_type === 'search' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/30'
+                                      : 'bg-primary-500/20 text-primary-300 border border-primary-500/30 hover:bg-primary-500/30'
+                                    }`}
+                                  >
+                                    {todo.source_type === 'video' ? 'YouTube' : todo.source_type === 'reddit' ? 'Reddit' : todo.source_type === 'search' ? 'Search' : 'Optimize'}
+                                  </button>
+                                  <span className={`text-[9px] px-1 py-0.5 rounded font-semibold uppercase tracking-wider ${
+                                    todo.priority === 'high' ? 'bg-red-500/20 text-red-400 border border-red-500/30' :
+                                    todo.priority === 'medium' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
+                                    'bg-dark-700/50 text-dark-400 border border-dark-600'
+                                  }`}>{todo.priority}</span>
+                                  <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    {!readOnly && todo.status !== 'backlogged' && todo.status !== 'archived' && (
+                                      <button onClick={() => updateTodoStatus(todo.id, 'backlogged')} title="Backlog" className="p-1 text-dark-500 hover:text-amber-400 transition-colors cursor-pointer">
+                                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                      </button>
+                                    )}
+                                    {!readOnly && todo.status !== 'archived' && (
+                                      <button onClick={() => updateTodoStatus(todo.id, 'archived')} title="Archive" className="p-1 text-dark-500 hover:text-dark-300 transition-colors cursor-pointer">
+                                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
+                                      </button>
+                                    )}
+                                    {!readOnly && (todo.status === 'backlogged' || todo.status === 'archived') && (
+                                      <button onClick={() => updateTodoStatus(todo.id, 'todo')} title="Move to To-Do" className="p-1 text-dark-500 hover:text-primary-400 transition-colors cursor-pointer">
+                                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg>
+                                      </button>
+                                    )}
+                                  </div>
+                                  <svg className={`w-3.5 h-3.5 text-dark-600 transition-transform cursor-pointer ${isExpanded ? 'rotate-180' : ''}`} onClick={() => setExpandedTodos(prev => { const next = new Set(prev); next.has(todo.id) ? next.delete(todo.id) : next.add(todo.id); return next })} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+                                </div>
+                              </div>
+                              {isExpanded && (
+                                <div className="px-4 pb-3 pt-0 border-t border-dark-800/50 space-y-2">
+                                  <p className="text-dark-300 text-xs leading-relaxed mt-2">{todo.action}</p>
+                                  <p className="text-dark-400 text-xs">{todo.expected_impact}</p>
+                                  <div className="flex items-center gap-2 flex-wrap text-[10px]">
+                                    <span className="text-dark-500 truncate max-w-xs" title={todo.question}>{todo.question}</span>
+                                    {todo.created_at && (<><span className="text-dark-600">·</span><span className="text-dark-500">Created {fmtDate(todo.created_at)}</span></>)}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )})}
                         </div>
                       </div>
                     ))}
@@ -5408,6 +5901,22 @@ export default function App() {
                                   </p>
                                 </button>
                                 <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    onClick={() => {
+                                      if (todo.source_type === 'video') { loadVideoAnalysis(todo.domain); setActiveTab('video') }
+                                      else if (todo.source_type === 'reddit') { loadRedditAnalysis(todo.domain); setActiveTab('reddit') }
+                                      else if (todo.source_type === 'search') { setActiveTab('search') }
+                                      else if (todo.optimization_id) { loadOptimizationDetail(todo.optimization_id); setActiveTab('optimize') }
+                                    }}
+                                    className={`text-[9px] px-1.5 py-0.5 rounded font-medium cursor-pointer transition-colors ${
+                                      todo.source_type === 'video' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30 hover:bg-purple-500/30'
+                                      : todo.source_type === 'reddit' ? 'bg-orange-500/20 text-orange-300 border border-orange-500/30 hover:bg-orange-500/30'
+                                      : todo.source_type === 'search' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/30'
+                                      : 'bg-primary-500/20 text-primary-300 border border-primary-500/30 hover:bg-primary-500/30'
+                                    }`}
+                                  >
+                                    {todo.source_type === 'video' ? 'YouTube' : todo.source_type === 'reddit' ? 'Reddit' : todo.source_type === 'search' ? 'Search' : 'Optimize'}
+                                  </button>
                                   <span className={`text-[9px] px-1 py-0.5 rounded font-semibold uppercase tracking-wider ${
                                     todo.priority === 'high' ? 'bg-red-500/20 text-red-400 border border-red-500/30' :
                                     todo.priority === 'medium' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
@@ -5758,6 +6267,25 @@ export default function App() {
                         </div>
                         <span className="text-dark-500">{brandCompleteness}%</span>
                       </div>
+                      {brandCompleteness < 50 && (
+                        <button
+                          onClick={quickSetupBrand}
+                          disabled={quickSetupRunning}
+                          className="text-xs px-3 py-1.5 bg-accent-purple/10 border border-accent-purple/20 text-purple-300 rounded-lg hover:bg-accent-purple/20 hover:text-purple-200 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                        >
+                          {quickSetupRunning ? (
+                            <>
+                              <div className="w-3 h-3 border-2 border-purple-400/30 border-t-purple-400 rounded-full animate-spin" />
+                              <span className="max-w-[160px] truncate">{quickSetupStep}</span>
+                            </>
+                          ) : (
+                            <>
+                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" /></svg>
+                              Quick Setup
+                            </>
+                          )}
+                        </button>
+                      )}
                       {saasEnabled && user && (user.role === 'owner' || user.role === 'admin') && selectedDomain && (
                         <button
                           onClick={() => { setDomainShareState(null); setShareModalDomain(selectedDomain); fetchDomainShare(selectedDomain) }}
@@ -6616,10 +7144,23 @@ export default function App() {
         {activeTab === 'video' && (
           <div className="max-w-4xl mx-auto animate-fade-in">
 
+            {/* Cross-report insights */}
+            {crossInsights.filter(i => i.tab === 'video' && !dismissedInsights.has(i.message)).map(insight => (
+              <div key={insight.message} className="flex items-center justify-between bg-primary-500/5 border border-primary-500/20 rounded-xl px-4 py-3 mb-4">
+                <span className="text-dark-300 text-xs flex-1 mr-3">{insight.message}</span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={() => setActiveTab(insight.targetTab as typeof activeTab)} className="text-xs px-3 py-1 bg-primary-500/10 border border-primary-500/20 text-primary-400 rounded-lg hover:bg-primary-500/20 transition-all cursor-pointer">{insight.cta}</button>
+                  <button onClick={() => setDismissedInsights(prev => new Set([...prev, insight.message]))} className="text-dark-600 hover:text-dark-400 cursor-pointer"><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg></button>
+                </div>
+              </div>
+            ))}
+
             {/* Input View */}
             {videoView === 'input' && readOnly && (
-              <div className="text-center text-dark-500 py-16">
-                No video analysis available for this domain yet.
+              <div className="text-center py-16 max-w-md mx-auto">
+                <svg className="w-12 h-12 mx-auto text-dark-600 mb-4" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" /></svg>
+                <h3 className="text-white font-semibold text-lg mb-2">No Video Analysis Yet</h3>
+                <p className="text-dark-400 text-sm">YouTube Authority analysis evaluates how your video content contributes to LLM training data and brand visibility.</p>
               </div>
             )}
             {videoView === 'input' && !readOnly && (
@@ -6812,12 +7353,7 @@ export default function App() {
                             </span>
                           </div>
                           {a.overall_score != null && (
-                            <span className={`text-sm font-bold ${
-                              a.overall_score >= 80 ? 'text-emerald-400' :
-                              a.overall_score >= 60 ? 'text-amber-400' :
-                              a.overall_score >= 40 ? 'text-orange-400' :
-                              'text-red-400'
-                            }`}>
+                            <span className={`text-sm font-bold ${scoreTextColor(a.overall_score)}`}>
                               {a.overall_score}
                             </span>
                           )}
@@ -7277,18 +7813,11 @@ export default function App() {
                       {/* Header + Score */}
                       <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-5">
                         <div className="flex items-center gap-5">
-                          <div className={`w-16 h-16 rounded-xl flex items-center justify-center text-2xl font-bold shrink-0 ${
-                            s >= 80 ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' :
-                            s >= 60 ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' :
-                            s >= 40 ? 'bg-orange-500/15 text-orange-400 border border-orange-500/30' :
-                            'bg-red-500/15 text-red-400 border border-red-500/30'
-                          }`}>{s}</div>
+                          <div className={`w-16 h-16 rounded-xl flex items-center justify-center text-2xl font-bold shrink-0 border ${scoreBadge(s)}`}>{s}</div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-3 mb-0.5">
                               <h2 className="text-lg font-bold text-white truncate">{videoAnalysis.domain}</h2>
-                              <span className={`text-xs font-medium whitespace-nowrap ${
-                                s >= 80 ? 'text-emerald-400' : s >= 60 ? 'text-amber-400' : s >= 40 ? 'text-orange-400' : 'text-red-400'
-                              }`}>{label}</span>
+                              <span className={`text-xs font-medium whitespace-nowrap ${scoreTextColor(s)}`}>{label}</span>
                             </div>
                             <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-dark-500">
                               <span>{videoAnalysis.videos.length} videos</span>
@@ -7322,14 +7851,10 @@ export default function App() {
                                 <h4 className="text-white font-medium text-sm">{dim.name}</h4>
                                 <span className="text-dark-500 text-xs">{dim.weight} weight</span>
                               </div>
-                              <span className={`text-lg font-bold ${
-                                dim.score >= 80 ? 'text-emerald-400' : dim.score >= 60 ? 'text-amber-400' : dim.score >= 40 ? 'text-orange-400' : 'text-red-400'
-                              }`}>{dim.score}</span>
+                              <span className={`text-lg font-bold ${scoreTextColor(dim.score)}`}>{dim.score}</span>
                             </div>
                             <div className="h-1.5 bg-dark-800 rounded-full mb-3 overflow-hidden">
-                              <div className={`h-full rounded-full transition-all duration-700 ${
-                                dim.score >= 80 ? 'bg-emerald-500' : dim.score >= 60 ? 'bg-amber-500' : dim.score >= 40 ? 'bg-orange-500' : 'bg-red-500'
-                              }`} style={{ width: `${dim.score}%` }} />
+                              <div className={`h-full rounded-full transition-all duration-700 ${scoreBgSolid(dim.score)}`} style={{ width: `${dim.score}%` }} />
                             </div>
                             <p className="text-dark-500 text-xs leading-relaxed">{dim.desc}</p>
                           </div>
@@ -7339,8 +7864,12 @@ export default function App() {
                       {/* Summary */}
                       {r.executive_summary && (
                         <div className="bg-primary-500/5 border border-primary-500/20 rounded-2xl p-6">
-                          <h3 className="text-primary-300 font-semibold mb-3">Summary</h3>
-                          <p className="text-dark-300 text-sm leading-relaxed whitespace-pre-wrap">{r.executive_summary}</p>
+                          <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-primary-300 font-semibold">Summary</h3>
+                            <button onClick={() => setExpandedSections(prev => { const n = new Set(prev); n.has('video-summary') ? n.delete('video-summary') : n.add('video-summary'); return n })}
+                              className="text-xs text-primary-400 hover:text-primary-300 cursor-pointer">{expandedSections.has('video-summary') ? 'Collapse' : 'Expand'}</button>
+                          </div>
+                          <p className={`text-dark-300 text-sm leading-relaxed whitespace-pre-wrap ${!expandedSections.has('video-summary') ? 'line-clamp-3' : ''}`}>{r.executive_summary}</p>
                         </div>
                       )}
 
@@ -7411,7 +7940,7 @@ export default function App() {
                               <div key={i} className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-4 flex items-center gap-4">
                                 {c.authority_score > 0 && (
                                   <span className={`text-lg font-bold shrink-0 w-10 text-center ${
-                                    c.authority_score >= 80 ? 'text-emerald-400' : c.authority_score >= 60 ? 'text-amber-400' : c.authority_score >= 40 ? 'text-orange-400' : 'text-red-400'
+                                    scoreTextColor(c.authority_score)
                                   }`}>{c.authority_score}</span>
                                 )}
                                 <div className="min-w-0 flex-1">
@@ -7471,7 +8000,7 @@ export default function App() {
                             {r.topical_dominance.content_gaps.map((gap, i) => (
                               <div key={i} className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-4 flex items-center gap-4">
                                 <span className={`text-lg font-bold shrink-0 w-10 text-center ${
-                                  gap.opportunity_score >= 80 ? 'text-emerald-400' : gap.opportunity_score >= 60 ? 'text-amber-400' : gap.opportunity_score >= 40 ? 'text-orange-400' : 'text-red-400'
+                                  scoreTextColor(gap.opportunity_score)
                                 }`}>{gap.opportunity_score}</span>
                                 <div className="min-w-0">
                                   <p className="text-white font-medium text-sm">{gap.query}</p>
@@ -7527,7 +8056,7 @@ export default function App() {
                                 >
                                   <div className="flex items-center gap-3 min-w-0">
                                     <span className={`text-lg font-bold ${
-                                      card.overall_score >= 80 ? 'text-emerald-400' : card.overall_score >= 60 ? 'text-amber-400' : card.overall_score >= 40 ? 'text-orange-400' : 'text-red-400'
+                                      scoreTextColor(card.overall_score)
                                     }`}>{card.overall_score}</span>
                                     <div className="min-w-0">
                                       <span className="text-white text-sm font-medium truncate block">{card.title}</span>
@@ -7547,14 +8076,10 @@ export default function App() {
                                         <div key={d.label}>
                                           <div className="flex justify-between text-xs mb-1">
                                             <span className="text-dark-400">{d.label}</span>
-                                            <span className={`font-medium ${
-                                              d.score >= 80 ? 'text-emerald-400' : d.score >= 60 ? 'text-amber-400' : d.score >= 40 ? 'text-orange-400' : 'text-red-400'
-                                            }`}>{d.score}</span>
+                                            <span className={`font-medium ${scoreTextColor(d.score)}`}>{d.score}</span>
                                           </div>
                                           <div className="h-1.5 bg-dark-800 rounded-full overflow-hidden">
-                                            <div className={`h-full rounded-full transition-all duration-700 ${
-                                              d.score >= 80 ? 'bg-emerald-500' : d.score >= 60 ? 'bg-amber-500' : d.score >= 40 ? 'bg-orange-500' : 'bg-red-500'
-                                            }`} style={{ width: `${d.score}%` }} />
+                                            <div className={`h-full rounded-full transition-all duration-700 ${scoreBgSolid(d.score)}`} style={{ width: `${d.score}%` }} />
                                           </div>
                                         </div>
                                       ))}
@@ -7728,10 +8253,23 @@ export default function App() {
         {activeTab === 'reddit' && (
           <div className="max-w-4xl mx-auto animate-fade-in">
 
+            {/* Cross-report insights */}
+            {crossInsights.filter(i => i.tab === 'reddit' && !dismissedInsights.has(i.message)).map(insight => (
+              <div key={insight.message} className="flex items-center justify-between bg-primary-500/5 border border-primary-500/20 rounded-xl px-4 py-3 mb-4">
+                <span className="text-dark-300 text-xs flex-1 mr-3">{insight.message}</span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={() => setActiveTab(insight.targetTab as typeof activeTab)} className="text-xs px-3 py-1 bg-primary-500/10 border border-primary-500/20 text-primary-400 rounded-lg hover:bg-primary-500/20 transition-all cursor-pointer">{insight.cta}</button>
+                  <button onClick={() => setDismissedInsights(prev => new Set([...prev, insight.message]))} className="text-dark-600 hover:text-dark-400 cursor-pointer"><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg></button>
+                </div>
+              </div>
+            ))}
+
             {/* Input View */}
             {redditView === 'input' && readOnly && (
-              <div className="text-center py-12">
-                <p className="text-dark-400">No Reddit analysis available for this domain.</p>
+              <div className="text-center py-16 max-w-md mx-auto">
+                <svg className="w-12 h-12 mx-auto text-dark-600 mb-4" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" /></svg>
+                <h3 className="text-white font-semibold text-lg mb-2">No Reddit Analysis Yet</h3>
+                <p className="text-dark-400 text-sm">Reddit Authority analysis evaluates your brand's presence, sentiment, and training signal strength across Reddit communities.</p>
               </div>
             )}
 
@@ -7886,7 +8424,7 @@ export default function App() {
                           <div className="flex items-center justify-between">
                             <span className="text-white text-sm font-medium">{a.domain}</span>
                             {a.overall_score != null && (
-                              <span className={`text-sm font-bold ${a.overall_score >= 80 ? 'text-emerald-400' : a.overall_score >= 60 ? 'text-amber-400' : a.overall_score >= 40 ? 'text-orange-400' : 'text-red-400'}`}>
+                              <span className={`text-sm font-bold ${scoreTextColor(a.overall_score)}`}>
                                 {a.overall_score}
                               </span>
                             )}
@@ -8022,7 +8560,6 @@ export default function App() {
             {/* Results View */}
             {redditView === 'results' && redditAnalysis?.result && (() => {
               const r = redditAnalysis.result
-              const scoreColor = (s: number) => s >= 80 ? 'text-emerald-400' : s >= 60 ? 'text-amber-400' : s >= 40 ? 'text-orange-400' : 'text-red-400'
               const barColor = (s: number) => s >= 80 ? 'bg-emerald-400' : s >= 60 ? 'bg-amber-400' : s >= 40 ? 'bg-orange-400' : 'bg-red-400'
 
               return (
@@ -8092,12 +8629,7 @@ export default function App() {
 
                   {/* Overall score */}
                   <div className="flex items-center gap-4">
-                    <div className={`w-16 h-16 rounded-2xl border-2 flex items-center justify-center text-2xl font-bold ${
-                      r.overall_score >= 80 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
-                      : r.overall_score >= 60 ? 'border-amber-500/40 bg-amber-500/10 text-amber-400'
-                      : r.overall_score >= 40 ? 'border-orange-500/40 bg-orange-500/10 text-orange-400'
-                      : 'border-red-500/40 bg-red-500/10 text-red-400'
-                    }`}>
+                    <div className={`w-16 h-16 rounded-2xl border-2 flex items-center justify-center text-2xl font-bold ${scoreBadge(r.overall_score)}`}>
                       {r.overall_score}
                     </div>
                     <div>
@@ -8130,7 +8662,7 @@ export default function App() {
                             <h4 className="text-white font-medium text-sm">{dim.name}</h4>
                             <span className="text-dark-500 text-xs">{dim.weight} weight</span>
                           </div>
-                          <span className={`text-lg font-bold ${scoreColor(dim.score)}`}>{dim.score}</span>
+                          <span className={`text-lg font-bold ${scoreTextColor(dim.score)}`}>{dim.score}</span>
                         </div>
                         <div className="h-1.5 bg-dark-800 rounded-full mb-3 overflow-hidden">
                           <div className={`h-full rounded-full ${barColor(dim.score)}`} style={{ width: `${dim.score}%` }} />
@@ -8143,8 +8675,12 @@ export default function App() {
                   {/* Summary */}
                   {r.executive_summary && (
                     <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
-                      <h3 className="text-white font-semibold text-sm mb-3">Summary</h3>
-                      <div className="text-dark-300 text-sm leading-relaxed whitespace-pre-wrap">{r.executive_summary}</div>
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-white font-semibold text-sm">Summary</h3>
+                        <button onClick={() => setExpandedSections(prev => { const n = new Set(prev); n.has('reddit-summary') ? n.delete('reddit-summary') : n.add('reddit-summary'); return n })}
+                          className="text-xs text-primary-400 hover:text-primary-300 cursor-pointer">{expandedSections.has('reddit-summary') ? 'Collapse' : 'Expand'}</button>
+                      </div>
+                      <div className={`text-dark-300 text-sm leading-relaxed whitespace-pre-wrap ${!expandedSections.has('reddit-summary') ? 'line-clamp-3' : ''}`}>{r.executive_summary}</div>
                     </div>
                   )}
 
@@ -8467,10 +9003,33 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* Stale: new optimization questions since this analysis */}
+                  {searchStaleOptimizations.length > 0 && (
+                    <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+                          <span className="text-amber-400 text-sm font-medium">
+                            {searchStaleOptimizations.length} new optimization {searchStaleOptimizations.length === 1 ? 'question' : 'questions'} since this search analysis
+                          </span>
+                        </div>
+                        {!readOnly && (
+                          <button onClick={searchAnalyze} className="text-xs px-3 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg hover:bg-amber-500/20 transition-all cursor-pointer whitespace-nowrap shrink-0">
+                            Re-run Analysis
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Executive Summary */}
                   <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
-                    <h3 className="text-white font-medium text-sm mb-3">Executive Summary</h3>
-                    <div className="text-dark-300 text-sm leading-relaxed whitespace-pre-line">{r.executive_summary}</div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-white font-medium text-sm">Executive Summary</h3>
+                      <button onClick={() => setExpandedSections(prev => { const n = new Set(prev); n.has('search-summary') ? n.delete('search-summary') : n.add('search-summary'); return n })}
+                        className="text-xs text-primary-400 hover:text-primary-300 cursor-pointer">{expandedSections.has('search-summary') ? 'Collapse' : 'Expand'}</button>
+                    </div>
+                    <div className={`text-dark-300 text-sm leading-relaxed whitespace-pre-line ${!expandedSections.has('search-summary') ? 'line-clamp-3' : ''}`}>{r.executive_summary}</div>
                   </div>
 
                   {/* 4-Pillar Scores */}
@@ -8688,6 +9247,17 @@ export default function App() {
         {activeTab === 'test' && (
           <div className="max-w-5xl mx-auto animate-fade-in">
 
+            {/* Cross-report insights */}
+            {crossInsights.filter(i => i.tab === 'test' && !dismissedInsights.has(i.message)).map(insight => (
+              <div key={insight.message} className="flex items-center justify-between bg-primary-500/5 border border-primary-500/20 rounded-xl px-4 py-3 mb-4">
+                <span className="text-dark-300 text-xs flex-1 mr-3">{insight.message}</span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={() => setActiveTab(insight.targetTab as typeof activeTab)} className="text-xs px-3 py-1 bg-primary-500/10 border border-primary-500/20 text-primary-400 rounded-lg hover:bg-primary-500/20 transition-all cursor-pointer">{insight.cta}</button>
+                  <button onClick={() => setDismissedInsights(prev => new Set([...prev, insight.message]))} className="text-dark-600 hover:text-dark-400 cursor-pointer"><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg></button>
+                </div>
+              </div>
+            ))}
+
             {/* Results view */}
             {testView === 'results' && testResults && (() => {
               const r = testResults
@@ -8719,6 +9289,7 @@ export default function App() {
                       )}
                       {!readOnly && (
                         <>
+                          <button onClick={() => setShowCompetitorModal(true)} className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-amber-400 rounded-lg hover:bg-amber-900/30 hover:border-amber-800 transition-all cursor-pointer">Test Competitor</button>
                           <button onClick={() => setConfirmDeleteTest(true)} className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-red-400 rounded-lg hover:bg-red-900/30 hover:border-red-800 transition-all cursor-pointer">Delete</button>
                           <button onClick={() => { setTestView('input'); setTestResults(null) }} className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-primary-400 rounded-lg hover:bg-dark-700 hover:text-primary-300 transition-all cursor-pointer">Re-run Test</button>
                         </>
@@ -8731,33 +9302,141 @@ export default function App() {
                     <div className={`w-16 h-16 rounded-xl border flex items-center justify-center ${scoreBg(r.overall_score)}`}>
                       <span className={`text-2xl font-bold ${scoreColor(r.overall_score)}`}>{r.overall_score}</span>
                     </div>
-                    <div>
-                      <h2 className="text-xl font-bold text-white">LLM Brand Test — {r.brand_name}</h2>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3">
+                        <h2 className="text-xl font-bold text-white">LLM Brand Test — {r.brand_name}</h2>
+                        {r.run_number > 0 && <span className="text-xs text-dark-500 bg-dark-800 px-2 py-0.5 rounded-full">Run #{r.run_number}</span>}
+                      </div>
                       <p className="text-dark-400 text-sm">{r.provider_summaries.length} provider{r.provider_summaries.length !== 1 ? 's' : ''} tested with {r.queries.length} queries &middot; {fmtDate(r.generated_at)}</p>
                     </div>
+                    {/* Trend sparkline */}
+                    {testHistory.length > 1 && (() => {
+                      const points = [...testHistory].reverse().slice(-8)
+                      const maxScore = Math.max(...points.map(p => p.overall_score), 1)
+                      const prevScore = points.length >= 2 ? points[points.length - 2].overall_score : null
+                      const delta = prevScore !== null ? r.overall_score - prevScore : null
+                      return (
+                        <div className="flex items-center gap-3">
+                          <div className="flex items-end gap-0.5 h-8">
+                            {points.map((p, i) => (
+                              <div
+                                key={p.id || i}
+                                className={`w-2 rounded-t transition-all ${i === points.length - 1 ? 'bg-primary-400' : 'bg-dark-600'}`}
+                                style={{ height: `${Math.max(4, (p.overall_score / maxScore) * 32)}px` }}
+                                title={`Run #${p.run_number}: ${p.overall_score}`}
+                              />
+                            ))}
+                          </div>
+                          {delta !== null && (
+                            <span className={`text-xs font-medium ${delta > 0 ? 'text-emerald-400' : delta < 0 ? 'text-red-400' : 'text-dark-500'}`}>
+                              {delta > 0 ? '+' : ''}{delta}
+                            </span>
+                          )}
+                        </div>
+                      )
+                    })()}
                   </div>
+
+                  {/* Compare with previous run */}
+                  {testHistory.length > 1 && (
+                    <div className="flex items-center gap-3">
+                      {!testCompareRun ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-dark-500 text-xs">Compare with:</span>
+                          <select
+                            onChange={e => {
+                              const run = testHistory.find(h => h.id === e.target.value)
+                              setTestCompareRun(run || null)
+                            }}
+                            value=""
+                            className="text-xs bg-dark-800 border border-dark-700 rounded-md px-2 py-1 text-dark-300 cursor-pointer"
+                          >
+                            <option value="">Select a previous run</option>
+                            {testHistory.filter(h => h.id !== r.id).map(h => (
+                              <option key={h.id} value={h.id}>Run #{h.run_number} — Score {h.overall_score} ({fmtDate(h.generated_at)})</option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-3 bg-dark-800/50 border border-dark-700 rounded-lg px-3 py-2">
+                          <span className="text-dark-400 text-xs">Comparing with Run #{testCompareRun.run_number}</span>
+                          <span className={`text-xs font-medium ${r.overall_score - testCompareRun.overall_score > 0 ? 'text-emerald-400' : r.overall_score - testCompareRun.overall_score < 0 ? 'text-red-400' : 'text-dark-500'}`}>
+                            {r.overall_score - testCompareRun.overall_score > 0 ? '+' : ''}{r.overall_score - testCompareRun.overall_score} overall
+                          </span>
+                          <button onClick={() => setTestCompareRun(null)} className="text-dark-500 hover:text-white text-xs cursor-pointer ml-1">Clear</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Competitor overlay toggle */}
+                  {competitorTests.length > 0 && (
+                    <div className="flex items-center gap-3">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" checked={showCompetitorOverlay} onChange={e => setShowCompetitorOverlay(e.target.checked)}
+                          className="w-3.5 h-3.5 rounded border-dark-600 bg-dark-800 text-amber-500 focus:ring-amber-500/30 cursor-pointer" />
+                        <span className="text-dark-400 text-xs">Show competitor comparison</span>
+                      </label>
+                      <div className="flex gap-1.5">
+                        {competitorTests.map(ct => (
+                          <span key={ct.domain} className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">{ct.brand_name || ct.domain}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Provider summary cards */}
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                    {r.provider_summaries.map(ps => (
-                      <div key={ps.provider_id} className="bg-dark-800/50 border border-dark-700 rounded-xl p-4">
-                        <div className="flex items-center justify-between mb-3">
-                          <div>
-                            <h3 className="text-white font-semibold text-sm">{ps.provider_name}</h3>
-                            <p className="text-dark-500 text-xs">{ps.model}</p>
+                    {r.provider_summaries.map(ps => {
+                      const compScores = showCompetitorOverlay ? competitorTests.map(ct => {
+                        const cps = ct.provider_summaries.find(s => s.provider_id === ps.provider_id)
+                        return cps ? { name: ct.brand_name || ct.domain, score: cps.overall_score, mention: cps.mention_rate } : null
+                      }).filter(Boolean) as { name: string; score: number; mention: number }[] : []
+                      const prevPs = testCompareRun?.provider_summaries.find(s => s.provider_id === ps.provider_id)
+                      return (
+                        <div key={ps.provider_id} className="bg-dark-800/50 border border-dark-700 rounded-xl p-4">
+                          <div className="flex items-center justify-between mb-3">
+                            <div>
+                              <h3 className="text-white font-semibold text-sm">{ps.provider_name}</h3>
+                              <p className="text-dark-500 text-xs">{ps.model}</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {prevPs && (() => {
+                                const d = ps.overall_score - prevPs.overall_score
+                                return d !== 0 ? <span className={`text-xs font-medium ${d > 0 ? 'text-emerald-400' : 'text-red-400'}`}>{d > 0 ? '+' : ''}{d}</span> : null
+                              })()}
+                            </div>
+                            <div className={`w-12 h-12 rounded-lg border flex items-center justify-center ${scoreBg(ps.overall_score)}`}>
+                              <span className={`text-lg font-bold ${scoreColor(ps.overall_score)}`}>{ps.overall_score}</span>
+                            </div>
                           </div>
-                          <div className={`w-12 h-12 rounded-lg border flex items-center justify-center ${scoreBg(ps.overall_score)}`}>
-                            <span className={`text-lg font-bold ${scoreColor(ps.overall_score)}`}>{ps.overall_score}</span>
+                          <div className="space-y-2 text-xs">
+                            <div className="flex justify-between"><span className="text-dark-400">Mention Rate</span><span className="text-white font-medium">{ps.mention_rate}%</span></div>
+                            <div className="flex justify-between"><span className="text-dark-400">Recommend Rate</span><span className="text-white font-medium">{ps.recommend_rate}%</span></div>
+                            <div className="flex justify-between"><span className="text-dark-400">Accuracy</span><span className="text-white font-medium">{ps.accuracy_rate}%</span></div>
+                            <div className="flex justify-between"><span className="text-dark-400">Sentiment</span><span className="text-white font-medium">{ps.sentiment_score}/100</span></div>
                           </div>
+                          {compScores.length > 0 && (
+                            <div className="mt-3 pt-3 border-t border-dark-700 space-y-1.5">
+                              {compScores.map(cs => {
+                                const delta = ps.overall_score - cs.score
+                                return (
+                                  <div key={cs.name} className="flex items-center justify-between text-xs">
+                                    <span className="text-amber-400/70 truncate max-w-[60%]">vs {cs.name}</span>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-dark-400">{cs.score}</span>
+                                      <span className={`font-medium ${delta > 0 ? 'text-emerald-400' : delta < 0 ? 'text-red-400' : 'text-dark-500'}`}>
+                                        {delta > 0 ? '+' : ''}{delta}
+                                      </span>
+                                    </div>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
                         </div>
-                        <div className="space-y-2 text-xs">
-                          <div className="flex justify-between"><span className="text-dark-400">Mention Rate</span><span className="text-white font-medium">{ps.mention_rate}%</span></div>
-                          <div className="flex justify-between"><span className="text-dark-400">Recommend Rate</span><span className="text-white font-medium">{ps.recommend_rate}%</span></div>
-                          <div className="flex justify-between"><span className="text-dark-400">Accuracy</span><span className="text-white font-medium">{ps.accuracy_rate}%</span></div>
-                          <div className="flex justify-between"><span className="text-dark-400">Sentiment</span><span className="text-white font-medium">{ps.sentiment_score}/100</span></div>
-                        </div>
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
 
                   {/* Query results comparison */}
@@ -8856,25 +9535,39 @@ export default function App() {
                   {testAvailableProviders.length === 0 ? (
                     <p className="text-dark-500 text-sm">No API keys configured. <button onClick={() => { window.location.href = '/last/settings' }} className="text-primary-400 hover:text-primary-300 cursor-pointer underline">Set up API keys</button> to get started.</p>
                   ) : (
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {testAvailableProviders.map(p => {
                         const providerNames: Record<string, string> = { anthropic: 'Anthropic', openai: 'OpenAI', grok: 'Grok (xAI)', gemini: 'Gemini' }
                         const checked = testSelectedProviders.includes(p.provider)
+                        const providerModelDefs = testProviderModels.find(pm => pm.id === p.provider)
                         return (
-                          <label key={p.provider} className={`flex items-center gap-2 p-3 rounded-lg border cursor-pointer transition-all ${
+                          <div key={p.provider} className={`p-3 rounded-lg border transition-all ${
                             checked ? 'bg-primary-500/10 border-primary-500/30' : 'bg-dark-900/50 border-dark-700 hover:border-dark-600'
                           }`}>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={e => {
-                                if (e.target.checked) setTestSelectedProviders(prev => [...prev, p.provider])
-                                else setTestSelectedProviders(prev => prev.filter(id => id !== p.provider))
-                              }}
-                              className="accent-primary-500"
-                            />
-                            <span className="text-white text-sm font-medium">{providerNames[p.provider] || p.provider}</span>
-                          </label>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={e => {
+                                  if (e.target.checked) setTestSelectedProviders(prev => [...prev, p.provider])
+                                  else setTestSelectedProviders(prev => prev.filter(id => id !== p.provider))
+                                }}
+                                className="accent-primary-500"
+                              />
+                              <span className="text-white text-sm font-medium">{providerNames[p.provider] || p.provider}</span>
+                            </label>
+                            {checked && providerModelDefs && providerModelDefs.models.length > 1 && (
+                              <select
+                                value={testModelSelections[p.provider] || ''}
+                                onChange={e => setTestModelSelections(prev => ({ ...prev, [p.provider]: e.target.value }))}
+                                className="mt-2 w-full bg-dark-800 border border-dark-600 text-dark-300 text-xs rounded-md px-2 py-1.5 focus:border-primary-500/50 focus:outline-none cursor-pointer"
+                              >
+                                {providerModelDefs.models.map(m => (
+                                  <option key={m.id} value={m.id}>{m.name}</option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
                         )
                       })}
                     </div>
@@ -8974,6 +9667,35 @@ export default function App() {
             <div className="flex justify-end gap-3">
               <button onClick={() => setConfirmDeleteTest(false)} className="px-4 py-2 text-dark-400 hover:text-white text-sm transition-colors cursor-pointer">Cancel</button>
               <button onClick={deleteLLMTest} className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-500 transition-colors cursor-pointer">Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Competitor test modal */}
+      {showCompetitorModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-900 border border-dark-700 rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+            <h3 className="text-white font-semibold text-lg mb-2">Test Competitor</h3>
+            <p className="text-dark-400 text-sm mb-4">Run the same test queries against a competitor to compare LLM visibility.</p>
+            <input
+              type="text"
+              placeholder="competitor.com"
+              value={competitorDomain}
+              onChange={e => setCompetitorDomain(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && competitorDomain.trim()) runCompetitorTest(competitorDomain.trim()) }}
+              className="w-full px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-white text-sm placeholder-dark-500 focus:outline-none focus:border-primary-500 mb-4"
+              autoFocus
+            />
+            <div className="flex justify-end gap-3">
+              <button onClick={() => { setShowCompetitorModal(false); setCompetitorDomain('') }} className="px-4 py-2 text-dark-400 hover:text-white text-sm transition-colors cursor-pointer">Cancel</button>
+              <button
+                onClick={() => { if (competitorDomain.trim()) runCompetitorTest(competitorDomain.trim()) }}
+                disabled={!competitorDomain.trim()}
+                className="px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-500 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Test
+              </button>
             </div>
           </div>
         </div>

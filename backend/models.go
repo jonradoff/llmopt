@@ -800,10 +800,12 @@ type LLMTest struct {
 	TenantID          string               `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
 	Domain            string               `json:"domain" bson:"domain"`
 	BrandName         string               `json:"brand_name" bson:"brandName"`
+	RunNumber         int                  `json:"run_number" bson:"runNumber"`
 	Queries           []LLMTestQuery       `json:"queries" bson:"queries"`
 	Results           []LLMTestQueryResult `json:"results" bson:"results"`
 	ProviderSummaries []LLMTestSummary     `json:"provider_summaries" bson:"providerSummaries"`
 	OverallScore      int                  `json:"overall_score" bson:"overallScore"`
 	BrandContextUsed  bool                 `json:"brand_context_used" bson:"brandContextUsed"`
+	CompetitorOf      string               `json:"competitor_of,omitempty" bson:"competitorOf,omitempty"`
 	GeneratedAt       time.Time            `json:"generated_at" bson:"generatedAt"`
 }
