@@ -365,7 +365,7 @@ func innertubePlayerRequest(videoID string, clientBody []byte, userAgent string,
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 429 {
-		return nil, fmt.Errorf("innertube rate limited (429)")
+		return nil, fmt.Errorf("%w: innertube rate limited (429)", errBlocked)
 	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("innertube HTTP %d", resp.StatusCode)
@@ -465,7 +465,7 @@ func fetchCaptionXML(captionURL, userAgent string, httpClient *http.Client) (str
 	}
 
 	if resp.StatusCode == 429 {
-		return "", fmt.Errorf("timedtext rate limited (429)")
+		return "", fmt.Errorf("%w: timedtext rate limited (429)", errBlocked)
 	}
 	if resp.StatusCode != 200 || len(body) == 0 {
 		return "", fmt.Errorf("timedtext HTTP %d (%d bytes)", resp.StatusCode, len(body))

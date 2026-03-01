@@ -143,6 +143,69 @@ func (m *MongoDB) ensureIndexes() {
 	if err != nil {
 		log.Printf("Warning: failed to create indexes on youtube_cache: %v", err)
 	}
+
+	redditIndexes := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "domain", Value: 1}},
+			Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "generatedAt", Value: -1}}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
+	}
+	_, err = m.RedditAnalyses().Indexes().CreateMany(ctx, redditIndexes)
+	if err != nil {
+		log.Printf("Warning: failed to create indexes on reddit_analyses: %v", err)
+	}
+
+	redditCacheIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "cacheKey", Value: 1}},
+			Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "expiresAt", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(0)},
+	}
+	_, err = m.RedditCache().Indexes().CreateMany(ctx, redditCacheIdx)
+	if err != nil {
+		log.Printf("Warning: failed to create indexes on reddit_cache: %v", err)
+	}
+
+	reportPDFIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "domain", Value: 1}},
+			Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
+	}
+	_, err = m.ReportPDFs().Indexes().CreateMany(ctx, reportPDFIdx)
+	if err != nil {
+		log.Printf("Warning: failed to create indexes on report_pdfs: %v", err)
+	}
+
+	screenshotIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "domain", Value: 1}},
+			Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "capturedAt", Value: -1}}},
+	}
+	_, err = m.BrandScreenshots().Indexes().CreateMany(ctx, screenshotIdx)
+	if err != nil {
+		log.Printf("Warning: failed to create indexes on brand_screenshots: %v", err)
+	}
+
+	searchIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "domain", Value: 1}},
+			Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "generatedAt", Value: -1}}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
+	}
+	_, err = m.SearchAnalyses().Indexes().CreateMany(ctx, searchIdx)
+	if err != nil {
+		log.Printf("Warning: failed to create indexes on search_analyses: %v", err)
+	}
+
+	apiKeyIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "provider", Value: 1}},
+			Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}}},
+	}
+	_, err = m.TenantAPIKeys().Indexes().CreateMany(ctx, apiKeyIdx)
+	if err != nil {
+		log.Printf("Warning: failed to create indexes on tenant_api_keys: %v", err)
+	}
 }
 
 func (m *MongoDB) Analyses() *mongo.Collection {
@@ -181,6 +244,30 @@ func (m *MongoDB) DomainShares() *mongo.Collection {
 	return m.Database.Collection("domain_shares")
 }
 
+func (m *MongoDB) RedditAnalyses() *mongo.Collection {
+	return m.Database.Collection("reddit_analyses")
+}
+
+func (m *MongoDB) RedditCache() *mongo.Collection {
+	return m.Database.Collection("reddit_cache")
+}
+
+func (m *MongoDB) ReportPDFs() *mongo.Collection {
+	return m.Database.Collection("report_pdfs")
+}
+
+func (m *MongoDB) BrandScreenshots() *mongo.Collection {
+	return m.Database.Collection("brand_screenshots")
+}
+
+func (m *MongoDB) TenantAPIKeys() *mongo.Collection {
+	return m.Database.Collection("tenant_api_keys")
+}
+
+func (m *MongoDB) SearchAnalyses() *mongo.Collection {
+	return m.Database.Collection("search_analyses")
+}
+
 func (m *MongoDB) Close(ctx context.Context) error {
 	return m.Client.Disconnect(ctx)
 }
@@ -191,7 +278,7 @@ func (m *MongoDB) migrateDomains() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	collections := []string{"analyses", "optimizations", "todos", "brand_profiles", "video_analyses", "domain_summaries"}
+	collections := []string{"analyses", "optimizations", "todos", "brand_profiles", "video_analyses", "domain_summaries", "reddit_analyses", "search_analyses"}
 
 	for _, coll := range collections {
 		c := m.Database.Collection(coll)

@@ -84,6 +84,17 @@ func main() {
 
 	ytKey := os.Getenv("YOUTUBE_API_KEY") // optional — video tab disabled if missing
 
+	// Encryption key for API key storage (required in SaaS mode)
+	var encryptionKey []byte
+	if encKeyHex := os.Getenv("LLMOPT_ENCRYPTION_KEY"); encKeyHex != "" {
+		var err error
+		encryptionKey, err = parseEncryptionKey(encKeyHex)
+		if err != nil {
+			log.Fatalf("Invalid LLMOPT_ENCRYPTION_KEY: %v", err)
+		}
+		log.Println("API key encryption enabled")
+	}
+
 	dbName := os.Getenv("DATABASE_NAME")
 	if dbName == "" {
 		dbName = "llmopt"
@@ -110,6 +121,9 @@ func main() {
 		if jwtSecret == "" {
 			log.Fatal("LLMOPT_JWT_ACCESS_SECRET is required when LLMOPT_SAAS_ENABLED=true")
 		}
+		if encryptionKey == nil {
+			log.Fatal("LLMOPT_ENCRYPTION_KEY is required when LLMOPT_SAAS_ENABLED=true (for API key encryption)")
+		}
 		jv := saas.NewJWTValidator(jwtSecret)
 		sm = saas.NewMiddleware(jv, mongoDB.Database)
 		log.Println("SaaS mode enabled — JWT auth active")
@@ -120,6 +134,9 @@ func main() {
 		// One-time migration: convert per-record public flags to domain shares
 		mongoDB.migratePublicToDomainShares()
 	}
+
+	// Capture missing screenshots for popular brands (non-blocking)
+	go ensurePopularScreenshots(mongoDB)
 
 	// withAuth wraps a handler with JWT + tenant middleware (SaaS mode only).
 	// In non-SaaS mode, returns the handler unwrapped.
@@ -142,12 +159,12 @@ func main() {
 	mux.HandleFunc("OPTIONS /api/config", handleOptions)
 
 	// Tenant-scoped routes (wrapped with auth in SaaS mode)
-	mux.HandleFunc("POST /api/analyze", withAuth(handleAnalyze(apiKey, mongoDB)))
+	mux.HandleFunc("POST /api/analyze", withAuth(handleAnalyze(mongoDB, encryptionKey, apiKey, saasEnabled)))
 	mux.HandleFunc("GET /api/analyses", withAuth(handleListAnalyses(mongoDB)))
 	mux.HandleFunc("GET /api/analyses/{id}", withAuth(handleGetAnalysis(mongoDB)))
 	mux.HandleFunc("DELETE /api/analyses/{id}", withAuth(handleDeleteAnalysis(mongoDB)))
 	mux.HandleFunc("DELETE /api/optimizations/{id}", withAuth(handleDeleteOptimization(mongoDB)))
-	mux.HandleFunc("POST /api/analyses/{id}/questions/{idx}/optimize", withAuth(handleOptimize(apiKey, mongoDB)))
+	mux.HandleFunc("POST /api/analyses/{id}/questions/{idx}/optimize", withAuth(handleOptimize(mongoDB, encryptionKey, apiKey, saasEnabled)))
 	mux.HandleFunc("GET /api/analyses/{id}/questions/{idx}/optimization", withAuth(handleGetOptimization(mongoDB)))
 	mux.HandleFunc("GET /api/optimizations", withAuth(handleListOptimizations(mongoDB)))
 	mux.HandleFunc("GET /api/optimizations/{id}", withAuth(handleGetOptimizationByID(mongoDB)))
@@ -156,25 +173,49 @@ func main() {
 	mux.HandleFunc("GET /api/todos", withAuth(handleListTodos(mongoDB)))
 	mux.HandleFunc("PATCH /api/todos/{id}", withAuth(handleUpdateTodo(mongoDB)))
 	mux.HandleFunc("POST /api/todos/archive", withAuth(handleBulkArchiveTodos(mongoDB)))
-	mux.HandleFunc("POST /api/domains/{domain}/summary", withAuth(handleGenerateDomainSummary(apiKey, mongoDB)))
+	mux.HandleFunc("POST /api/domains/{domain}/summary", withAuth(handleGenerateDomainSummary(mongoDB, encryptionKey, apiKey, saasEnabled)))
 	mux.HandleFunc("GET /api/domains/{domain}/summary", withAuth(handleGetDomainSummary(mongoDB)))
 	mux.HandleFunc("GET /api/domains/{domain}/summary/status", withAuth(handleDomainSummaryStatus(mongoDB)))
 	mux.HandleFunc("GET /api/brands", withAuth(handleListBrands(mongoDB)))
 	mux.HandleFunc("GET /api/brands/{domain}", withAuth(handleGetBrand(mongoDB)))
 	mux.HandleFunc("PUT /api/brands/{domain}", withAuth(handleSaveBrand(mongoDB)))
 	mux.HandleFunc("DELETE /api/brands/{domain}", withAuth(handleDeleteBrand(mongoDB)))
-	mux.HandleFunc("POST /api/brands/{domain}/discover-competitors", withAuth(handleDiscoverCompetitors(apiKey, mongoDB)))
-	mux.HandleFunc("POST /api/brands/{domain}/suggest-queries", withAuth(handleSuggestQueries(apiKey, mongoDB)))
-	mux.HandleFunc("POST /api/brands/{domain}/generate-description", withAuth(handleGenerateDescription(apiKey, mongoDB)))
-	mux.HandleFunc("POST /api/brands/{domain}/predict-audience", withAuth(handlePredictAudience(apiKey, mongoDB)))
-	mux.HandleFunc("POST /api/brands/{domain}/suggest-claims", withAuth(handleSuggestClaims(apiKey, mongoDB)))
-	mux.HandleFunc("POST /api/brands/{domain}/predict-differentiators", withAuth(handlePredictDifferentiators(apiKey, mongoDB)))
+	mux.HandleFunc("POST /api/brands/{domain}/discover-competitors", withAuth(handleDiscoverCompetitors(mongoDB, encryptionKey, apiKey, saasEnabled)))
+	mux.HandleFunc("POST /api/brands/{domain}/suggest-queries", withAuth(handleSuggestQueries(mongoDB, encryptionKey, apiKey, saasEnabled)))
+	mux.HandleFunc("POST /api/brands/{domain}/generate-description", withAuth(handleGenerateDescription(mongoDB, encryptionKey, apiKey, saasEnabled)))
+	mux.HandleFunc("POST /api/brands/{domain}/predict-audience", withAuth(handlePredictAudience(mongoDB, encryptionKey, apiKey, saasEnabled)))
+	mux.HandleFunc("POST /api/brands/{domain}/suggest-claims", withAuth(handleSuggestClaims(mongoDB, encryptionKey, apiKey, saasEnabled)))
+	mux.HandleFunc("POST /api/brands/{domain}/predict-differentiators", withAuth(handlePredictDifferentiators(mongoDB, encryptionKey, apiKey, saasEnabled)))
 	mux.HandleFunc("POST /api/video/discover", withAuth(handleVideoDiscover(ytKey, mongoDB)))
-	mux.HandleFunc("POST /api/video/analyze", withAuth(handleVideoAnalyze(apiKey, ytKey, mongoDB)))
+	mux.HandleFunc("POST /api/video/analyze", withAuth(handleVideoAnalyze(mongoDB, encryptionKey, apiKey, saasEnabled, ytKey)))
 	mux.HandleFunc("GET /api/video/analyses/{domain}/details", withAuth(handleGetVideoDetails(mongoDB)))
 	mux.HandleFunc("GET /api/video/analyses/{domain}", withAuth(handleGetVideoAnalysis(mongoDB)))
 	mux.HandleFunc("GET /api/video/analyses", withAuth(handleListVideoAnalyses(mongoDB)))
 	mux.HandleFunc("DELETE /api/video/analyses/{domain}", withAuth(handleDeleteVideoAnalysis(mongoDB)))
+
+	// Reddit Authority Analyzer
+	mux.HandleFunc("POST /api/reddit/discover", withAuth(handleRedditDiscover(mongoDB)))
+	mux.HandleFunc("POST /api/reddit/analyze", withAuth(handleRedditAnalyze(mongoDB, encryptionKey, apiKey, saasEnabled)))
+	mux.HandleFunc("GET /api/reddit/analyses/{domain}", withAuth(handleGetRedditAnalysis(mongoDB)))
+	mux.HandleFunc("GET /api/reddit/analyses", withAuth(handleListRedditAnalyses(mongoDB)))
+	mux.HandleFunc("DELETE /api/reddit/analyses/{domain}", withAuth(handleDeleteRedditAnalysis(mongoDB)))
+
+	// Search Visibility Analyzer
+	mux.HandleFunc("POST /api/search/analyze", withAuth(handleSearchAnalyze(mongoDB, encryptionKey, apiKey, saasEnabled)))
+	mux.HandleFunc("GET /api/search/analyses/{domain}", withAuth(handleGetSearchAnalysis(mongoDB)))
+	mux.HandleFunc("GET /api/search/analyses", withAuth(handleListSearchAnalyses(mongoDB)))
+	mux.HandleFunc("DELETE /api/search/analyses/{domain}", withAuth(handleDeleteSearchAnalysis(mongoDB)))
+
+	// PDF Report
+	mux.HandleFunc("POST /api/domains/{domain}/report/pdf", withAuth(handleGeneratePDF(mongoDB)))
+	mux.HandleFunc("GET /api/domains/{domain}/report/pdf/{id}", withAuth(handleServePDF(mongoDB)))
+
+	// API Key Management
+	mux.HandleFunc("GET /api/settings/api-keys", withAuth(handleListAPIKeys(mongoDB)))
+	mux.HandleFunc("PUT /api/settings/api-keys/{provider}", withAuth(handleSetAPIKey(mongoDB, encryptionKey)))
+	mux.HandleFunc("DELETE /api/settings/api-keys/{provider}", withAuth(handleDeleteAPIKey(mongoDB)))
+	mux.HandleFunc("POST /api/settings/api-keys/{provider}/verify", withAuth(handleVerifyAPIKey(mongoDB, encryptionKey)))
+	mux.HandleFunc("GET /api/settings/api-keys/status", withAuth(handleAPIKeyStatus(mongoDB)))
 
 	// Public routes (no auth required)
 	mux.HandleFunc("GET /api/health/claude", handleHealthCheck(apiKey, mongoDB))
@@ -184,6 +225,7 @@ func main() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.HandleFunc("GET /api/share/popular", handleGetPopularDomains(mongoDB))
+	mux.HandleFunc("GET /api/share/popular/{domain}/screenshot", handleServeBrandScreenshot(mongoDB))
 	mux.HandleFunc("GET /api/share/{shareId}", handleGetSharedDomain(mongoDB))
 
 	// OPTIONS handlers (CORS preflight — no auth)
@@ -199,6 +241,7 @@ func main() {
 	mux.HandleFunc("OPTIONS /api/optimizations/{id}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/domains/{domain}/share", handleOptions)
 	mux.HandleFunc("OPTIONS /api/share/popular", handleOptions)
+	mux.HandleFunc("OPTIONS /api/share/popular/{domain}/screenshot", handleOptions)
 	mux.HandleFunc("OPTIONS /api/share/{shareId}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/todos", handleOptions)
 	mux.HandleFunc("OPTIONS /api/todos/{id}", handleOptions)
@@ -219,6 +262,19 @@ func main() {
 	mux.HandleFunc("OPTIONS /api/video/analyses/{domain}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/video/analyses", handleOptions)
 	mux.HandleFunc("OPTIONS /api/todos/archive", handleOptions)
+	mux.HandleFunc("OPTIONS /api/reddit/discover", handleOptions)
+	mux.HandleFunc("OPTIONS /api/reddit/analyze", handleOptions)
+	mux.HandleFunc("OPTIONS /api/reddit/analyses/{domain}", handleOptions)
+	mux.HandleFunc("OPTIONS /api/reddit/analyses", handleOptions)
+	mux.HandleFunc("OPTIONS /api/search/analyze", handleOptions)
+	mux.HandleFunc("OPTIONS /api/search/analyses/{domain}", handleOptions)
+	mux.HandleFunc("OPTIONS /api/search/analyses", handleOptions)
+	mux.HandleFunc("OPTIONS /api/domains/{domain}/report/pdf", handleOptions)
+	mux.HandleFunc("OPTIONS /api/domains/{domain}/report/pdf/{id}", handleOptions)
+	mux.HandleFunc("OPTIONS /api/settings/api-keys", handleOptions)
+	mux.HandleFunc("OPTIONS /api/settings/api-keys/{provider}", handleOptions)
+	mux.HandleFunc("OPTIONS /api/settings/api-keys/{provider}/verify", handleOptions)
+	mux.HandleFunc("OPTIONS /api/settings/api-keys/status", handleOptions)
 
 	// SaaS frontend: serve LastSaaS auth/admin pages when configured
 	if saasFrontendDir := os.Getenv("LLMOPT_FRONTEND_DIR"); saasFrontendDir != "" {
@@ -743,7 +799,7 @@ func streamClaude(ctx context.Context, apiKey string, body []byte, w http.Respon
 	return nil, fmt.Errorf("stream ended without results")
 }
 
-func handleAnalyze(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
+func handleAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -796,6 +852,13 @@ func handleAnalyze(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 				})
 				return
 			}
+		}
+
+		// Resolve API key for this tenant
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
 		}
 
 		sendSSE(w, flusher, "status", map[string]string{
@@ -1183,7 +1246,298 @@ func handleHealthHistory(mongoDB *MongoDB) http.HandlerFunc {
 	}
 }
 
-func handleOptimize(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
+// --- API Key Management Handlers ---
+
+func handleListAPIKeys(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenantID := saas.TenantIDFromContext(r.Context())
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		cursor, err := mongoDB.TenantAPIKeys().Find(ctx, bson.M{"tenantId": tenantID})
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+		defer cursor.Close(ctx)
+
+		var keys []TenantAPIKey
+		if err := cursor.All(ctx, &keys); err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+		if keys == nil {
+			keys = []TenantAPIKey{}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"keys": keys})
+	}
+}
+
+func handleSetAPIKey(mongoDB *MongoDB, encKey []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if role := saas.MemberRoleFromContext(r.Context()); role != "owner" {
+			http.Error(w, `{"error":"forbidden","message":"Only the team owner can manage API keys"}`, http.StatusForbidden)
+			return
+		}
+		provider := r.PathValue("provider")
+		validProviders := map[string]bool{"anthropic": true, "openai": true, "grok": true, "gemini": true}
+		if !validProviders[provider] {
+			http.Error(w, `{"error":"invalid provider"}`, http.StatusBadRequest)
+			return
+		}
+
+		var req struct {
+			Key            string `json:"key"`
+			PreferredModel string `json:"preferred_model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Key == "" {
+			http.Error(w, `{"error":"key is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		tenantID := saas.TenantIDFromContext(r.Context())
+
+		// Only Anthropic keys can be verified right now
+		status := "active"
+		if provider == "anthropic" {
+			var err error
+			status, err = verifyAnthropicKey(r.Context(), req.Key)
+			if err != nil {
+				log.Printf("API key verification error for tenant %s: %v", tenantID, err)
+			}
+		}
+
+		// Encrypt the key
+		encrypted, err := encryptSecret(req.Key, encKey)
+		if err != nil {
+			log.Printf("Failed to encrypt API key for tenant %s: %v", tenantID, err)
+			http.Error(w, `{"error":"encryption failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// Build key prefix for display (first 8 chars or less)
+		prefix := req.Key
+		if len(prefix) > 8 {
+			prefix = prefix[:8]
+		}
+		prefix += "..."
+
+		now := time.Now()
+		doc := TenantAPIKey{
+			TenantID:       tenantID,
+			Provider:       provider,
+			EncryptedKey:   encrypted,
+			KeyPrefix:      prefix,
+			PreferredModel: req.PreferredModel,
+			Status:         status,
+			LastVerifiedAt: &now,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		filter := bson.M{"tenantId": tenantID, "provider": provider}
+		update := bson.M{
+			"$set": bson.M{
+				"encryptedKey":   encrypted,
+				"keyPrefix":      prefix,
+				"preferredModel": req.PreferredModel,
+				"status":         status,
+				"lastVerifiedAt": now,
+				"updatedAt":      now,
+			},
+			"$setOnInsert": bson.M{
+				"tenantId":  tenantID,
+				"provider":  provider,
+				"createdAt": now,
+			},
+		}
+		_, err = mongoDB.TenantAPIKeys().UpdateOne(ctx, filter, update, options.Update().SetUpsert(true))
+		if err != nil {
+			log.Printf("Failed to store API key for tenant %s: %v", tenantID, err)
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// Return the result without the encrypted key
+		doc.EncryptedKey = ""
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(doc)
+	}
+}
+
+func handleDeleteAPIKey(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if role := saas.MemberRoleFromContext(r.Context()); role != "owner" {
+			http.Error(w, `{"error":"forbidden","message":"Only the team owner can manage API keys"}`, http.StatusForbidden)
+			return
+		}
+		provider := r.PathValue("provider")
+		tenantID := saas.TenantIDFromContext(r.Context())
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		result, err := mongoDB.TenantAPIKeys().DeleteOne(ctx, bson.M{
+			"tenantId": tenantID,
+			"provider": provider,
+		})
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+		if result.DeletedCount == 0 {
+			http.Error(w, `{"error":"key not found"}`, http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message":"API key removed"}`))
+	}
+}
+
+func handleVerifyAPIKey(mongoDB *MongoDB, encKey []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if role := saas.MemberRoleFromContext(r.Context()); role != "owner" {
+			http.Error(w, `{"error":"forbidden","message":"Only the team owner can manage API keys"}`, http.StatusForbidden)
+			return
+		}
+		provider := r.PathValue("provider")
+		tenantID := saas.TenantIDFromContext(r.Context())
+
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+
+		var doc TenantAPIKey
+		err := mongoDB.TenantAPIKeys().FindOne(ctx, bson.M{
+			"tenantId": tenantID,
+			"provider": provider,
+		}).Decode(&doc)
+		if err != nil {
+			http.Error(w, `{"error":"key not found"}`, http.StatusNotFound)
+			return
+		}
+
+		plainKey, err := decryptSecret(doc.EncryptedKey, encKey)
+		if err != nil {
+			http.Error(w, `{"error":"decryption failed"}`, http.StatusInternalServerError)
+			return
+		}
+
+		status := "active"
+		if provider == "anthropic" {
+			status, err = verifyAnthropicKey(ctx, plainKey)
+			if err != nil {
+				log.Printf("API key re-verify error for tenant %s: %v", tenantID, err)
+			}
+		}
+
+		now := time.Now()
+		mongoDB.TenantAPIKeys().UpdateOne(ctx, bson.M{
+			"tenantId": tenantID,
+			"provider": provider,
+		}, bson.M{"$set": bson.M{
+			"status":         status,
+			"lastVerifiedAt": now,
+			"updatedAt":      now,
+		}})
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":          status,
+			"last_verified_at": now,
+		})
+	}
+}
+
+// resolveOwnerName looks up the display name of the tenant's owner.
+func resolveOwnerName(ctx context.Context, mongoDB *MongoDB, tenantID string) string {
+	oid, err := primitive.ObjectIDFromHex(tenantID)
+	if err != nil {
+		return ""
+	}
+
+	// Find the owner membership
+	var membership struct {
+		UserID primitive.ObjectID `bson:"userId"`
+	}
+	err = mongoDB.Database.Collection("tenant_memberships").FindOne(ctx, bson.M{
+		"tenantId": oid,
+		"role":     "owner",
+	}).Decode(&membership)
+	if err != nil {
+		return ""
+	}
+
+	// Look up the owner's display name
+	var user struct {
+		DisplayName string `bson:"displayName"`
+	}
+	err = mongoDB.Database.Collection("users").FindOne(ctx, bson.M{
+		"_id": membership.UserID,
+	}).Decode(&user)
+	if err != nil {
+		return ""
+	}
+	return user.DisplayName
+}
+
+func handleAPIKeyStatus(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenantID := saas.TenantIDFromContext(r.Context())
+		role := saas.MemberRoleFromContext(r.Context())
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		// Resolve owner name for non-owners
+		ownerName := ""
+		if role != "owner" {
+			ownerName = resolveOwnerName(ctx, mongoDB, tenantID)
+		}
+
+		var doc TenantAPIKey
+		err := mongoDB.TenantAPIKeys().FindOne(ctx, bson.M{
+			"tenantId": tenantID,
+			"provider": "anthropic",
+		}).Decode(&doc)
+
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"has_key":         false,
+				"provider":        "anthropic",
+				"status":          "unconfigured",
+				"preferred_model": "",
+				"role":            role,
+				"owner_name":      ownerName,
+			})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"has_key":          true,
+			"provider":         doc.Provider,
+			"status":           doc.Status,
+			"preferred_model":  doc.PreferredModel,
+			"last_verified_at": doc.LastVerifiedAt,
+			"role":             role,
+			"owner_name":       ownerName,
+		})
+	}
+}
+
+func handleOptimize(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -1260,6 +1614,13 @@ func handleOptimize(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 				})
 				return
 			}
+		}
+
+		// Resolve API key for this tenant
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
 		}
 
 		sendSSE(w, flusher, "status", map[string]string{
@@ -1863,6 +2224,8 @@ func handleBulkArchiveTodos(mongoDB *MongoDB) http.HandlerFunc {
 		})
 		if req.SourceType == "video" {
 			filter = append(filter, bson.E{Key: "sourceType", Value: "video"})
+		} else if req.SourceType == "reddit" {
+			filter = append(filter, bson.E{Key: "sourceType", Value: "reddit"})
 		} else if req.SourceType == "optimization" && req.Question != "" {
 			filter = append(filter, bson.E{Key: "question", Value: req.Question})
 			// Optimization todos have empty sourceType for backwards compat
@@ -2009,6 +2372,11 @@ func handleSetDomainShare(mongoDB *MongoDB) http.HandlerFunc {
 			return
 		}
 
+		// Capture screenshot when domain is marked as popular
+		if req.Visibility == "popular" {
+			go captureBrandScreenshot(mongoDB, domain)
+		}
+
 		shareURL := ""
 		if shareID != "" {
 			shareURL = "/share/" + shareID
@@ -2140,13 +2508,14 @@ func handleGetPopularDomains(mongoDB *MongoDB) http.HandlerFunc {
 		}
 
 		type PopularDomain struct {
-			Domain          string `json:"domain"`
-			BrandName       string `json:"brand_name"`
-			ShareID         string `json:"share_id"`
-			AvgScore        int    `json:"avg_score"`
-			ReportCount     int    `json:"report_count"`
-			AnalysisCount   int    `json:"analysis_count"`
-			HasVideo        bool   `json:"has_video"`
+			Domain        string `json:"domain"`
+			BrandName     string `json:"brand_name"`
+			ShareID       string `json:"share_id"`
+			AvgScore      int    `json:"avg_score"`
+			ReportCount   int    `json:"report_count"`
+			AnalysisCount int    `json:"analysis_count"`
+			HasVideo      bool   `json:"has_video"`
+			HasScreenshot bool   `json:"has_screenshot"`
 		}
 
 		results := make([]PopularDomain, 0, len(shares))
@@ -2194,11 +2563,44 @@ func handleGetPopularDomains(mongoDB *MongoDB) http.HandlerFunc {
 			videoCount, _ := mongoDB.VideoAnalyses().CountDocuments(ctx, tdFilter)
 			pd.HasVideo = videoCount > 0
 
+			// Check for screenshot
+			ssCount, _ := mongoDB.BrandScreenshots().CountDocuments(ctx, bson.M{
+				"domain": s.Domain, "sizeBytes": bson.M{"$gt": 0},
+			})
+			pd.HasScreenshot = ssCount > 0
+
 			results = append(results, pd)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(results)
+	}
+}
+
+// handleServeBrandScreenshot serves a cached screenshot JPEG for a popular domain.
+func handleServeBrandScreenshot(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := normalizeDomain(r.PathValue("domain"))
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		var ss BrandScreenshot
+		filter := bson.M{"domain": domain, "sizeBytes": bson.M{"$gt": 0}}
+		if err := mongoDB.BrandScreenshots().FindOne(ctx, filter).Decode(&ss); err != nil {
+			if err == mongo.ErrNoDocuments {
+				http.Error(w, "Screenshot not found", http.StatusNotFound)
+			} else {
+				http.Error(w, "Database error", http.StatusInternalServerError)
+			}
+			return
+		}
+
+		w.Header().Set("Content-Type", ss.ContentType)
+		w.Header().Set("Content-Length", strconv.Itoa(len(ss.ImageData)))
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Header().Set("ETag", fmt.Sprintf(`"%s-%d"`, domain, ss.CapturedAt.Unix()))
+		w.Write(ss.ImageData)
 	}
 }
 
@@ -2438,35 +2840,47 @@ func handleDeleteOptimization(mongoDB *MongoDB) http.HandlerFunc {
 
 // Domain Summary handlers
 
-func buildDomainSummaryPrompt(domain string, optimizations []Optimization, brandInfo BrandContextInfo) string {
-	var reports strings.Builder
-	for i, opt := range optimizations {
-		reports.WriteString(fmt.Sprintf("\n--- Report %d: \"%s\" ---\n", i+1, opt.Question))
-		reports.WriteString(fmt.Sprintf("Overall Score: %d/100\n", opt.Result.OverallScore))
-		reports.WriteString(fmt.Sprintf("Content Authority: %d/100\n", opt.Result.ContentAuthority.Score))
-		reports.WriteString(fmt.Sprintf("Structural Optimization: %d/100\n", opt.Result.StructuralOptimization.Score))
-		reports.WriteString(fmt.Sprintf("Source Authority: %d/100\n", opt.Result.SourceAuthority.Score))
-		reports.WriteString(fmt.Sprintf("Knowledge Persistence: %d/100\n", opt.Result.KnowledgePersistence.Score))
+func buildDomainSummaryPrompt(domain string, optimizations []Optimization, analysis *Analysis, videoAnalysis *VideoAnalysis, redditAnalysis *RedditAnalysis, brandInfo BrandContextInfo) string {
+	var sections strings.Builder
 
-		if len(opt.Result.ContentAuthority.Evidence) > 0 {
-			reports.WriteString("Content Authority Evidence: " + strings.Join(opt.Result.ContentAuthority.Evidence, "; ") + "\n")
+	// Site Analysis (summary only)
+	if analysis != nil {
+		sections.WriteString("\n=== SITE ANALYSIS ===\n")
+		if analysis.Result.SiteSummary != "" {
+			sections.WriteString("Site Summary: " + analysis.Result.SiteSummary + "\n")
 		}
-		if len(opt.Result.SourceAuthority.Evidence) > 0 {
-			reports.WriteString("Source Authority Evidence: " + strings.Join(opt.Result.SourceAuthority.Evidence, "; ") + "\n")
+		sections.WriteString(fmt.Sprintf("Pages Crawled: %d\n", len(analysis.Result.CrawledPages)))
+		sections.WriteString(fmt.Sprintf("Questions Discovered: %d\n", len(analysis.Result.Questions)))
+	}
+
+	// Optimization Reports (scores only)
+	if len(optimizations) > 0 {
+		sections.WriteString(fmt.Sprintf("\n=== OPTIMIZATION REPORTS (%d) ===\n", len(optimizations)))
+		for i, opt := range optimizations {
+			sections.WriteString(fmt.Sprintf("- Report %d: \"%s\" — Overall: %d, Content Authority: %d, Structural: %d, Source Authority: %d, Knowledge Persistence: %d\n",
+				i+1, opt.Question, opt.Result.OverallScore,
+				opt.Result.ContentAuthority.Score, opt.Result.StructuralOptimization.Score,
+				opt.Result.SourceAuthority.Score, opt.Result.KnowledgePersistence.Score))
 		}
-		if len(opt.Result.Competitors) > 0 {
-			var comps []string
-			for _, c := range opt.Result.Competitors {
-				comps = append(comps, fmt.Sprintf("%s (%d)", c.Domain, c.ScoreEstimate))
-			}
-			reports.WriteString("Competitors: " + strings.Join(comps, ", ") + "\n")
+	}
+
+	// Video Authority (executive summary + score only)
+	if videoAnalysis != nil && videoAnalysis.Result != nil {
+		vr := videoAnalysis.Result
+		sections.WriteString("\n=== YOUTUBE VIDEO AUTHORITY ===\n")
+		sections.WriteString(fmt.Sprintf("Overall Video Authority Score: %d/100\n", vr.OverallScore))
+		if vr.ExecutiveSummary != "" {
+			sections.WriteString("Summary: " + vr.ExecutiveSummary + "\n")
 		}
-		if len(opt.Result.Recommendations) > 0 {
-			reports.WriteString("Recommendations:\n")
-			for _, rec := range opt.Result.Recommendations {
-				reports.WriteString(fmt.Sprintf("- [%s] %s (Dimension: %s, Impact: %s)\n",
-					rec.Priority, rec.Action, rec.Dimension, rec.ExpectedImpact))
-			}
+	}
+
+	// Reddit Authority (executive summary + score only)
+	if redditAnalysis != nil && redditAnalysis.Result != nil {
+		rr := redditAnalysis.Result
+		sections.WriteString("\n=== REDDIT AUTHORITY ===\n")
+		sections.WriteString(fmt.Sprintf("Overall Reddit Authority Score: %d/100\n", rr.OverallScore))
+		if rr.ExecutiveSummary != "" {
+			sections.WriteString("Summary: " + rr.ExecutiveSummary + "\n")
 		}
 	}
 
@@ -2475,41 +2889,104 @@ func buildDomainSummaryPrompt(domain string, optimizations []Optimization, brand
 		brandSection = fmt.Sprintf("\n--- Brand Intelligence Context ---\n%s\n--- End Brand Context ---\n", brandInfo.ContextString)
 	}
 
-	return fmt.Sprintf(`You are an LLM visibility strategist. Synthesize multiple optimization reports for a single domain into a comprehensive strategic summary.
+	// Build inventory of what's included
+	var included []string
+	if analysis != nil {
+		included = append(included, "Site Analysis")
+	}
+	if len(optimizations) > 0 {
+		included = append(included, fmt.Sprintf("%d Optimization Reports", len(optimizations)))
+	}
+	if videoAnalysis != nil && videoAnalysis.Result != nil {
+		included = append(included, "YouTube Video Authority")
+	}
+	if redditAnalysis != nil && redditAnalysis.Result != nil {
+		included = append(included, "Reddit Authority")
+	}
+
+	return fmt.Sprintf(`You are an LLM visibility strategist. You are given high-level summaries and scores from multiple report types for a single domain. Synthesize these into a unified strategic overview.
 
 Domain: %s
-Number of Reports: %d
+Reports Included: %s
 %s%s
 INSTRUCTIONS:
 
-1. **Executive Summary**: Write a 2-3 paragraph strategic overview of this domain's LLM visibility position. Cover the biggest strengths, weaknesses, and overall trajectory.
+1. **Executive Summary**: Write a 2-3 paragraph strategic overview of this domain's LLM visibility position across all available channels. Cover the biggest strengths, weaknesses, and overall trajectory. Weave together findings from all report types present.
 
-2. **Themes**: Identify 3-7 recurring patterns across the reports. Reference which reports (by number) support each theme.
+2. **Themes**: Identify 3-5 recurring patterns across the reports. Reference sources by label (e.g., "Optimization Report 3", "Video Authority", "Reddit Authority", "Site Analysis"). Themes should span report types when possible.
 
-3. **Priority Action Items**: Consolidate all individual recommendations into a unified, deduplicated, prioritized list. Rank by how frequently an action appears across reports and its potential impact. Use priority levels: high, medium, low.
+3. **Priority Action Items**: Based on the score patterns and summaries, recommend 5-10 prioritized actions. Use priority levels: high, medium, low.
 
-4. **Contradictions**: If different reports give conflicting advice or contradictory scores for similar dimensions, surface those explicitly. For each, explain the likely reason and recommend how to reconcile.
+4. **Contradictions**: If different report summaries give conflicting signals, surface those explicitly with a recommendation on how to reconcile. If none, return an empty array.
 
-5. **Dimension Trends**: Calculate the average score (0-100) for each dimension across all reports.
+5. **Dimension Trends**: Calculate the average score (0-100) for each optimization dimension across optimization reports. If no optimization reports exist, omit or use 0.
 
 Return as JSON (no markdown code fences, just raw JSON):
 {
-  "executive_summary": "2-3 paragraph strategic overview",
+  "executive_summary": "2-3 paragraph strategic overview covering all report types",
   "average_score": 65,
   "score_range": [40, 85],
   "themes": [
-    {"title": "Theme name", "description": "What this means and why it matters", "report_refs": ["1", "3"]}
+    {"title": "Theme name", "description": "What this means and why it matters", "report_refs": ["Optimization Report 1", "Video Authority"]}
   ],
   "action_items": [
-    {"priority": "high", "action": "Specific action", "dimension": "content_authority", "expected_impact": "Expected improvement", "source_reports": ["1", "2"]}
+    {"priority": "high", "action": "Specific action", "dimension": "content_authority", "expected_impact": "Expected improvement", "source_reports": ["Optimization Report 1", "Reddit Authority"]}
   ],
   "contradictions": [
-    {"topic": "What is contradicted", "positions": ["Report 1 says X", "Report 3 says Y"], "report_refs": ["1", "3"], "recommendation": "How to reconcile"}
+    {"topic": "What is contradicted", "positions": ["Optimization reports say X", "Reddit analysis says Y"], "report_refs": ["Optimization Report 1", "Reddit Authority"], "recommendation": "How to reconcile"}
   ],
   "dimension_trends": {"content_authority": 60, "structural_optimization": 55, "source_authority": 70, "knowledge_persistence": 50}
 }
 
-If there are no contradictions, return an empty array for contradictions. Be specific and actionable.`, domain, len(optimizations), reports.String(), brandSection)
+If there are no contradictions, return an empty array for contradictions. Be specific and actionable.`, domain, strings.Join(included, ", "), sections.String(), brandSection)
+}
+
+// isSummaryStale checks if any data source has new data since the summary was generated.
+func isSummaryStale(ctx context.Context, mongoDB *MongoDB, tenantCtx context.Context, domain string, summary DomainSummary) (bool, int64) {
+	domainFilter := tenantFilter(tenantCtx, bson.D{{Key: "domain", Value: domain}})
+
+	// Newer optimizations
+	newerOpts, _ := mongoDB.Optimizations().CountDocuments(ctx, tenantFilter(tenantCtx, bson.D{
+		{Key: "domain", Value: domain},
+		{Key: "createdAt", Value: bson.D{{Key: "$gt", Value: summary.GeneratedAt}}},
+	}))
+	if newerOpts > 0 {
+		return true, newerOpts
+	}
+
+	// Newer site analysis
+	newerAnalysis, _ := mongoDB.Analyses().CountDocuments(ctx, append(domainFilter, bson.E{Key: "createdAt", Value: bson.D{{Key: "$gt", Value: summary.GeneratedAt}}}))
+	if newerAnalysis > 0 {
+		return true, newerAnalysis
+	}
+
+	// New video analysis that wasn't included
+	if !summary.IncludesVideo {
+		var va struct{ ID primitive.ObjectID `bson:"_id"` }
+		if err := mongoDB.VideoAnalyses().FindOne(ctx, domainFilter, options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 1}})).Decode(&va); err == nil {
+			return true, 0
+		}
+	} else {
+		newerVideo, _ := mongoDB.VideoAnalyses().CountDocuments(ctx, append(domainFilter, bson.E{Key: "generatedAt", Value: bson.D{{Key: "$gt", Value: summary.GeneratedAt}}}))
+		if newerVideo > 0 {
+			return true, 0
+		}
+	}
+
+	// New Reddit analysis that wasn't included
+	if !summary.IncludesReddit {
+		var ra struct{ ID primitive.ObjectID `bson:"_id"` }
+		if err := mongoDB.RedditAnalyses().FindOne(ctx, domainFilter, options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 1}})).Decode(&ra); err == nil {
+			return true, 0
+		}
+	} else {
+		newerReddit, _ := mongoDB.RedditAnalyses().CountDocuments(ctx, append(domainFilter, bson.E{Key: "generatedAt", Value: bson.D{{Key: "$gt", Value: summary.GeneratedAt}}}))
+		if newerReddit > 0 {
+			return true, 0
+		}
+	}
+
+	return false, 0
 }
 
 func handleDomainSummaryStatus(mongoDB *MongoDB) http.HandlerFunc {
@@ -2536,20 +3013,20 @@ func handleDomainSummaryStatus(mongoDB *MongoDB) http.HandlerFunc {
 			return
 		}
 
-		newerCount, _ := mongoDB.Optimizations().CountDocuments(ctx, tenantFilter(r.Context(), bson.D{
-			{Key: "domain", Value: domain},
-			{Key: "createdAt", Value: bson.D{{Key: "$gt", Value: summary.GeneratedAt}}},
-		}))
 		totalCount, _ := mongoDB.Optimizations().CountDocuments(ctx, domainFilter)
+		stale, newerCount := isSummaryStale(ctx, mongoDB, r.Context(), domain, summary)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"exists":             true,
 			"generated_at":       summary.GeneratedAt,
 			"included_count":     summary.ReportCount,
+			"includes_analysis":  summary.IncludesAnalysis,
+			"includes_video":     summary.IncludesVideo,
+			"includes_reddit":    summary.IncludesReddit,
 			"total_report_count": totalCount,
 			"newer_report_count": newerCount,
-			"stale":              newerCount > 0,
+			"stale":              stale,
 		})
 	}
 }
@@ -2572,21 +3049,18 @@ func handleGetDomainSummary(mongoDB *MongoDB) http.HandlerFunc {
 			return
 		}
 
-		newerCount, _ := mongoDB.Optimizations().CountDocuments(ctx, tenantFilter(r.Context(), bson.D{
-			{Key: "domain", Value: domain},
-			{Key: "createdAt", Value: bson.D{{Key: "$gt", Value: summary.GeneratedAt}}},
-		}))
+		stale, newerCount := isSummaryStale(ctx, mongoDB, r.Context(), domain, summary)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"summary":            summary,
-			"stale":              newerCount > 0,
+			"stale":              stale,
 			"newer_report_count": newerCount,
 		})
 	}
 }
 
-func handleGenerateDomainSummary(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
+func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		domain := normalizeDomain(r.PathValue("domain"))
 
@@ -2599,6 +3073,14 @@ func handleGenerateDomainSummary(apiKey string, mongoDB *MongoDB) http.HandlerFu
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+
+		// Resolve API key for this tenant
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
+		}
+		_ = apiKey // used by streamClaude below
 
 		// Load all optimizations for this domain (max 30)
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -2619,18 +3101,68 @@ func handleGenerateDomainSummary(apiKey string, mongoDB *MongoDB) http.HandlerFu
 		}
 		cancel2()
 
-		if len(optimizations) == 0 {
-			sendSSE(w, flusher, "error", map[string]string{"message": "No optimization reports found for this domain"})
+		// Load site analysis
+		var analysis *Analysis
+		var an Analysis
+		anCtx, anCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		anFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
+		anOpts := options.FindOne().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetProjection(bson.D{{Key: "rawText", Value: 0}})
+		if err := mongoDB.Analyses().FindOne(anCtx, anFilter, anOpts).Decode(&an); err == nil {
+			analysis = &an
+		}
+		anCancel()
+
+		// Load video analysis
+		var videoAnalysis *VideoAnalysis
+		var va VideoAnalysis
+		vaCtx, vaCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		vaFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
+		vaOpts := options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}).SetProjection(bson.D{{Key: "rawText", Value: 0}})
+		if err := mongoDB.VideoAnalyses().FindOne(vaCtx, vaFilter, vaOpts).Decode(&va); err == nil {
+			videoAnalysis = &va
+		}
+		vaCancel()
+
+		// Load Reddit analysis
+		var redditAnalysis *RedditAnalysis
+		var ra RedditAnalysis
+		raCtx, raCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		raFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
+		raOpts := options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}).SetProjection(bson.D{{Key: "rawText", Value: 0}})
+		if err := mongoDB.RedditAnalyses().FindOne(raCtx, raFilter, raOpts).Decode(&ra); err == nil {
+			redditAnalysis = &ra
+		}
+		raCancel()
+
+		hasVideo := videoAnalysis != nil && videoAnalysis.Result != nil
+		hasReddit := redditAnalysis != nil && redditAnalysis.Result != nil
+
+		if len(optimizations) == 0 && analysis == nil && !hasVideo && !hasReddit {
+			sendSSE(w, flusher, "error", map[string]string{"message": "No reports found for this domain"})
 			return
 		}
 
 		brandInfo := lookupBrandContext(mongoDB, domain, saas.TenantIDFromContext(r.Context()))
 
+		// Build status message
+		var parts []string
+		if len(optimizations) > 0 {
+			parts = append(parts, fmt.Sprintf("%d optimization reports", len(optimizations)))
+		}
+		if analysis != nil {
+			parts = append(parts, "site analysis")
+		}
+		if hasVideo {
+			parts = append(parts, "video authority")
+		}
+		if hasReddit {
+			parts = append(parts, "Reddit authority")
+		}
 		sendSSE(w, flusher, "status", map[string]string{
-			"message": fmt.Sprintf("Synthesizing %d optimization reports for %s...", len(optimizations), domain),
+			"message": fmt.Sprintf("Synthesizing %s for %s...", strings.Join(parts, ", "), domain),
 		})
 
-		prompt := buildDomainSummaryPrompt(domain, optimizations, brandInfo)
+		prompt := buildDomainSummaryPrompt(domain, optimizations, analysis, videoAnalysis, redditAnalysis, brandInfo)
 
 		type modelDef struct {
 			id, name string
@@ -2701,14 +3233,17 @@ func handleGenerateDomainSummary(apiKey string, mongoDB *MongoDB) http.HandlerFu
 				}
 
 				summary := DomainSummary{
-					Domain:          domain,
-					TenantID:        saas.TenantIDFromContext(r.Context()),
-					Result:          summaryResult,
-					RawText:         result.rawText,
-					Model:           model.name,
-					OptimizationIDs: optIDs,
-					ReportCount:     len(optimizations),
-					GeneratedAt:     time.Now(),
+					Domain:           domain,
+					TenantID:         saas.TenantIDFromContext(r.Context()),
+					Result:           summaryResult,
+					RawText:          result.rawText,
+					Model:            model.name,
+					OptimizationIDs:  optIDs,
+					ReportCount:      len(optimizations),
+					IncludesAnalysis: analysis != nil,
+					IncludesVideo:    hasVideo,
+					IncludesReddit:   hasReddit,
+					GeneratedAt:      time.Now(),
 				}
 
 				saveCtx, saveCancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -2723,11 +3258,14 @@ func handleGenerateDomainSummary(apiKey string, mongoDB *MongoDB) http.HandlerFu
 				}
 
 				sendSSE(w, flusher, "done", map[string]any{
-					"result":       result.resultJSON,
-					"model":        model.name,
-					"generated_at": summary.GeneratedAt,
-					"report_count": summary.ReportCount,
-					"domain":       domain,
+					"result":            result.resultJSON,
+					"model":             model.name,
+					"generated_at":      summary.GeneratedAt,
+					"report_count":      summary.ReportCount,
+					"includes_analysis": summary.IncludesAnalysis,
+					"includes_video":    summary.IncludesVideo,
+					"includes_reddit":   summary.IncludesReddit,
+					"domain":            domain,
 				})
 				return
 			}
@@ -2741,7 +3279,7 @@ func handleGenerateDomainSummary(apiKey string, mongoDB *MongoDB) http.HandlerFu
 	}
 }
 
-func handleDiscoverCompetitors(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
+func handleDiscoverCompetitors(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		domain := r.PathValue("domain")
 
@@ -2754,6 +3292,13 @@ func handleDiscoverCompetitors(apiKey string, mongoDB *MongoDB) http.HandlerFunc
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
+		}
+		_ = apiKey
 
 		// Load existing brand profile for context (optional)
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -2884,7 +3429,7 @@ Return your findings as JSON (no markdown code fences, just raw JSON):
 	}
 }
 
-func handleSuggestQueries(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
+func handleSuggestQueries(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		domain := r.PathValue("domain")
 
@@ -2897,6 +3442,13 @@ func handleSuggestQueries(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
+		}
+		_ = apiKey
 
 		// Load brand profile for context
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -3030,7 +3582,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 	}
 }
 
-func handleGenerateDescription(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
+func handleGenerateDescription(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		domain := r.PathValue("domain")
 
@@ -3043,6 +3595,13 @@ func handleGenerateDescription(apiKey string, mongoDB *MongoDB) http.HandlerFunc
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
+		}
+		_ = apiKey
 
 		sendSSE(w, flusher, "status", map[string]string{
 			"message": "Analyzing " + domain + " to generate description...",
@@ -3135,7 +3694,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 	}
 }
 
-func handlePredictAudience(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
+func handlePredictAudience(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		domain := r.PathValue("domain")
 
@@ -3148,6 +3707,13 @@ func handlePredictAudience(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
+		}
+		_ = apiKey
 
 		// Load existing brand profile for context
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -3262,7 +3828,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 	}
 }
 
-func handleSuggestClaims(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
+func handleSuggestClaims(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		domain := r.PathValue("domain")
 
@@ -3275,6 +3841,13 @@ func handleSuggestClaims(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
+		}
+		_ = apiKey
 
 		// Load existing brand profile for context
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -3396,7 +3969,7 @@ Include 5-15 claims, prioritizing the most prominent and verifiable ones.`, doma
 	}
 }
 
-func handlePredictDifferentiators(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
+func handlePredictDifferentiators(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		domain := r.PathValue("domain")
 
@@ -3409,6 +3982,13 @@ func handlePredictDifferentiators(apiKey string, mongoDB *MongoDB) http.HandlerF
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
+		}
+		_ = apiKey
 
 		// Load existing brand profile for context (including competitors)
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -3824,7 +4404,7 @@ Return ONLY valid JSON matching this structure exactly:
 	return sb.String()
 }
 
-func handleVideoAnalyze(apiKey, ytKey string, mongoDB *MongoDB) http.HandlerFunc {
+func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool, ytKey string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if ytKey == "" {
 			http.Error(w, `{"error":"YOUTUBE_API_KEY not configured"}`, http.StatusServiceUnavailable)
@@ -3840,6 +4420,13 @@ func handleVideoAnalyze(apiKey, ytKey string, mongoDB *MongoDB) http.HandlerFunc
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
+		}
+		_ = apiKey
 
 		var req struct {
 			Domain           string              `json:"domain"`
@@ -4346,6 +4933,1139 @@ func handleDeleteVideoAnalysis(mongoDB *MongoDB) http.HandlerFunc {
 		// Cascade delete associated todos
 		if findErr == nil && result.DeletedCount > 0 {
 			mongoDB.Todos().DeleteMany(ctx, bson.D{{Key: "videoAnalysisId", Value: analysis.ID}})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"deleted": result.DeletedCount > 0,
+		})
+	}
+}
+
+// ── Reddit Authority Analyzer handlers ─────────────────────────────
+
+func handleRedditDiscover(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		var req struct {
+			Domain      string   `json:"domain"`
+			BrandName   string   `json:"brand_name"`
+			Subreddits  []string `json:"subreddits"`
+			SearchTerms []string `json:"search_terms"`
+			Competitors []string `json:"competitors"`
+			TimeFilter  string   `json:"time_filter"` // "month", "year", "all"
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Invalid request body"})
+			return
+		}
+
+		if len(req.SearchTerms) == 0 {
+			sendSSE(w, flusher, "error", map[string]string{"message": "At least one search term is required"})
+			return
+		}
+
+		// Normalize subreddits
+		var subs []string
+		for _, s := range req.Subreddits {
+			if n := normalizeSubreddit(s); n != "" {
+				subs = append(subs, n)
+			}
+		}
+		// Always include a broad search
+		if len(subs) == 0 {
+			subs = []string{"all"}
+		}
+
+		timeFilter := req.TimeFilter
+		if timeFilter == "" {
+			timeFilter = "year"
+		}
+
+		// Build search terms: explicit terms + brand name + competitor names
+		allTerms := make([]string, 0, len(req.SearchTerms)+1+len(req.Competitors))
+		seen := map[string]bool{}
+		for _, t := range req.SearchTerms {
+			t = strings.TrimSpace(t)
+			if t != "" && !seen[strings.ToLower(t)] {
+				seen[strings.ToLower(t)] = true
+				allTerms = append(allTerms, t)
+			}
+		}
+		// Add brand name as a search term if not already present
+		if req.BrandName != "" && !seen[strings.ToLower(req.BrandName)] {
+			seen[strings.ToLower(req.BrandName)] = true
+			allTerms = append(allTerms, req.BrandName)
+		}
+
+		progress := func(msg string) {
+			sendSSE(w, flusher, "status", map[string]string{"message": msg})
+		}
+
+		progress(fmt.Sprintf("Discovering Reddit threads across %d subreddits with %d search terms...", len(subs), len(allTerms)))
+
+		threads, err := redditDiscoverThreads(subs, allTerms, timeFilter, 15, 2*time.Second, progress)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Reddit discovery failed: " + err.Error()})
+			return
+		}
+
+		if len(threads) == 0 {
+			sendSSE(w, flusher, "error", map[string]string{"message": "No Reddit threads found matching your search criteria"})
+			return
+		}
+
+		progress(fmt.Sprintf("Found %d unique threads. Fetching thread details...", len(threads)))
+
+		// Sort by score descending and fetch top threads with comments
+		sortThreadsByScore(threads)
+		maxFetch := 40
+		if len(threads) < maxFetch {
+			maxFetch = len(threads)
+		}
+		detailed := redditFetchThreadDetails(threads[:maxFetch], maxFetch, 2*time.Second, progress)
+
+		// Build summaries for frontend
+		type threadSummary struct {
+			ID          string    `json:"id"`
+			Subreddit   string    `json:"subreddit"`
+			Title       string    `json:"title"`
+			Score       int       `json:"score"`
+			UpvoteRatio float64   `json:"upvote_ratio"`
+			NumComments int       `json:"num_comments"`
+			Permalink   string    `json:"permalink"`
+			CreatedUTC  time.Time `json:"created_utc"`
+			IsSelfPost  bool      `json:"is_self_post"`
+			HasComments bool      `json:"has_comments"`
+		}
+		summaries := make([]threadSummary, len(detailed))
+		for i, t := range detailed {
+			summaries[i] = threadSummary{
+				ID:          t.ID,
+				Subreddit:   t.Subreddit,
+				Title:       t.Title,
+				Score:       t.Score,
+				UpvoteRatio: t.UpvoteRatio,
+				NumComments: t.NumComments,
+				Permalink:   t.Permalink,
+				CreatedUTC:  t.CreatedUTC,
+				IsSelfPost:  t.IsSelfPost,
+				HasComments: len(t.TopComments) > 0,
+			}
+		}
+
+		sendSSE(w, flusher, "done", map[string]any{
+			"threads": summaries,
+			"total":   len(threads),
+		})
+	}
+}
+
+func sortThreadsByScore(threads []RedditThread) {
+	for i := 1; i < len(threads); i++ {
+		for j := i; j > 0 && threads[j].Score > threads[j-1].Score; j-- {
+			threads[j], threads[j-1] = threads[j-1], threads[j]
+		}
+	}
+}
+
+func handleRedditAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
+		}
+		_ = apiKey
+
+		var req struct {
+			Domain            string   `json:"domain"`
+			Config            RedditAnalysisConfig `json:"config"`
+			SelectedThreadIDs []string `json:"selected_thread_ids"`
+			// Full thread data from discovery
+			Threads []RedditThread `json:"threads"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Invalid request body"})
+			return
+		}
+
+		if len(req.Threads) == 0 {
+			sendSSE(w, flusher, "error", map[string]string{"message": "No threads selected for analysis"})
+			return
+		}
+		req.Domain = normalizeDomain(req.Domain)
+
+		brandInfo := lookupBrandContext(mongoDB, req.Domain, saas.TenantIDFromContext(r.Context()))
+
+		// Fetch full thread details with comments for selected threads
+		sendSSE(w, flusher, "status", map[string]string{
+			"message": fmt.Sprintf("Fetching full content for %d threads...", len(req.Threads)),
+		})
+
+		selectedSet := map[string]bool{}
+		for _, id := range req.SelectedThreadIDs {
+			selectedSet[id] = true
+		}
+
+		// Filter to selected threads
+		var threadsToAnalyze []RedditThread
+		for _, t := range req.Threads {
+			if len(selectedSet) == 0 || selectedSet[t.ID] {
+				threadsToAnalyze = append(threadsToAnalyze, t)
+			}
+		}
+
+		// Fetch full thread details with comments
+		detailed := redditFetchThreadDetails(threadsToAnalyze, len(threadsToAnalyze), 2*time.Second, func(msg string) {
+			sendSSE(w, flusher, "status", map[string]string{"message": msg})
+		})
+
+		// Extract competitor names
+		var competitorNames []string
+		if brandInfo.Used {
+			cCtx, cCancel := context.WithTimeout(r.Context(), 5*time.Second)
+			var brand BrandProfile
+			if err := mongoDB.BrandProfiles().FindOne(cCtx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: req.Domain}})).Decode(&brand); err == nil {
+				for _, c := range brand.Competitors {
+					competitorNames = append(competitorNames, c.Name)
+				}
+			}
+			cCancel()
+		}
+
+		// Build the analysis prompt
+		sendSSE(w, flusher, "status", map[string]string{
+			"message": fmt.Sprintf("Analyzing %d Reddit threads for LLM authority signals...", len(detailed)),
+		})
+
+		prompt := buildRedditAuthorityPrompt(req.Domain, detailed, competitorNames, req.Config.SearchTerms, brandInfo)
+
+		// Model fallback chain (same as video)
+		usedModel := ""
+		type modelDef struct {
+			id, name string
+		}
+		models := []modelDef{
+			{"claude-sonnet-4-6", "Sonnet 4.6"},
+			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
+		}
+
+		runAnalysis := func(prompt, phaseName string) (string, string, error) {
+			for mi, model := range models {
+				if mi > 0 {
+					sendSSE(w, flusher, "status", map[string]string{
+						"message": fmt.Sprintf("%s unavailable, falling back to %s for %s...", models[mi-1].name, model.name, phaseName),
+					})
+				}
+
+				claudeBody, _ := json.Marshal(map[string]any{
+					"model":      model.id,
+					"max_tokens": 65536,
+					"stream":     true,
+					"messages": []map[string]any{
+						{"role": "user", "content": prompt},
+					},
+				})
+
+				const maxRetries = 3
+				backoff := 2 * time.Second
+				var lastErr error
+
+				for attempt := 0; attempt <= maxRetries; attempt++ {
+					if attempt > 0 {
+						sendSSE(w, flusher, "status", map[string]string{
+							"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+						})
+						select {
+						case <-time.After(backoff):
+						case <-r.Context().Done():
+							return "", "", fmt.Errorf("request cancelled")
+						}
+						backoff *= 2
+					}
+
+					result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+					if err == errOverloaded {
+						lastErr = err
+						if attempt < maxRetries {
+							continue
+						}
+						break
+					}
+					if err != nil {
+						return "", "", err
+					}
+
+					return result.resultJSON, model.name, nil
+				}
+
+				log.Printf("Claude API (%s) exhausted retries for %s: %v", model.id, phaseName, lastErr)
+			}
+			return "", "", fmt.Errorf("all Claude models overloaded")
+		}
+
+		resultJSON, modelName, err := runAnalysis(prompt, "Reddit Authority")
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Analysis failed: " + err.Error()})
+			return
+		}
+		usedModel = modelName
+
+		resultJSON = stripJSONFencing(resultJSON)
+		var result RedditAuthorityResult
+		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+			log.Printf("Warning: failed to parse reddit authority result: %v", err)
+			sendSSE(w, flusher, "error", map[string]string{"message": "Failed to parse analysis result"})
+			return
+		}
+
+		sendSSE(w, flusher, "status", map[string]string{
+			"message": fmt.Sprintf("Analysis complete — Overall Score: %d/100", result.OverallScore),
+		})
+
+		// Convert threads to summaries for storage
+		storedThreads := make([]RedditThreadSummary, len(detailed))
+		for i, t := range detailed {
+			storedThreads[i] = RedditThreadSummary{
+				ID:           t.ID,
+				Subreddit:    t.Subreddit,
+				Title:        t.Title,
+				SelfText:     truncate(t.SelfText, 500),
+				Author:       t.Author,
+				Score:        t.Score,
+				UpvoteRatio:  t.UpvoteRatio,
+				NumComments:  t.NumComments,
+				URL:          t.URL,
+				Permalink:    t.Permalink,
+				CreatedUTC:   t.CreatedUTC,
+				IsSelfPost:   t.IsSelfPost,
+				CommentCount: len(t.TopComments),
+			}
+		}
+
+		// Save results
+		analysis := RedditAnalysis{
+			Domain:           req.Domain,
+			TenantID:         saas.TenantIDFromContext(r.Context()),
+			Config:           req.Config,
+			Threads:          storedThreads,
+			Result:           &result,
+			RawText:          resultJSON,
+			Model:            usedModel,
+			BrandContextUsed: brandInfo.Used,
+			GeneratedAt:      time.Now(),
+		}
+
+		saveCtx, saveCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		_, saveErr := mongoDB.RedditAnalyses().ReplaceOne(saveCtx,
+			tenantFilter(r.Context(), bson.D{{Key: "domain", Value: req.Domain}}),
+			analysis,
+			options.Replace().SetUpsert(true),
+		)
+		saveCancel()
+		if saveErr != nil {
+			log.Printf("Failed to save reddit analysis: %v", saveErr)
+		}
+
+		// Create todos from recommendations
+		if saveErr == nil && len(result.Recommendations) > 0 {
+			go createTodosFromRedditAnalysis(mongoDB, req.Domain, saas.TenantIDFromContext(r.Context()), result.Recommendations)
+		}
+
+		// Build result for frontend
+		resultMap := map[string]any{
+			"domain":             req.Domain,
+			"config":             req.Config,
+			"threads":            storedThreads,
+			"result":             &result,
+			"model":              usedModel,
+			"brand_context_used": brandInfo.Used,
+			"generated_at":       analysis.GeneratedAt,
+		}
+
+		frontendJSON, _ := json.Marshal(resultMap)
+		sendSSE(w, flusher, "done", map[string]any{
+			"result": string(frontendJSON),
+		})
+	}
+}
+
+func createTodosFromRedditAnalysis(mongoDB *MongoDB, domain, tenantID string, recommendations []RedditRecommendation) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, rec := range recommendations {
+		if rec.Priority != "high" && rec.Priority != "medium" {
+			continue
+		}
+		todo := TodoItem{
+			TenantID:       tenantID,
+			SourceType:     "reddit",
+			Domain:         domain,
+			Question:       "Reddit Authority",
+			Action:         rec.Action,
+			Summary:        rec.Action,
+			ExpectedImpact: rec.ExpectedImpact,
+			Dimension:      rec.Dimension,
+			Priority:       rec.Priority,
+			Status:         "todo",
+			CreatedAt:      time.Now(),
+		}
+		if _, err := mongoDB.Todos().InsertOne(ctx, todo); err != nil {
+			log.Printf("Failed to create reddit todo: %v", err)
+		}
+	}
+}
+
+func buildRedditAuthorityPrompt(domain string, threads []RedditThread, competitors, searchTerms []string, brandInfo BrandContextInfo) string {
+	var sb strings.Builder
+	brandName := domain
+	if brandInfo.Used {
+		for _, line := range strings.Split(brandInfo.ContextString, "\n") {
+			if strings.HasPrefix(line, "Company: ") {
+				brandName = strings.TrimPrefix(line, "Company: ")
+				break
+			}
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf(`You are an expert at analyzing Reddit presence for LLM authority optimization.
+
+## Context
+
+**Target Brand**: %s (domain: %s)
+`, brandName, domain))
+
+	if brandInfo.Used {
+		sb.WriteString(fmt.Sprintf("\n**Brand Intelligence**:\n%s\n", brandInfo.ContextString))
+	}
+
+	if len(competitors) > 0 {
+		sb.WriteString(fmt.Sprintf("\n**Key Competitors**: %s\n", strings.Join(competitors, ", ")))
+	}
+
+	if len(searchTerms) > 0 {
+		sb.WriteString(fmt.Sprintf("\n**Search Terms Used**: %s\n", strings.Join(searchTerms, ", ")))
+	}
+
+	sb.WriteString(`
+## Research Context
+
+Reddit is the #2 source for LLM-generated citations, behind only YouTube. Reddit threads—especially highly-upvoted recommendation threads—strongly influence how LLMs answer questions about products, services, and brands. Key dynamics:
+
+1. **Training Data Weight**: Reddit was foundational in LLM training (WebText, Common Crawl). Google pays $60M/year and OpenAI $70M/year for Reddit data access.
+2. **Multi-User Validation**: Upvotes and comment consensus create credibility signals that single-author content cannot match.
+3. **Recommendation Threads**: "Best X for Y" threads are among the most influential for LLM responses to comparison queries.
+4. **Community Authority**: Mentions in authoritative, topic-specific subreddits carry more weight than general subreddits.
+5. **Recency Signal**: Recent discussions with active engagement signal ongoing relevance.
+
+## Task
+
+Analyze the following Reddit threads to assess this brand's Reddit authority—how strongly Reddit discussions would influence LLMs to cite, recommend, or reference this brand.
+
+## Thread Data
+
+`)
+
+	for i, t := range threads {
+		sb.WriteString(fmt.Sprintf("### Thread %d: r/%s — %s\n", i+1, t.Subreddit, t.Title))
+		sb.WriteString(fmt.Sprintf("Score: %d | Upvote Ratio: %.0f%% | Comments: %d | Posted: %s\n",
+			t.Score, t.UpvoteRatio*100, t.NumComments, t.CreatedUTC.Format("2006-01-02")))
+		sb.WriteString(fmt.Sprintf("Permalink: https://reddit.com%s\n", t.Permalink))
+
+		if t.SelfText != "" {
+			text := t.SelfText
+			if len(text) > 1000 {
+				text = text[:1000] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("\n**Post Body**:\n%s\n", text))
+		}
+
+		if len(t.TopComments) > 0 {
+			sb.WriteString("\n**Top Comments**:\n")
+			for j, c := range t.TopComments {
+				if j >= 10 {
+					break
+				}
+				body := c.Body
+				if len(body) > 500 {
+					body = body[:500] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("- [%d pts] %s\n", c.Score, body))
+			}
+		}
+		sb.WriteString("\n---\n\n")
+	}
+
+	sb.WriteString(fmt.Sprintf(`## Output Format
+
+Return a JSON object with the following structure. ALL scores are 0-100. Be thorough and evidence-based.
+
+{
+  "overall_score": <0-100 weighted average>,
+  "presence": {
+    "score": <0-100>,
+    "evidence": ["evidence point 1", "..."],
+    "total_mentions": <count of threads where %s is explicitly mentioned>,
+    "unique_subreddits": <count of unique subreddits with mentions>,
+    "share_of_voice": [
+      {"brand_name": "%s", "mention_count": <n>, "percentage": <0-100>},
+      {"brand_name": "<competitor>", "mention_count": <n>, "percentage": <0-100>}
+    ],
+    "mention_trend": "growing|stable|declining"
+  },
+  "sentiment": {
+    "score": <0-100>,
+    "evidence": ["..."],
+    "sentiment": {"positive": <n>, "neutral": <n>, "negative": <n>, "total": <n>},
+    "recommendation_rate": <0-100 percent of mentions that recommend the brand>,
+    "top_praise": ["praise theme 1", "..."],
+    "top_criticism": ["criticism theme 1", "..."],
+    "notable_mentions": [
+      {
+        "thread_id": "<id>",
+        "subreddit": "<subreddit>",
+        "title": "<thread title>",
+        "score": <thread score>,
+        "sentiment": "positive|neutral|negative",
+        "context": "<excerpt showing the mention>",
+        "is_recommendation": <true if user recommends the brand>
+      }
+    ]
+  },
+  "competitive": {
+    "score": <0-100>,
+    "evidence": ["..."],
+    "win_rate": <0-100 percent of head-to-head comparisons where brand wins>,
+    "comparison_threads": <count of threads comparing brand to competitors>,
+    "differentiators": ["unique strength cited by Reddit users", "..."],
+    "competitor_strengths": ["competitor advantage not countered", "..."],
+    "head_to_head_examples": [<same format as notable_mentions>]
+  },
+  "training_signal": {
+    "score": <0-100>,
+    "evidence": ["..."],
+    "high_score_threads": <count of threads with 50+ score>,
+    "deep_threads": <count of threads with 10+ comments>,
+    "authority_tier": "strong|moderate|weak",
+    "key_threads": [<most influential threads in notable_mention format>],
+    "recommendations": ["specific action to improve Reddit training signal", "..."]
+  },
+  "executive_summary": "<2-3 paragraph analysis of the brand's Reddit presence and its implications for LLM authority>",
+  "confidence_note": "<brief note on data limitations or confidence level>",
+  "recommendations": [
+    {
+      "action": "<specific actionable recommendation>",
+      "expected_impact": "<expected outcome>",
+      "dimension": "presence|sentiment|competitive|training_signal",
+      "priority": "high|medium|low"
+    }
+  ]
+}
+
+**Scoring Guidelines**:
+- **Presence (25%% weight)**: Volume and breadth of mentions. High = mentioned across many relevant subreddits, frequently. Low = rarely discussed.
+- **Sentiment (25%% weight)**: Tone and recommendation strength. High = frequently recommended, positive consensus. Low = criticized or ignored.
+- **Competitive (25%% weight)**: Position vs. competitors. High = wins head-to-head comparisons, cited as best-in-class. Low = loses comparisons, positioned as inferior.
+- **Training Signal (25%% weight)**: Likelihood that Reddit content will influence LLM training. High = many high-upvote, deep-comment threads in authoritative subreddits. Low = low-engagement or shallow discussions.
+
+Return ONLY the JSON object, no markdown fencing.
+`, brandName, brandName))
+
+	return sb.String()
+}
+
+func handleGetRedditAnalysis(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := normalizeDomain(r.PathValue("domain"))
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		filter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
+		opts := options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}})
+
+		var analysis RedditAnalysis
+		err := mongoDB.RedditAnalyses().FindOne(ctx, filter, opts).Decode(&analysis)
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			} else {
+				http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			}
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(analysis)
+	}
+}
+
+func handleListRedditAnalyses(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		opts := options.Find().
+			SetSort(bson.D{{Key: "generatedAt", Value: -1}}).
+			SetLimit(50).
+			SetProjection(bson.D{
+				{Key: "rawText", Value: 0},
+				{Key: "threads.selfText", Value: 0},
+			})
+
+		cursor, err := mongoDB.RedditAnalyses().Find(ctx, tenantFilter(r.Context(), bson.D{}), opts)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		var results []bson.M
+		if err := cursor.All(ctx, &results); err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		var summaries []map[string]any
+		for _, r := range results {
+			summary := map[string]any{
+				"id":           r["_id"],
+				"domain":       r["domain"],
+				"model":        r["model"],
+				"generated_at": r["generatedAt"],
+			}
+			if res, ok := r["result"].(bson.M); ok {
+				if score, ok := res["overallScore"]; ok {
+					summary["overall_score"] = score
+				}
+			}
+			if threads, ok := r["threads"].(bson.A); ok {
+				summary["thread_count"] = len(threads)
+			} else {
+				summary["thread_count"] = 0
+			}
+			summaries = append(summaries, summary)
+		}
+
+		if summaries == nil {
+			summaries = []map[string]any{}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(summaries)
+	}
+}
+
+func handleDeleteRedditAnalysis(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := normalizeDomain(r.PathValue("domain"))
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		delFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
+		result, err := mongoDB.RedditAnalyses().DeleteOne(ctx, delFilter)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"deleted": result.DeletedCount > 0,
+		})
+	}
+}
+
+// ============================================================
+// Search Visibility Analysis
+// ============================================================
+
+func buildSearchVisibilityPrompt(domain string, brandInfo BrandContextInfo, competitors []string) string {
+	var sb strings.Builder
+	brandName := domain
+	if brandInfo.Used {
+		for _, line := range strings.Split(brandInfo.ContextString, "\n") {
+			if strings.HasPrefix(line, "Company: ") {
+				brandName = strings.TrimPrefix(line, "Company: ")
+				break
+			}
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf(`You are an expert at analyzing search visibility signals that affect whether AI systems — including Google AI Overviews, ChatGPT, Claude, Gemini, and Perplexity — will discover, index, and cite a website's content.
+
+## Context
+
+**Target Brand**: %s (domain: %s)
+`, brandName, domain))
+
+	if brandInfo.Used {
+		sb.WriteString(fmt.Sprintf("\n**Brand Intelligence**:\n%s\n", brandInfo.ContextString))
+	}
+
+	if len(competitors) > 0 {
+		sb.WriteString(fmt.Sprintf("\n**Key Competitors**: %s\n", strings.Join(competitors, ", ")))
+	}
+
+	sb.WriteString(fmt.Sprintf(`
+## Research Context
+
+Search visibility affects AI citation through two distinct pathways:
+
+**Google AI Overviews (strong SEO correlation):**
+- 76%% of AI Overview citations pull from top-10 organic pages (Ahrefs, 1.9M citations study)
+- Being cited in an AIO increases CTR by 80%%+ for that site
+- Reddit (40.1%%) and Wikipedia (26.3%%) dominate AIO citations
+- 82%% of AIOs appear for keywords with <1,000 monthly searches (long-tail dominated)
+
+**Standalone LLMs (weak SEO correlation):**
+- Only 12%% of ChatGPT/Claude/Gemini cited URLs rank in Google's top 10
+- Brand web mentions (0.664 correlation) and YouTube mentions (0.737) are stronger predictors than backlinks (0.37)
+- 28%% of ChatGPT's top-cited pages have zero Google organic visibility
+
+**Crawl Accessibility:**
+- GPTBot grew 305%% YoY; OpenAI's crawl-to-referral ratio is 1,700:1
+- OpenAI, Anthropic, and Perplexity each now run 3 separate bots: training, indexing, and user-fetch
+- Blocking training bots while allowing search bots is a valid strategy; blocking everything hurts AI visibility
+- ~21%% of top-1000 sites block GPTBot
+
+**Content Freshness:**
+- AI assistants cite content that is 25.7%% newer than traditional Google results (Ahrefs, 17M citations)
+- 65%% of AI bot crawl hits target content published within the past year
+- ChatGPT, Perplexity strongly favor recent content; Google AIOs actually prefer older authoritative content
+
+**Brand Search Momentum:**
+- Brand search volume: 0.334 correlation with AI citation frequency
+- Winner-takes-all: brands in top 25%% for web mentions average 169 AI Overview mentions vs 14 for the 50th-75th percentile (12x gap)
+
+## Your Task
+
+Using the web_search tool, conduct a comprehensive search visibility analysis of %s. You must:
+
+1. **Visit the site's robots.txt** — search for "%s robots.txt" and/or try to access it directly. Identify which AI crawlers are explicitly allowed or disallowed (GPTBot, ClaudeBot, PerplexityBot, Googlebot, and their SearchBot/User variants).
+
+2. **Check for structured data** — Visit key pages of the site and check for Schema.org markup (JSON-LD), OpenGraph tags, structured content (tables, FAQ sections, comparison formats).
+
+3. **Assess organic search presence** — Search for the brand name and key product/service terms. How prominently does the site appear in search results? How well does it rank for relevant informational queries?
+
+4. **Evaluate content freshness** — Check publication dates, last-updated indicators, blog/content publishing frequency. Are key pages being regularly updated?
+
+5. **Assess brand search momentum** — Search for the brand name to gauge how well-known it is. Look for web mentions, reviews, news coverage. Compare against any competitors.
+
+6. **Check sitemap** — Search for the site's sitemap.xml and assess its completeness.
+
+Return your analysis as a JSON object with this exact structure:
+
+{
+  "overall_score": <0-100 integer>,
+  "aio_readiness": {
+    "score": <0-100 integer, weighted 30%%>,
+    "evidence": ["specific finding 1", "specific finding 2", ...],
+    "organic_presence": <0-100>,
+    "structured_data": <0-100>,
+    "content_format": <0-100>,
+    "answer_prominence": <0-100>
+  },
+  "crawl_accessibility": {
+    "score": <0-100 integer, weighted 20%%>,
+    "evidence": ["specific finding 1", "specific finding 2", ...],
+    "robots_txt_policy": "<summary of robots.txt AI crawler policy>",
+    "ai_bot_access": <0-100>,
+    "sitemap_quality": <0-100>,
+    "render_accessibility": <0-100>,
+    "crawler_details": [
+      {"name": "GPTBot", "allowed": true/false, "notes": "..."},
+      {"name": "ClaudeBot", "allowed": true/false, "notes": "..."},
+      {"name": "PerplexityBot", "allowed": true/false, "notes": "..."},
+      {"name": "Google-Extended", "allowed": true/false, "notes": "..."},
+      {"name": "Googlebot", "allowed": true/false, "notes": "..."}
+    ]
+  },
+  "brand_momentum": {
+    "score": <0-100 integer, weighted 25%%>,
+    "evidence": ["specific finding 1", "specific finding 2", ...],
+    "brand_search_trend": "growing" | "stable" | "declining",
+    "competitor_compare": "<narrative comparison>",
+    "web_mention_strength": <0-100>,
+    "entity_recognition": <0-100>
+  },
+  "content_freshness": {
+    "score": <0-100 integer, weighted 25%%>,
+    "evidence": ["specific finding 1", "specific finding 2", ...],
+    "average_content_age": "<narrative description>",
+    "update_frequency": "frequent" | "moderate" | "infrequent" | "stale",
+    "freshness_signals": <0-100>,
+    "content_decay_risk": <0-100>
+  },
+  "executive_summary": "<2-3 paragraph summary of search visibility posture and its implications for AI citation>",
+  "confidence_note": "<brief note on data limitations>",
+  "recommendations": [
+    {
+      "action": "<specific action to take>",
+      "priority": "high" | "medium" | "low",
+      "expected_impact": "<what improvement to expect>",
+      "dimension": "<which pillar this addresses>"
+    }
+  ]
+}
+
+IMPORTANT:
+- The overall_score should be a weighted average: AIO Readiness 30%%, Crawl Accessibility 20%%, Brand Momentum 25%%, Content Freshness 25%%
+- Provide 3-6 evidence items per pillar with specific, verifiable findings
+- Include 4-8 prioritized recommendations
+- Be specific and cite actual findings from your searches
+- Return ONLY the JSON object, no markdown fencing or explanation
+`, domain, domain))
+
+	return sb.String()
+}
+
+func handleSearchAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		apiKey, err := resolveAnthropicKey(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Configure your Anthropic API key in Settings", "code": "api_key_required"})
+			return
+		}
+
+		var req struct {
+			Domain string `json:"domain"`
+			Force  bool   `json:"force"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Invalid request body"})
+			return
+		}
+		if req.Domain == "" {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Domain is required"})
+			return
+		}
+		req.Domain = normalizeDomain(req.Domain)
+
+		// Check for cached result (30-day TTL)
+		if !req.Force {
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			var existing SearchAnalysis
+			err := mongoDB.SearchAnalyses().FindOne(ctx,
+				tenantFilter(r.Context(), bson.D{
+					{Key: "domain", Value: req.Domain},
+					{Key: "generatedAt", Value: bson.D{{Key: "$gt", Value: time.Now().AddDate(0, 0, -30)}}},
+				}),
+			).Decode(&existing)
+			cancel()
+			if err == nil && existing.Result != nil {
+				resultMap := map[string]any{
+					"domain":             existing.Domain,
+					"result":             existing.Result,
+					"model":              existing.Model,
+					"brand_context_used": existing.BrandContextUsed,
+					"generated_at":       existing.GeneratedAt,
+				}
+				frontendJSON, _ := json.Marshal(resultMap)
+				sendSSE(w, flusher, "done", map[string]any{
+					"result": string(frontendJSON),
+					"cached": true,
+				})
+				return
+			}
+		}
+
+		brandInfo := lookupBrandContext(mongoDB, req.Domain, saas.TenantIDFromContext(r.Context()))
+
+		// Extract competitor names
+		var competitorNames []string
+		if brandInfo.Used {
+			cCtx, cCancel := context.WithTimeout(r.Context(), 5*time.Second)
+			var brand BrandProfile
+			if err := mongoDB.BrandProfiles().FindOne(cCtx, tenantFilter(r.Context(), bson.D{{Key: "domain", Value: req.Domain}})).Decode(&brand); err == nil {
+				for _, c := range brand.Competitors {
+					competitorNames = append(competitorNames, c.Name)
+				}
+			}
+			cCancel()
+		}
+
+		sendSSE(w, flusher, "status", map[string]string{
+			"message": "Analyzing search visibility signals...",
+		})
+
+		prompt := buildSearchVisibilityPrompt(req.Domain, brandInfo, competitorNames)
+
+		// Model fallback chain
+		usedModel := ""
+		type modelDef struct {
+			id, name string
+		}
+		models := []modelDef{
+			{"claude-sonnet-4-6", "Sonnet 4.6"},
+			{"claude-haiku-4-5-20251001", "Haiku 4.5"},
+		}
+
+		var resultJSON string
+		for mi, model := range models {
+			if mi > 0 {
+				sendSSE(w, flusher, "status", map[string]string{
+					"message": fmt.Sprintf("%s unavailable, falling back to %s...", models[mi-1].name, model.name),
+				})
+			}
+
+			claudeBody, _ := json.Marshal(map[string]any{
+				"model":      model.id,
+				"max_tokens": 65536,
+				"stream":     true,
+				"tools": []map[string]any{
+					{"type": "web_search_20250305", "name": "web_search", "max_uses": 15},
+				},
+				"messages": []map[string]any{
+					{"role": "user", "content": prompt},
+				},
+			})
+
+			const maxRetries = 3
+			backoff := 2 * time.Second
+			var lastErr error
+
+			for attempt := 0; attempt <= maxRetries; attempt++ {
+				if attempt > 0 {
+					sendSSE(w, flusher, "status", map[string]string{
+						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.name, int(backoff.Seconds()), attempt, maxRetries),
+					})
+					select {
+					case <-time.After(backoff):
+					case <-r.Context().Done():
+						sendSSE(w, flusher, "error", map[string]string{"message": "Request cancelled"})
+						return
+					}
+					backoff *= 2
+				}
+
+				result, err := streamClaude(r.Context(), apiKey, claudeBody, w, flusher)
+				if err == errOverloaded {
+					lastErr = err
+					if attempt < maxRetries {
+						continue
+					}
+					break
+				}
+				if err != nil {
+					sendSSE(w, flusher, "error", map[string]string{"message": "Analysis failed: " + err.Error()})
+					return
+				}
+
+				resultJSON = result.resultJSON
+				usedModel = model.name
+				goto done
+			}
+
+			log.Printf("Claude API (%s) exhausted retries: %v", model.id, lastErr)
+		}
+
+		if usedModel == "" {
+			sendSSE(w, flusher, "error", map[string]string{"message": "All Claude models overloaded"})
+			return
+		}
+
+	done:
+		resultJSON = stripJSONFencing(resultJSON)
+		var result SearchVisibilityResult
+		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+			log.Printf("Warning: failed to parse search visibility result: %v", err)
+			sendSSE(w, flusher, "error", map[string]string{"message": "Failed to parse analysis result"})
+			return
+		}
+
+		sendSSE(w, flusher, "status", map[string]string{
+			"message": fmt.Sprintf("Analysis complete — Overall Score: %d/100", result.OverallScore),
+		})
+
+		// Save results
+		analysis := SearchAnalysis{
+			Domain:           req.Domain,
+			TenantID:         saas.TenantIDFromContext(r.Context()),
+			Result:           &result,
+			RawText:          resultJSON,
+			Model:            usedModel,
+			BrandContextUsed: brandInfo.Used,
+			GeneratedAt:      time.Now(),
+		}
+
+		saveCtx, saveCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		_, saveErr := mongoDB.SearchAnalyses().ReplaceOne(saveCtx,
+			tenantFilter(r.Context(), bson.D{{Key: "domain", Value: req.Domain}}),
+			analysis,
+			options.Replace().SetUpsert(true),
+		)
+		saveCancel()
+		if saveErr != nil {
+			log.Printf("Failed to save search analysis: %v", saveErr)
+		}
+
+		// Create todos from recommendations
+		if saveErr == nil && len(result.Recommendations) > 0 {
+			go createTodosFromSearchAnalysis(mongoDB, req.Domain, saas.TenantIDFromContext(r.Context()), result.Recommendations)
+		}
+
+		// Build result for frontend
+		resultMap := map[string]any{
+			"domain":             req.Domain,
+			"result":             &result,
+			"model":              usedModel,
+			"brand_context_used": brandInfo.Used,
+			"generated_at":       analysis.GeneratedAt,
+		}
+
+		frontendJSON, _ := json.Marshal(resultMap)
+		sendSSE(w, flusher, "done", map[string]any{
+			"result": string(frontendJSON),
+		})
+	}
+}
+
+func createTodosFromSearchAnalysis(mongoDB *MongoDB, domain, tenantID string, recommendations []SearchRecommendation) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, rec := range recommendations {
+		if rec.Priority != "high" && rec.Priority != "medium" {
+			continue
+		}
+		todo := TodoItem{
+			TenantID:       tenantID,
+			SourceType:     "search",
+			Domain:         domain,
+			Question:       "Search Visibility",
+			Action:         rec.Action,
+			Summary:        rec.Action,
+			ExpectedImpact: rec.ExpectedImpact,
+			Dimension:      rec.Dimension,
+			Priority:       rec.Priority,
+			Status:         "todo",
+			CreatedAt:      time.Now(),
+		}
+		if _, err := mongoDB.Todos().InsertOne(ctx, todo); err != nil {
+			log.Printf("Failed to create search todo: %v", err)
+		}
+	}
+}
+
+func handleGetSearchAnalysis(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := normalizeDomain(r.PathValue("domain"))
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		var analysis SearchAnalysis
+		err := mongoDB.SearchAnalyses().FindOne(ctx,
+			tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}}),
+		).Decode(&analysis)
+		if err != nil {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(analysis)
+	}
+}
+
+func handleListSearchAnalyses(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		filter := tenantFilter(r.Context(), bson.D{})
+		opts := options.Find().
+			SetSort(bson.D{{Key: "generatedAt", Value: -1}}).
+			SetProjection(bson.D{
+				{Key: "domain", Value: 1},
+				{Key: "result.overall_score", Value: 1},
+				{Key: "model", Value: 1},
+				{Key: "generatedAt", Value: 1},
+			})
+
+		cursor, err := mongoDB.SearchAnalyses().Find(ctx, filter, opts)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+		defer cursor.Close(ctx)
+
+		var summaries []SearchAnalysisSummary
+		for cursor.Next(ctx) {
+			var doc struct {
+				ID          primitive.ObjectID `bson:"_id"`
+				Domain      string             `bson:"domain"`
+				Result      *struct {
+					OverallScore int `bson:"overallScore"`
+				} `bson:"result"`
+				Model       string    `bson:"model"`
+				GeneratedAt time.Time `bson:"generatedAt"`
+			}
+			if err := cursor.Decode(&doc); err != nil {
+				continue
+			}
+			s := SearchAnalysisSummary{
+				ID:          doc.ID,
+				Domain:      doc.Domain,
+				Model:       doc.Model,
+				GeneratedAt: doc.GeneratedAt,
+			}
+			if doc.Result != nil {
+				score := doc.Result.OverallScore
+				s.OverallScore = &score
+			}
+			summaries = append(summaries, s)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(summaries)
+	}
+}
+
+func handleDeleteSearchAnalysis(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := normalizeDomain(r.PathValue("domain"))
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		delFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
+		result, err := mongoDB.SearchAnalyses().DeleteOne(ctx, delFilter)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")

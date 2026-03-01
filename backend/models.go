@@ -250,15 +250,18 @@ type DomainSummaryResult struct {
 }
 
 type DomainSummary struct {
-	ID              primitive.ObjectID   `json:"id" bson:"_id,omitempty"`
-	TenantID        string               `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
-	Domain          string               `json:"domain" bson:"domain"`
-	Result          DomainSummaryResult  `json:"result" bson:"result"`
-	RawText         string               `json:"raw_text" bson:"rawText"`
-	Model           string               `json:"model" bson:"model"`
-	OptimizationIDs []primitive.ObjectID `json:"optimization_ids" bson:"optimizationIds"`
-	ReportCount     int                  `json:"report_count" bson:"reportCount"`
-	GeneratedAt     time.Time            `json:"generated_at" bson:"generatedAt"`
+	ID               primitive.ObjectID   `json:"id" bson:"_id,omitempty"`
+	TenantID         string               `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
+	Domain           string               `json:"domain" bson:"domain"`
+	Result           DomainSummaryResult  `json:"result" bson:"result"`
+	RawText          string               `json:"raw_text" bson:"rawText"`
+	Model            string               `json:"model" bson:"model"`
+	OptimizationIDs  []primitive.ObjectID `json:"optimization_ids" bson:"optimizationIds"`
+	ReportCount      int                  `json:"report_count" bson:"reportCount"`
+	IncludesAnalysis bool                 `json:"includes_analysis" bson:"includesAnalysis"`
+	IncludesVideo    bool                 `json:"includes_video" bson:"includesVideo"`
+	IncludesReddit   bool                 `json:"includes_reddit" bson:"includesReddit"`
+	GeneratedAt      time.Time            `json:"generated_at" bson:"generatedAt"`
 }
 
 // Video Authority Analyzer types
@@ -475,6 +478,34 @@ type DomainShare struct {
 	UpdatedAt  time.Time          `json:"updated_at" bson:"updatedAt"`
 }
 
+// BrandScreenshot stores a captured homepage screenshot for a popular brand.
+type BrandScreenshot struct {
+	ID          primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	Domain      string             `json:"domain" bson:"domain"`
+	ImageData   []byte             `json:"-" bson:"imageData"`
+	ContentType string             `json:"content_type" bson:"contentType"`
+	Width       int                `json:"width" bson:"width"`
+	Height      int                `json:"height" bson:"height"`
+	SizeBytes   int                `json:"size_bytes" bson:"sizeBytes"`
+	CapturedAt  time.Time          `json:"captured_at" bson:"capturedAt"`
+	Error       string             `json:"error,omitempty" bson:"error,omitempty"`
+}
+
+// Tenant API key management
+
+type TenantAPIKey struct {
+	ID             primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	TenantID       string             `json:"tenant_id" bson:"tenantId"`
+	Provider       string             `json:"provider" bson:"provider"`                              // "anthropic", "openai", "grok", "gemini"
+	EncryptedKey   string             `json:"-" bson:"encryptedKey"`
+	KeyPrefix      string             `json:"key_prefix" bson:"keyPrefix"`                           // first 8 chars for display
+	PreferredModel string             `json:"preferred_model,omitempty" bson:"preferredModel,omitempty"`
+	Status         string             `json:"status" bson:"status"`                                  // "active", "invalid", "no_credits"
+	LastVerifiedAt *time.Time         `json:"last_verified_at,omitempty" bson:"lastVerifiedAt,omitempty"`
+	CreatedAt      time.Time          `json:"created_at" bson:"createdAt"`
+	UpdatedAt      time.Time          `json:"updated_at" bson:"updatedAt"`
+}
+
 // YouTube API cache
 
 type YouTubeCache struct {
@@ -483,4 +514,238 @@ type YouTubeCache struct {
 	Data      string             `json:"data" bson:"data"`
 	CachedAt  time.Time          `json:"cached_at" bson:"cachedAt"`
 	ExpiresAt time.Time          `json:"expires_at" bson:"expiresAt"`
+}
+
+// Reddit Authority Analyzer types
+
+type RedditAnalysisConfig struct {
+	Subreddits  []string `json:"subreddits" bson:"subreddits"`
+	SearchTerms []string `json:"search_terms" bson:"searchTerms"`
+	BrandURL    string   `json:"brand_url" bson:"brandUrl"`
+	TimeFilter  string   `json:"time_filter" bson:"timeFilter"` // "month", "year", "all"
+}
+
+// RedditThreadSummary is the stored version of a thread (without full comments for space).
+type RedditThreadSummary struct {
+	ID          string    `json:"id" bson:"id"`
+	Subreddit   string    `json:"subreddit" bson:"subreddit"`
+	Title       string    `json:"title" bson:"title"`
+	SelfText    string    `json:"self_text" bson:"selfText"`
+	Author      string    `json:"author" bson:"author"`
+	Score       int       `json:"score" bson:"score"`
+	UpvoteRatio float64   `json:"upvote_ratio" bson:"upvoteRatio"`
+	NumComments int       `json:"num_comments" bson:"numComments"`
+	URL         string    `json:"url" bson:"url"`
+	Permalink   string    `json:"permalink" bson:"permalink"`
+	CreatedUTC  time.Time `json:"created_utc" bson:"createdUtc"`
+	IsSelfPost  bool      `json:"is_self_post" bson:"isSelfPost"`
+	CommentCount int      `json:"comment_count" bson:"commentCount"` // top comments fetched
+}
+
+// Reddit pillar types for the 4-pillar report
+
+type RedditShareOfVoice struct {
+	BrandName    string  `json:"brand_name" bson:"brandName"`
+	MentionCount int     `json:"mention_count" bson:"mentionCount"`
+	Percentage   float64 `json:"percentage" bson:"percentage"`
+}
+
+type RedditMentionExample struct {
+	ThreadID     string `json:"thread_id" bson:"threadId"`
+	Subreddit    string `json:"subreddit" bson:"subreddit"`
+	Title        string `json:"title" bson:"title"`
+	Score        int    `json:"score" bson:"score"`
+	Sentiment    string `json:"sentiment" bson:"sentiment"` // positive, neutral, negative
+	Context      string `json:"context" bson:"context"`     // excerpt showing mention
+	IsRecommendation bool `json:"is_recommendation" bson:"isRecommendation"`
+}
+
+type RedditPresencePillar struct {
+	Score            int                  `json:"score" bson:"score"`
+	Evidence         []string             `json:"evidence" bson:"evidence"`
+	TotalMentions    int                  `json:"total_mentions" bson:"totalMentions"`
+	UniqueSubreddits int                  `json:"unique_subreddits" bson:"uniqueSubreddits"`
+	ShareOfVoice     []RedditShareOfVoice `json:"share_of_voice" bson:"shareOfVoice"`
+	MentionTrend     string               `json:"mention_trend" bson:"mentionTrend"` // growing, stable, declining
+}
+
+type RedditSentimentPillar struct {
+	Score              int                    `json:"score" bson:"score"`
+	Evidence           []string               `json:"evidence" bson:"evidence"`
+	Sentiment          SentimentBreakdown     `json:"sentiment" bson:"sentiment"`
+	RecommendationRate int                    `json:"recommendation_rate" bson:"recommendationRate"` // % of mentions that recommend
+	TopPraise          []string               `json:"top_praise" bson:"topPraise"`
+	TopCriticism       []string               `json:"top_criticism" bson:"topCriticism"`
+	NotableMentions    []RedditMentionExample `json:"notable_mentions" bson:"notableMentions"`
+}
+
+type RedditCompetitivePillar struct {
+	Score               int                    `json:"score" bson:"score"`
+	Evidence            []string               `json:"evidence" bson:"evidence"`
+	WinRate             int                    `json:"win_rate" bson:"winRate"` // % of head-to-head mentions where brand wins
+	ComparisonThreads   int                    `json:"comparison_threads" bson:"comparisonThreads"`
+	Differentiators     []string               `json:"differentiators" bson:"differentiators"`
+	CompetitorStrengths []string               `json:"competitor_strengths" bson:"competitorStrengths"`
+	HeadToHeadExamples  []RedditMentionExample `json:"head_to_head_examples" bson:"headToHeadExamples"`
+}
+
+type RedditTrainingSignalPillar struct {
+	Score             int      `json:"score" bson:"score"`
+	Evidence          []string `json:"evidence" bson:"evidence"`
+	HighScoreThreads  int      `json:"high_score_threads" bson:"highScoreThreads"`   // threads with 50+ upvotes
+	DeepThreads       int      `json:"deep_threads" bson:"deepThreads"`               // threads with 10+ comments
+	AuthorityTier     string   `json:"authority_tier" bson:"authorityTier"`           // strong, moderate, weak
+	KeyThreads        []RedditMentionExample `json:"key_threads" bson:"keyThreads"` // threads likely to influence LLMs
+	Recommendations   []string `json:"recommendations" bson:"recommendations"`
+}
+
+// RedditRecommendation is a structured action item from Reddit analysis.
+type RedditRecommendation struct {
+	Action         string `json:"action" bson:"action"`
+	ExpectedImpact string `json:"expected_impact" bson:"expectedImpact"`
+	Dimension      string `json:"dimension" bson:"dimension"` // presence, sentiment, competitive, training_signal
+	Priority       string `json:"priority" bson:"priority"`   // high, medium, low
+}
+
+type RedditAuthorityResult struct {
+	OverallScore     int                        `json:"overall_score" bson:"overallScore"`
+	Presence         RedditPresencePillar       `json:"presence" bson:"presence"`
+	Sentiment        RedditSentimentPillar      `json:"sentiment" bson:"sentiment"`
+	Competitive      RedditCompetitivePillar    `json:"competitive" bson:"competitive"`
+	TrainingSignal   RedditTrainingSignalPillar `json:"training_signal" bson:"trainingSignal"`
+	ExecutiveSummary string                     `json:"executive_summary" bson:"executiveSummary"`
+	ConfidenceNote   string                     `json:"confidence_note" bson:"confidenceNote"`
+	Recommendations  []RedditRecommendation     `json:"recommendations" bson:"recommendations"`
+}
+
+// Top-level Reddit analysis document
+type RedditAnalysis struct {
+	ID               primitive.ObjectID      `json:"id" bson:"_id,omitempty"`
+	TenantID         string                  `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
+	Domain           string                  `json:"domain" bson:"domain"`
+	Config           RedditAnalysisConfig    `json:"config" bson:"config"`
+	Threads          []RedditThreadSummary   `json:"threads" bson:"threads"`
+	Result           *RedditAuthorityResult  `json:"result,omitempty" bson:"result,omitempty"`
+	RawText          string                  `json:"raw_text" bson:"rawText"`
+	Model            string                  `json:"model" bson:"model"`
+	BrandContextUsed bool                    `json:"brand_context_used" bson:"brandContextUsed"`
+	GeneratedAt      time.Time               `json:"generated_at" bson:"generatedAt"`
+}
+
+type RedditCache struct {
+	ID        primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	CacheKey  string             `json:"cache_key" bson:"cacheKey"`
+	Data      string             `json:"data" bson:"data"`
+	CachedAt  time.Time          `json:"cached_at" bson:"cachedAt"`
+	ExpiresAt time.Time          `json:"expires_at" bson:"expiresAt"`
+}
+
+// --- Search Visibility Analysis models ---
+
+type SearchVisibilityResult struct {
+	OverallScore      int                        `json:"overall_score" bson:"overallScore"`
+	AIOReadiness      AIOReadinessPillar         `json:"aio_readiness" bson:"aioReadiness"`
+	CrawlAccess       CrawlAccessibilityPillar   `json:"crawl_accessibility" bson:"crawlAccessibility"`
+	BrandMomentum     BrandSearchMomentumPillar  `json:"brand_momentum" bson:"brandMomentum"`
+	ContentFreshness  ContentFreshnessPillar     `json:"content_freshness" bson:"contentFreshness"`
+	ExecutiveSummary  string                     `json:"executive_summary" bson:"executiveSummary"`
+	ConfidenceNote    string                     `json:"confidence_note" bson:"confidenceNote"`
+	Recommendations   []SearchRecommendation     `json:"recommendations" bson:"recommendations"`
+}
+
+type AIOReadinessPillar struct {
+	Score             int      `json:"score" bson:"score"`
+	Evidence          []string `json:"evidence" bson:"evidence"`
+	OrganicPresence   int      `json:"organic_presence" bson:"organicPresence"`       // 0-100: estimated presence in top results
+	StructuredData    int      `json:"structured_data" bson:"structuredData"`         // 0-100: Schema.org / rich markup quality
+	ContentFormat     int      `json:"content_format" bson:"contentFormat"`           // 0-100: alignment with AIO-preferred formats
+	AnswerProminence  int      `json:"answer_prominence" bson:"answerProminence"`     // 0-100: front-loaded, concise answers
+}
+
+type CrawlAccessibilityPillar struct {
+	Score              int      `json:"score" bson:"score"`
+	Evidence           []string `json:"evidence" bson:"evidence"`
+	RobotsTxtPolicy    string   `json:"robots_txt_policy" bson:"robotsTxtPolicy"`       // e.g. "allows all AI crawlers", "blocks GPTBot", etc.
+	AIBotAccess        int      `json:"ai_bot_access" bson:"aiBotAccess"`               // 0-100: how open to AI crawlers
+	SitemapQuality     int      `json:"sitemap_quality" bson:"sitemapQuality"`           // 0-100
+	RenderAccessibility int     `json:"render_accessibility" bson:"renderAccessibility"` // 0-100: JS-rendering, accessibility
+	CrawlerDetails     []CrawlerStatus `json:"crawler_details" bson:"crawlerDetails"`
+}
+
+type CrawlerStatus struct {
+	Name    string `json:"name" bson:"name"`       // e.g. "GPTBot", "ClaudeBot", "PerplexityBot"
+	Allowed bool   `json:"allowed" bson:"allowed"`
+	Notes   string `json:"notes" bson:"notes"`
+}
+
+type BrandSearchMomentumPillar struct {
+	Score             int      `json:"score" bson:"score"`
+	Evidence          []string `json:"evidence" bson:"evidence"`
+	BrandSearchTrend  string   `json:"brand_search_trend" bson:"brandSearchTrend"` // "growing", "stable", "declining"
+	CompetitorCompare string   `json:"competitor_compare" bson:"competitorCompare"` // narrative
+	WebMentionStrength int     `json:"web_mention_strength" bson:"webMentionStrength"` // 0-100
+	EntityRecognition  int     `json:"entity_recognition" bson:"entityRecognition"`   // 0-100: how well-known the brand entity is
+}
+
+type ContentFreshnessPillar struct {
+	Score              int      `json:"score" bson:"score"`
+	Evidence           []string `json:"evidence" bson:"evidence"`
+	AverageContentAge  string   `json:"average_content_age" bson:"averageContentAge"` // narrative (e.g. "Most content is 6-12 months old")
+	UpdateFrequency    string   `json:"update_frequency" bson:"updateFrequency"`     // "frequent", "moderate", "infrequent", "stale"
+	FreshnessSignals   int      `json:"freshness_signals" bson:"freshnessSignals"`   // 0-100: presence of dates, last-modified, etc.
+	ContentDecayRisk   int      `json:"content_decay_risk" bson:"contentDecayRisk"`  // 0-100: how many key pages are aging out
+}
+
+type SearchRecommendation struct {
+	Action         string `json:"action" bson:"action"`
+	Priority       string `json:"priority" bson:"priority"` // "high", "medium", "low"
+	ExpectedImpact string `json:"expected_impact" bson:"expectedImpact"`
+	Dimension      string `json:"dimension" bson:"dimension"` // which pillar
+}
+
+type SearchAnalysis struct {
+	ID               primitive.ObjectID       `json:"id" bson:"_id,omitempty"`
+	TenantID         string                   `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
+	Domain           string                   `json:"domain" bson:"domain"`
+	Result           *SearchVisibilityResult  `json:"result,omitempty" bson:"result,omitempty"`
+	RawText          string                   `json:"raw_text" bson:"rawText"`
+	Model            string                   `json:"model" bson:"model"`
+	BrandContextUsed bool                     `json:"brand_context_used" bson:"brandContextUsed"`
+	GeneratedAt      time.Time                `json:"generated_at" bson:"generatedAt"`
+}
+
+type SearchAnalysisSummary struct {
+	ID           primitive.ObjectID `json:"id" bson:"_id"`
+	Domain       string             `json:"domain" bson:"domain"`
+	OverallScore *int               `json:"overall_score,omitempty"`
+	Model        string             `json:"model" bson:"model"`
+	GeneratedAt  time.Time          `json:"generated_at" bson:"generatedAt"`
+}
+
+// ReportPDF stores a cached aggregate PDF report for a domain.
+type ReportPDF struct {
+	ID          primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	TenantID    string             `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
+	Domain      string             `json:"domain" bson:"domain"`
+	PDFData     []byte             `json:"-" bson:"pdfData"`
+	SizeBytes   int                `json:"size_bytes" bson:"sizeBytes"`
+	Fingerprint ReportFingerprint  `json:"fingerprint" bson:"fingerprint"`
+	GeneratedAt time.Time          `json:"generated_at" bson:"generatedAt"`
+}
+
+// ReportFingerprint captures the latest timestamps from each data source.
+// If any source timestamp changes, the cached PDF is stale.
+type ReportFingerprint struct {
+	LatestOptimizationAt *time.Time `json:"latest_optimization_at,omitempty" bson:"latestOptimizationAt,omitempty"`
+	AnalysisCreatedAt    *time.Time `json:"analysis_created_at,omitempty" bson:"analysisCreatedAt,omitempty"`
+	VideoGeneratedAt     *time.Time `json:"video_generated_at,omitempty" bson:"videoGeneratedAt,omitempty"`
+	RedditGeneratedAt    *time.Time `json:"reddit_generated_at,omitempty" bson:"redditGeneratedAt,omitempty"`
+	SummaryGeneratedAt   *time.Time `json:"summary_generated_at,omitempty" bson:"summaryGeneratedAt,omitempty"`
+	SearchGeneratedAt    *time.Time `json:"search_generated_at,omitempty" bson:"searchGeneratedAt,omitempty"`
+	LatestTodoAt         *time.Time `json:"latest_todo_at,omitempty" bson:"latestTodoAt,omitempty"`
+	OptimizationCount    int        `json:"optimization_count" bson:"optimizationCount"`
+	AnalysisExists       bool       `json:"analysis_exists" bson:"analysisExists"`
+	VideoExists          bool       `json:"video_exists" bson:"videoExists"`
+	RedditExists         bool       `json:"reddit_exists" bson:"redditExists"`
+	SearchExists         bool       `json:"search_exists" bson:"searchExists"`
 }

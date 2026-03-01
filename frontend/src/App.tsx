@@ -171,17 +171,11 @@ interface DomainSummary {
   model: string
   optimization_ids: string[]
   report_count: number
+  includes_analysis: boolean
+  includes_video: boolean
+  includes_reddit: boolean
   generated_at: string
 }
-interface DomainSummaryStatus {
-  exists: boolean
-  generated_at?: string
-  included_count?: number
-  total_report_count: number
-  newer_report_count?: number
-  stale?: boolean
-}
-
 interface HealthTimelineRecord {
   id: string
   models: { model: string; name: string; status: string; latency_ms?: number }[]
@@ -453,7 +447,7 @@ interface VideoDetail {
 
 type VideoView = 'input' | 'discovering' | 'review' | 'running' | 'results' | 'transcripts'
 
-type OptimizeView = 'list' | 'detail' | 'running' | 'summary' | 'generating-summary'
+type OptimizeView = 'list' | 'detail' | 'running'
 
 interface ModelStatus {
   model: string
@@ -469,8 +463,149 @@ interface HealthCheck {
   checked_at: string
 }
 
+// Reddit Authority types
+
+interface RedditMentionExample {
+  thread_id: string
+  subreddit: string
+  title: string
+  score: number
+  sentiment: string
+  context: string
+  is_recommendation: boolean
+}
+
+interface RedditShareOfVoice {
+  brand_name: string
+  mention_count: number
+  percentage: number
+}
+
+interface RedditPresencePillar {
+  score: number
+  evidence: string[]
+  total_mentions: number
+  unique_subreddits: number
+  share_of_voice: RedditShareOfVoice[]
+  mention_trend: string
+}
+
+interface RedditSentimentPillar {
+  score: number
+  evidence: string[]
+  sentiment: SentimentBreakdown
+  recommendation_rate: number
+  top_praise: string[]
+  top_criticism: string[]
+  notable_mentions: RedditMentionExample[]
+}
+
+interface RedditCompetitivePillar {
+  score: number
+  evidence: string[]
+  win_rate: number
+  comparison_threads: number
+  differentiators: string[]
+  competitor_strengths: string[]
+  head_to_head_examples: RedditMentionExample[]
+}
+
+interface RedditTrainingSignalPillar {
+  score: number
+  evidence: string[]
+  high_score_threads: number
+  deep_threads: number
+  authority_tier: string
+  key_threads: RedditMentionExample[]
+  recommendations: string[]
+}
+
+interface RedditRecommendation {
+  action: string
+  expected_impact: string
+  dimension: string
+  priority: string
+}
+
+interface RedditAuthorityResult {
+  overall_score: number
+  presence: RedditPresencePillar
+  sentiment: RedditSentimentPillar
+  competitive: RedditCompetitivePillar
+  training_signal: RedditTrainingSignalPillar
+  executive_summary: string
+  confidence_note: string
+  recommendations: RedditRecommendation[]
+}
+
+interface RedditThreadSummary {
+  id: string
+  subreddit: string
+  title: string
+  self_text?: string
+  author: string
+  score: number
+  upvote_ratio: number
+  num_comments: number
+  url: string
+  permalink: string
+  created_utc: string
+  is_self_post: boolean
+  comment_count?: number
+}
+
+interface RedditAnalysis {
+  id: string
+  domain: string
+  config: { subreddits: string[]; search_terms: string[]; brand_url: string; time_filter: string }
+  threads: RedditThreadSummary[]
+  result?: RedditAuthorityResult
+  model: string
+  brand_context_used: boolean
+  generated_at: string
+}
+
+interface RedditAnalysisSummary {
+  id: string
+  domain: string
+  overall_score?: number
+  thread_count: number
+  model: string
+  generated_at: string
+}
+
+type RedditView = 'input' | 'discovering' | 'review' | 'running' | 'results'
+
+interface SearchVisibilityResult {
+  overall_score: number
+  aio_readiness: { score: number; evidence: string[]; organic_presence: number; structured_data: number; content_format: number; answer_prominence: number }
+  crawl_accessibility: { score: number; evidence: string[]; robots_txt_policy: string; ai_bot_access: number; sitemap_quality: number; render_accessibility: number; crawler_details: { name: string; allowed: boolean; notes: string }[] }
+  brand_momentum: { score: number; evidence: string[]; brand_search_trend: string; competitor_compare: string; web_mention_strength: number; entity_recognition: number }
+  content_freshness: { score: number; evidence: string[]; average_content_age: string; update_frequency: string; freshness_signals: number; content_decay_risk: number }
+  executive_summary: string
+  confidence_note: string
+  recommendations: { action: string; priority: string; expected_impact: string; dimension: string }[]
+}
+
+interface SearchAnalysis {
+  id: string
+  domain: string
+  result?: SearchVisibilityResult
+  model: string
+  brand_context_used: boolean
+  generated_at: string
+}
+
+interface SearchAnalysisSummary {
+  id: string
+  domain: string
+  overall_score?: number
+  model: string
+  generated_at: string
+}
+
 type AppState = 'idle' | 'analyzing' | 'done' | 'error'
-type ActiveTab = 'analyze' | 'status' | 'optimize' | 'todos' | 'brand' | 'video'
+type ActiveTab = 'analyze' | 'status' | 'optimize' | 'todos' | 'brand' | 'video' | 'reddit' | 'search'
 
 const CATEGORY_COLORS = [
   'bg-primary-500/20 text-primary-300 border-primary-500/30',
@@ -525,7 +660,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
     const params = new URLSearchParams(window.location.search)
     const tab = params.get('tab')
-    const validTabs: ActiveTab[] = ['analyze', 'status', 'optimize', 'todos', 'brand', 'video']
+    const validTabs: ActiveTab[] = ['analyze', 'status', 'optimize', 'todos', 'brand', 'video', 'reddit', 'search']
     if (tab && validTabs.includes(tab as ActiveTab)) return tab as ActiveTab
     return 'analyze'
   })
@@ -551,10 +686,8 @@ export default function App() {
   const [optTodos, setOptTodos] = useState<TodoItem[]>([])
 
   // Domain summary state
-  const [summaryStatuses, setSummaryStatuses] = useState<Record<string, DomainSummaryStatus>>({})
   const [activeSummary, setActiveSummary] = useState<DomainSummary | null>(null)
   const [activeSummaryStale, setActiveSummaryStale] = useState(false)
-  const [activeSummaryDomain, setActiveSummaryDomain] = useState('')
   const [generatingSummary, setGeneratingSummary] = useState(false)
   const [summaryMessages, setSummaryMessages] = useState<string[]>([])
 
@@ -575,20 +708,23 @@ export default function App() {
   const [domainShareState, setDomainShareState] = useState<{ visibility: string; share_id: string; share_url: string } | null>(null)
   const [shareLoading, setShareLoading] = useState(false)
   const [shareCopied, setShareCopied] = useState(false)
-  const [popularDomains, setPopularDomains] = useState<{ domain: string; brand_name: string; share_id: string; avg_score: number; report_count: number; analysis_count?: number; has_video?: boolean }[]>([])
+  const [popularDomains, setPopularDomains] = useState<{ domain: string; brand_name: string; share_id: string; avg_score: number; report_count: number; analysis_count?: number; has_video?: boolean; has_screenshot?: boolean }[]>([])
 
   // Shared view mode (read-only /share/{shareId} URL)
-  const [sharedMode, setSharedMode] = useState(false)
+  const isShareURL = /^\/share\/[A-Za-z0-9]+$/.test(window.location.pathname)
+  const [sharedMode, setSharedMode] = useState(isShareURL)
   const [sharedLoading, setSharedLoading] = useState(false)
   const [sharedNotFound, setSharedNotFound] = useState(false)
-  const sharedModeRef = useRef(false)
+  const sharedModeRef = useRef(isShareURL)
   const [sharedOptimizations, setSharedOptimizations] = useState<FullOptimization[]>([])
 
   // Modals for optimize question click + auth/subscription gating
   const [optimizeConfirmQ, setOptimizeConfirmQ] = useState<number | null>(null) // question index for confirmation
   const [readOnlyOptModal, setReadOnlyOptModal] = useState<string | null>(null) // brand name for "not ready" modal
   const [subscriptionModal, setSubscriptionModal] = useState(false)
+  const [apiKeyModal, setApiKeyModal] = useState(false)
   const [loginModal, setLoginModal] = useState(false)
+  const [showResearch, setShowResearch] = useState(false)
 
   // Brand Intelligence state
   const [brandProfile, setBrandProfile] = useState<BrandProfile | null>(null)
@@ -647,6 +783,7 @@ export default function App() {
   const [videoURLs, setVideoURLs] = useState<string[]>([''])
   const [videoBrandURL, setVideoBrandURL] = useState('')
   const [videoSearchTerms, setVideoSearchTerms] = useState<string[]>([])
+  const [videoSearchTermSources, setVideoSearchTermSources] = useState<Map<string, 'brand' | 'optimization'>>(new Map())
   const [videoSearchTermInput, setVideoSearchTermInput] = useState('')
   const [videoDiscovering, setVideoDiscovering] = useState(false)
   const [discoveredVideos, setDiscoveredVideos] = useState<YouTubeVideo[]>([])
@@ -668,7 +805,47 @@ export default function App() {
   // Video review filters
   const [videoFilterTags, setVideoFilterTags] = useState<Set<string>>(new Set(['own', 'direct_mention', 'competitor_comparison', 'category_content']))
   const [videoFilterMinViews, setVideoFilterMinViews] = useState(0)
-  const [videoFilterRecency, setVideoFilterRecency] = useState<'30d' | '90d' | '1y' | '3y' | 'all'>('all')
+  const [videoFilterRecency, setVideoFilterRecency] = useState<'30d' | '90d' | '1y' | '3y' | 'all'>('1y')
+
+  // Reddit Authority state
+  const [redditView, setRedditView] = useState<RedditView>('input')
+  const [redditSubreddits, setRedditSubreddits] = useState<string[]>([])
+  const [redditSubredditInput, setRedditSubredditInput] = useState('')
+  const [redditSearchTerms, setRedditSearchTerms] = useState<string[]>([])
+  const [redditSearchTermSources, setRedditSearchTermSources] = useState<Map<string, 'brand' | 'optimization'>>(new Map())
+  const [redditSearchTermInput, setRedditSearchTermInput] = useState('')
+  const [redditDiscovering, setRedditDiscovering] = useState(false)
+  const [discoveredThreads, setDiscoveredThreads] = useState<RedditThreadSummary[]>([])
+  const [selectedThreadIds, setSelectedThreadIds] = useState<Set<string>>(new Set())
+  const [redditAnalyzing, setRedditAnalyzing] = useState(false)
+  const redditAbortRef = useRef<AbortController | null>(null)
+  const [redditMessages, setRedditMessages] = useState<string[]>([])
+  const [redditAnalysis, setRedditAnalysis] = useState<RedditAnalysis | null>(null)
+  const [redditAnalysisList, setRedditAnalysisList] = useState<RedditAnalysisSummary[]>([])
+  const [redditDomain, setRedditDomain] = useState('')
+  const [confirmDeleteRedditAnalysis, setConfirmDeleteRedditAnalysis] = useState(false)
+  const [redditSettingsOpen, setRedditSettingsOpen] = useState(false)
+  const [redditTimeFilter, setRedditTimeFilter] = useState<'month' | 'year' | 'all'>('year')
+  const [redditAutoArchive, setRedditAutoArchive] = useState(true)
+
+  // Search Visibility state
+  const [searchAnalyzing, setSearchAnalyzing] = useState(false)
+  const searchAbortRef = useRef<AbortController | null>(null)
+  const [searchMessages, setSearchMessages] = useState<string[]>([])
+  const [searchAnalysis, setSearchAnalysis] = useState<SearchAnalysis | null>(null)
+  const [searchAnalysisList, setSearchAnalysisList] = useState<SearchAnalysisSummary[]>([])
+  const [confirmDeleteSearchAnalysis, setConfirmDeleteSearchAnalysis] = useState(false)
+  const [searchAutoArchive, setSearchAutoArchive] = useState(true)
+
+  // Auto-scroll refs for SSE message containers
+  const videoMessagesEndRef = useRef<HTMLDivElement>(null)
+  const redditMessagesEndRef = useRef<HTMLDivElement>(null)
+  const searchMessagesEndRef = useRef<HTMLDivElement>(null)
+
+  // PDF Report state
+  const [pdfGenerating, setPdfGenerating] = useState(false)
+  const [pdfProgress, setPdfProgress] = useState('')
+  const pdfAbortRef = useRef<AbortController | null>(null)
 
   // SaaS auth state
   const [saasEnabled, setSaasEnabled] = useState(false)
@@ -677,6 +854,9 @@ export default function App() {
   const [showCredits, setShowCredits] = useState(false)
   const [tenantCredits, setTenantCredits] = useState(0)
   const [hasActivePlan, setHasActivePlan] = useState(false)
+  const [apiKeyStatus, setApiKeyStatus] = useState<'active' | 'invalid' | 'no_credits' | 'unconfigured'>('unconfigured')
+  const [userTenantRole, setUserTenantRole] = useState<string>('')
+  const [welcomeKeyModal, setWelcomeKeyModal] = useState(false)
 
   useEffect(() => {
     apiFetch('/api/config').then(r => r.ok ? r.json() : null).then(data => {
@@ -691,6 +871,16 @@ export default function App() {
             setShowCredits(hasCredits)
             setTenantCredits((plans.tenantSubscriptionCredits || 0) + (plans.tenantPurchasedCredits || 0))
             setHasActivePlan(plans.billingStatus === 'active' || plans.billingWaived === true)
+          }
+        }).catch(() => {})
+        // Fetch API key status
+        apiFetch('/api/settings/api-keys/status').then(r => r.ok ? r.json() : null).then(data => {
+          if (data?.status) setApiKeyStatus(data.status)
+          if (data?.role) setUserTenantRole(data.role)
+          // Show welcome modal once per session for owners who haven't set up API keys yet
+          if (data?.role === 'owner' && data?.status === 'unconfigured' && !sessionStorage.getItem('llmopt_welcome_key_shown')) {
+            sessionStorage.setItem('llmopt_welcome_key_shown', '1')
+            setWelcomeKeyModal(true)
           }
         }).catch(() => {})
       }
@@ -813,42 +1003,19 @@ export default function App() {
       .sort((a, b) => new Date(b.latestDate).getTime() - new Date(a.latestDate).getTime())
   }, [history, optList, brandList, videoAnalysisList, todos])
 
-  const fetchSummaryStatuses = useCallback(async (domains: string[]) => {
-    const statuses: Record<string, DomainSummaryStatus> = {}
-    await Promise.all(domains.map(async (domain) => {
-      try {
-        const res = await apiFetch(`/api/domains/${encodeURIComponent(domain)}/summary/status`)
-        if (res.ok) statuses[domain] = await res.json()
-      } catch { /* ignore */ }
-    }))
-    setSummaryStatuses(statuses)
-  }, [])
-
-  // Fetch summary statuses when optList changes
-  useEffect(() => {
-    const domains = [...new Set(optList.map(o => o.domain))]
-    if (domains.length > 0) fetchSummaryStatuses(domains)
-  }, [optList, fetchSummaryStatuses])
-
-  const handleSummaryClick = useCallback(async (domain: string) => {
-    setActiveSummaryDomain(domain)
-    const status = summaryStatuses[domain]
-    if (status?.exists) {
-      try {
-        const res = await apiFetch(`/api/domains/${encodeURIComponent(domain)}/summary`)
-        if (res.ok) {
-          const data = await res.json()
-          setActiveSummary(data.summary)
-          setActiveSummaryStale(data.stale)
-          setOptimizeView('summary')
-          return
-        }
-      } catch { /* fall through */ }
-    }
+  const loadSummaryForDomain = useCallback(async (domain: string) => {
+    try {
+      const res = await apiFetch(`/api/domains/${encodeURIComponent(domain)}/summary`)
+      if (res.ok) {
+        const data = await res.json()
+        setActiveSummary(data.summary)
+        setActiveSummaryStale(data.stale)
+        return
+      }
+    } catch { /* ignore */ }
     setActiveSummary(null)
     setActiveSummaryStale(false)
-    setOptimizeView('summary')
-  }, [summaryStatuses])
+  }, [])
 
   const deleteAnalysis = useCallback(async (id: string) => {
     try {
@@ -1197,10 +1364,8 @@ export default function App() {
   }, [])
 
   const generateSummary = useCallback(async (domain: string) => {
-    setActiveSummaryDomain(domain)
     setGeneratingSummary(true)
     setSummaryMessages([])
-    setOptimizeView('generating-summary')
 
     await brandSSE(
       `/api/domains/${encodeURIComponent(domain)}/summary`,
@@ -1215,17 +1380,15 @@ export default function App() {
             setActiveSummary(data.summary)
             setActiveSummaryStale(false)
           } else {
-            setActiveSummary({ id: '', domain, result: parsed, model: '', optimization_ids: [], report_count: 0, generated_at: new Date().toISOString() })
+            setActiveSummary({ id: '', domain, result: parsed, model: '', optimization_ids: [], report_count: 0, includes_analysis: false, includes_video: false, includes_reddit: false, generated_at: new Date().toISOString() })
             setActiveSummaryStale(false)
           }
         } catch {
           setActiveSummary(null)
         }
-        setOptimizeView('summary')
-        fetchSummaryStatuses([...new Set(optList.map(o => o.domain))])
       },
     )
-  }, [brandSSE, fetchSummaryStatuses, optList])
+  }, [brandSSE])
 
   // ── Video Authority callbacks ──
 
@@ -1258,6 +1421,11 @@ export default function App() {
   const prepopulateFromBrand = useCallback((domain: string) => {
     setVideoDomain(domain)
     setVideoBrandURL(domain)
+
+    // Collect optimization questions for this domain
+    const domainOpts = optList.filter(o => domainKey(o.domain) === domainKey(domain))
+    const optQuestions = [...new Set(domainOpts.map(o => o.question))]
+
     // Find brand profile
     const brand = brandList.find(b => b.domain === domain)
     if (brand) {
@@ -1267,16 +1435,53 @@ export default function App() {
         .then((profile: BrandProfile | null) => {
           if (profile) {
             if (profile.presence?.youtube_url) setVideoChannelURL(profile.presence.youtube_url)
-            if (profile.target_queries?.length) {
-              setVideoSearchTerms(profile.target_queries.map(q => q.query))
-            }
+            const brandTerms = profile.target_queries?.map(q => q.query) || []
+            // Add optimization questions, deduplicating case-insensitively
+            const brandLower = new Set(brandTerms.map(t => t.toLowerCase()))
+            const uniqueOptQuestions = optQuestions.filter(q => !brandLower.has(q.toLowerCase()))
+            setVideoSearchTerms([...brandTerms, ...uniqueOptQuestions])
+            setVideoSearchTermSources(new Map([
+              ...brandTerms.map(t => [t, 'brand'] as [string, 'brand' | 'optimization']),
+              ...uniqueOptQuestions.map(q => [q, 'optimization'] as [string, 'brand' | 'optimization']),
+            ]))
             // Collapse settings since they're now populated
             setVideoSettingsOpen(false)
           }
         })
         .catch(() => {})
+    } else if (optQuestions.length > 0) {
+      // No brand profile — still populate from optimization questions
+      setVideoSearchTerms(optQuestions)
+      setVideoSearchTermSources(new Map(optQuestions.map(q => [q, 'optimization'] as [string, 'brand' | 'optimization'])))
     }
-  }, [brandList])
+  }, [brandList, optList])
+
+  // Optimization questions newer than the current video analysis
+  const videoStaleOptimizations = useMemo(() => {
+    if (!videoAnalysis?.generated_at || !videoDomain) return []
+    const analysisDate = new Date(videoAnalysis.generated_at)
+    const seen = new Set<string>()
+    return optList
+      .filter(o =>
+        domainKey(o.domain) === domainKey(videoDomain) &&
+        new Date(o.created_at) > analysisDate
+      )
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .filter(o => {
+        const q = o.question.toLowerCase()
+        if (seen.has(q)) return false
+        seen.add(q)
+        return true
+      })
+  }, [videoAnalysis, videoDomain, optList])
+
+  const isVideoAnalysisStale = useCallback((generatedAt: string, domain: string) => {
+    const analysisDate = new Date(generatedAt)
+    return optList.some(o =>
+      domainKey(o.domain) === domainKey(domain) &&
+      new Date(o.created_at) > analysisDate
+    )
+  }, [optList])
 
   // Filtered video list for review view
   const filteredDiscoveredVideos = useMemo(() => {
@@ -1327,7 +1532,7 @@ export default function App() {
     setSelectedVideoIds(new Set())
     setVideoFilterTags(new Set(['own', 'direct_mention', 'competitor_comparison', 'category_content']))
     setVideoFilterMinViews(0)
-    setVideoFilterRecency('all')
+    setVideoFilterRecency('1y')
     setVideoView('discovering')
 
     try {
@@ -1418,6 +1623,10 @@ export default function App() {
 
   const videoAnalyze = useCallback(async () => {
     if (selectedVideoIds.size === 0) return
+    if (saasEnabled && user && apiKeyStatus !== 'active') {
+      setApiKeyModal(true)
+      return
+    }
     const controller = new AbortController()
     videoAbortRef.current = controller
     setVideoAnalyzing(true)
@@ -1554,8 +1763,588 @@ export default function App() {
     }
   }, [activeTab, fetchVideoAnalysisList])
 
+  // ── Reddit Authority functions ─────────────────────────────
+
+  const fetchRedditAnalysisList = useCallback(async () => {
+    try {
+      const res = await apiFetch('/api/reddit/analyses')
+      if (res.ok) {
+        const data = await res.json()
+        setRedditAnalysisList(data || [])
+      }
+    } catch (err) {
+      console.error('Failed to fetch reddit analyses:', err)
+    }
+  }, [])
+
+  const loadRedditAnalysis = useCallback(async (domain: string) => {
+    try {
+      const res = await apiFetch(`/api/reddit/analyses/${encodeURIComponent(domain)}`)
+      if (res.ok) {
+        const data = await res.json() as RedditAnalysis
+        setRedditAnalysis(data)
+        setRedditDomain(domain)
+        setRedditView('results')
+      }
+    } catch (err) {
+      console.error('Failed to load reddit analysis:', err)
+    }
+  }, [])
+
+  const prepopulateRedditFromBrand = useCallback((domain: string) => {
+    setRedditDomain(domain)
+
+    // Collect optimization questions for this domain
+    const domainOpts = optList.filter(o => domainKey(o.domain) === domainKey(domain))
+    const optQuestions = [...new Set(domainOpts.map(o => o.question))]
+
+    // Find brand profile
+    const brand = brandList.find(b => b.domain === domain)
+    if (brand) {
+      apiFetch(`/api/brands/${encodeURIComponent(domain)}`)
+        .then(res => res.ok ? res.json() : null)
+        .then((profile: BrandProfile | null) => {
+          if (profile) {
+            // Populate subreddits from brand intelligence
+            if (profile.presence?.subreddits?.length > 0) {
+              setRedditSubreddits(profile.presence.subreddits)
+            }
+            const brandTerms = profile.target_queries?.map(q => q.query) || []
+            const brandLower = new Set(brandTerms.map(t => t.toLowerCase()))
+            const uniqueOptQuestions = optQuestions.filter(q => !brandLower.has(q.toLowerCase()))
+            setRedditSearchTerms([...brandTerms, ...uniqueOptQuestions])
+            setRedditSearchTermSources(new Map([
+              ...brandTerms.map(t => [t, 'brand'] as [string, 'brand' | 'optimization']),
+              ...uniqueOptQuestions.map(q => [q, 'optimization'] as [string, 'brand' | 'optimization']),
+            ]))
+            setRedditSettingsOpen(false)
+          }
+        })
+        .catch(() => {})
+    } else if (optQuestions.length > 0) {
+      setRedditSearchTerms(optQuestions)
+      setRedditSearchTermSources(new Map(optQuestions.map(q => [q, 'optimization'] as [string, 'brand' | 'optimization'])))
+    }
+  }, [brandList, optList])
+
+  // Optimization questions newer than the current reddit analysis
+  const redditStaleOptimizations = useMemo(() => {
+    if (!redditAnalysis?.generated_at || !redditDomain) return []
+    const analysisDate = new Date(redditAnalysis.generated_at)
+    const seen = new Set<string>()
+    return optList
+      .filter(o =>
+        domainKey(o.domain) === domainKey(redditDomain) &&
+        new Date(o.created_at) > analysisDate
+      )
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .filter(o => {
+        const q = o.question.toLowerCase()
+        if (seen.has(q)) return false
+        seen.add(q)
+        return true
+      })
+  }, [redditAnalysis, redditDomain, optList])
+
+  const isRedditAnalysisStale = useCallback((generatedAt: string, domain: string) => {
+    const analysisDate = new Date(generatedAt)
+    return optList.some(o =>
+      domainKey(o.domain) === domainKey(domain) &&
+      new Date(o.created_at) > analysisDate
+    )
+  }, [optList])
+
+  const redditDiscover = useCallback(async () => {
+    if (!redditDomain.trim()) return
+    setRedditDiscovering(true)
+    setRedditMessages([])
+    setDiscoveredThreads([])
+    setSelectedThreadIds(new Set())
+    setRedditView('discovering')
+
+    try {
+      let competitors: string[] = []
+      let brandName = redditDomain
+      try {
+        const brandRes = await apiFetch(`/api/brands/${encodeURIComponent(redditDomain.trim())}`)
+        if (brandRes.ok) {
+          const brand = await brandRes.json() as BrandProfile
+          brandName = brand.brand_name || redditDomain
+          competitors = brand.competitors?.map(c => c.name) || []
+        }
+      } catch { /* ignore */ }
+
+      const res = await apiFetch('/api/reddit/discover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          domain: redditDomain.trim(),
+          brand_name: brandName,
+          subreddits: redditSubreddits,
+          search_terms: redditSearchTerms,
+          competitors,
+          time_filter: redditTimeFilter,
+        }),
+      })
+
+      if (!res.ok) {
+        const text = await res.text()
+        setRedditMessages([text || 'Discovery failed'])
+        setRedditView('input')
+        setRedditDiscovering(false)
+        return
+      }
+
+      const reader = res.body?.getReader()
+      if (!reader) {
+        setRedditMessages(['Streaming not supported'])
+        setRedditView('input')
+        setRedditDiscovering(false)
+        return
+      }
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let currentEvent = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim()
+          } else if (line.startsWith('data: ') && currentEvent) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              if (currentEvent === 'status') {
+                setRedditMessages(prev => [...prev, data.message])
+              } else if (currentEvent === 'done') {
+                const threads = (data.threads || []) as RedditThreadSummary[]
+                setDiscoveredThreads(threads)
+                setSelectedThreadIds(new Set(threads.map(t => t.id)))
+                setRedditView('review')
+              } else if (currentEvent === 'error') {
+                setRedditMessages(prev => [...prev, data.message || 'Discovery failed'])
+                setRedditView('input')
+              }
+            } catch { /* ignore malformed JSON */ }
+            currentEvent = ''
+          }
+        }
+      }
+    } catch (err) {
+      setRedditMessages(['Connection failed: ' + (err as Error).message])
+      setRedditView('input')
+    } finally {
+      setRedditDiscovering(false)
+    }
+  }, [redditDomain, redditSubreddits, redditSearchTerms, redditTimeFilter])
+
+  const redditAnalyze = useCallback(async () => {
+    if (selectedThreadIds.size === 0) return
+    if (saasEnabled && user && apiKeyStatus !== 'active') {
+      setApiKeyModal(true)
+      return
+    }
+    const controller = new AbortController()
+    redditAbortRef.current = controller
+    setRedditAnalyzing(true)
+    setRedditMessages([])
+    setRedditView('running')
+
+    if (redditAutoArchive && redditDomain.trim()) {
+      try {
+        await apiFetch('/api/todos/archive', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source_type: 'reddit', domain: redditDomain.trim() }),
+        })
+      } catch { /* best effort */ }
+    }
+
+    try {
+      const response = await apiFetch('/api/reddit/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          domain: redditDomain.trim(),
+          config: {
+            subreddits: redditSubreddits,
+            search_terms: redditSearchTerms,
+            brand_url: redditDomain.trim(),
+            time_filter: redditTimeFilter,
+          },
+          selected_thread_ids: [...selectedThreadIds],
+          threads: discoveredThreads.filter(t => selectedThreadIds.has(t.id)),
+        }),
+        signal: controller.signal,
+      })
+
+      if (!response.ok || !response.body) {
+        setRedditMessages(['Analysis request failed'])
+        setRedditAnalyzing(false)
+        return
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        while (true) {
+          const idx = buffer.indexOf('\n\n')
+          if (idx === -1) break
+          const message = buffer.slice(0, idx)
+          buffer = buffer.slice(idx + 2)
+
+          let eventType = '', data = ''
+          for (const line of message.split('\n')) {
+            if (line.startsWith('event: ')) eventType = line.slice(7)
+            else if (line.startsWith('data: ')) data = line.slice(6)
+          }
+          if (!data || !eventType) continue
+
+          try {
+            const parsed = JSON.parse(data)
+            if (eventType === 'status') {
+              setRedditMessages(prev => [...prev, parsed.message])
+            } else if (eventType === 'progress') {
+              setRedditMessages(prev => prev.length > 0 ? [...prev.slice(0, -1), parsed.message] : [parsed.message])
+            } else if (eventType === 'done') {
+              try {
+                const result = typeof parsed.result === 'string' ? JSON.parse(parsed.result) : parsed.result
+                const analysis: RedditAnalysis = {
+                  id: '',
+                  domain: result.domain || redditDomain,
+                  config: result.config || { subreddits: redditSubreddits, search_terms: redditSearchTerms, brand_url: redditDomain, time_filter: redditTimeFilter },
+                  threads: result.threads || [],
+                  result: result.result,
+                  model: result.model || '',
+                  brand_context_used: result.brand_context_used || false,
+                  generated_at: result.generated_at || new Date().toISOString(),
+                }
+                setRedditAnalysis(analysis)
+                setRedditView('results')
+              } catch {
+                setRedditMessages(prev => [...prev, 'Failed to parse analysis results'])
+              }
+              setRedditAnalyzing(false)
+              fetchRedditAnalysisList()
+              fetchTodos()
+              return
+            } else if (eventType === 'error') {
+              setRedditMessages(prev => [...prev, 'Error: ' + parsed.message])
+              setRedditAnalyzing(false)
+              return
+            }
+          } catch { /* skip malformed */ }
+        }
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setRedditMessages(prev => [...prev, 'Connection failed: ' + (err as Error).message])
+      }
+    } finally {
+      setRedditAnalyzing(false)
+      redditAbortRef.current = null
+    }
+  }, [selectedThreadIds, redditDomain, redditSubreddits, redditSearchTerms, redditTimeFilter, discoveredThreads, fetchRedditAnalysisList, redditAutoArchive])
+
+  const redditAnalyzeStop = useCallback(() => {
+    redditAbortRef.current?.abort()
+    setRedditAnalyzing(false)
+    setRedditMessages(prev => [...prev, 'Analysis stopped by user'])
+  }, [])
+
+  const deleteRedditAnalysis = useCallback(async () => {
+    if (!redditDomain) return
+    try {
+      await apiFetch(`/api/reddit/analyses/${encodeURIComponent(redditDomain)}`, { method: 'DELETE' })
+      setRedditAnalysis(null)
+      setRedditView('input')
+      fetchRedditAnalysisList()
+    } catch (err) {
+      console.error('Failed to delete reddit analysis:', err)
+    }
+    setConfirmDeleteRedditAnalysis(false)
+  }, [redditDomain, fetchRedditAnalysisList])
+
+  // ── Search Visibility functions ─────────────────────────────
+
+  const fetchSearchAnalysisList = useCallback(async () => {
+    try {
+      const res = await apiFetch('/api/search/analyses')
+      if (res.ok) {
+        const data = await res.json()
+        setSearchAnalysisList(data || [])
+      }
+    } catch (err) {
+      console.error('Failed to fetch search analyses:', err)
+    }
+  }, [])
+
+  const loadSearchAnalysis = useCallback(async (domain: string) => {
+    try {
+      const res = await apiFetch(`/api/search/analyses/${encodeURIComponent(domain)}`)
+      if (res.ok) {
+        const data = await res.json() as SearchAnalysis
+        setSearchAnalysis(data)
+      }
+    } catch (err) {
+      console.error('Failed to load search analysis:', err)
+    }
+  }, [])
+
+  const searchAnalyze = useCallback(async () => {
+    if (!selectedDomain) return
+    if (saasEnabled && user && apiKeyStatus !== 'active') {
+      setApiKeyModal(true)
+      return
+    }
+    const controller = new AbortController()
+    searchAbortRef.current = controller
+    setSearchAnalyzing(true)
+    setSearchMessages([])
+
+    if (searchAutoArchive) {
+      try {
+        await apiFetch('/api/todos/archive', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source_type: 'search', domain: selectedDomain }),
+        })
+      } catch { /* best effort */ }
+    }
+
+    try {
+      const response = await apiFetch('/api/search/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: selectedDomain }),
+        signal: controller.signal,
+      })
+
+      if (!response.ok || !response.body) {
+        setSearchAnalyzing(false)
+        return
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        while (true) {
+          const idx = buffer.indexOf('\n\n')
+          if (idx === -1) break
+          const message = buffer.slice(0, idx)
+          buffer = buffer.slice(idx + 2)
+
+          let eventType = '', data = ''
+          for (const line of message.split('\n')) {
+            if (line.startsWith('event: ')) eventType = line.slice(7)
+            else if (line.startsWith('data: ')) data = line.slice(6)
+          }
+          if (!data || !eventType) continue
+
+          try {
+            const parsed = JSON.parse(data)
+            if (eventType === 'status' || eventType === 'progress') {
+              setSearchMessages(prev => [...prev, parsed.message])
+            } else if (eventType === 'done') {
+              const analysis = JSON.parse(parsed.result) as SearchAnalysis
+              setSearchAnalysis(analysis)
+              setSearchAnalyzing(false)
+              fetchSearchAnalysisList()
+              return
+            } else if (eventType === 'error') {
+              setSearchMessages(prev => [...prev, `Error: ${parsed.message}`])
+              setSearchAnalyzing(false)
+              return
+            }
+          } catch { /* skip malformed */ }
+        }
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setSearchMessages(prev => [...prev, `Error: ${err instanceof Error ? err.message : 'Unknown error'}`])
+      }
+    } finally {
+      setSearchAnalyzing(false)
+      searchAbortRef.current = null
+    }
+  }, [selectedDomain, fetchSearchAnalysisList, searchAutoArchive, saasEnabled, user, apiKeyStatus])
+
+  const searchAnalyzeStop = useCallback(() => {
+    searchAbortRef.current?.abort()
+    setSearchAnalyzing(false)
+    setSearchMessages(prev => [...prev, 'Analysis stopped by user'])
+  }, [])
+
+  const deleteSearchAnalysis = useCallback(async () => {
+    if (!selectedDomain) return
+    try {
+      await apiFetch(`/api/search/analyses/${encodeURIComponent(selectedDomain)}`, { method: 'DELETE' })
+      setSearchAnalysis(null)
+      fetchSearchAnalysisList()
+    } catch (err) {
+      console.error('Failed to delete search analysis:', err)
+    }
+    setConfirmDeleteSearchAnalysis(false)
+  }, [selectedDomain, fetchSearchAnalysisList])
+
+  // PDF Report generation
+  const generatePDF = useCallback(async () => {
+    if (!selectedDomain || pdfGenerating) return
+    const controller = new AbortController()
+    pdfAbortRef.current = controller
+    setPdfGenerating(true)
+    setPdfProgress('')
+
+    try {
+      const response = await apiFetch(`/api/domains/${encodeURIComponent(selectedDomain)}/report/pdf`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: selectedDomain }),
+        signal: controller.signal,
+      })
+
+      if (!response.ok || !response.body) {
+        setPdfGenerating(false)
+        return
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        while (true) {
+          const idx = buffer.indexOf('\n\n')
+          if (idx === -1) break
+          const message = buffer.slice(0, idx)
+          buffer = buffer.slice(idx + 2)
+
+          let eventType = '', data = ''
+          for (const line of message.split('\n')) {
+            if (line.startsWith('event: ')) eventType = line.slice(7)
+            else if (line.startsWith('data: ')) data = line.slice(6)
+          }
+          if (!data || !eventType) continue
+
+          try {
+            const parsed = JSON.parse(data)
+            if (eventType === 'status') {
+              setPdfProgress(parsed.message)
+            } else if (eventType === 'done') {
+              const pdfId = parsed.pdf_id
+              const downloadUrl = `/api/domains/${encodeURIComponent(selectedDomain)}/report/pdf/${pdfId}`
+              const pdfRes = await apiFetch(downloadUrl)
+              const blob = await pdfRes.blob()
+              const url = window.URL.createObjectURL(blob)
+              const a = document.createElement('a')
+              a.href = url
+              a.download = `${selectedDomain.replace(/^https?:\/\//, '')}-llm-report.pdf`
+              document.body.appendChild(a)
+              a.click()
+              a.remove()
+              window.URL.revokeObjectURL(url)
+              setPdfGenerating(false)
+              setPdfProgress('')
+              return
+            } else if (eventType === 'error') {
+              setPdfGenerating(false)
+              setPdfProgress('')
+              return
+            }
+          } catch { /* skip malformed */ }
+        }
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        console.error('PDF generation failed:', err)
+      }
+    } finally {
+      setPdfGenerating(false)
+      pdfAbortRef.current = null
+    }
+  }, [selectedDomain, pdfGenerating])
+
+  // Fetch reddit/search analyses list on tab switch
+  useEffect(() => {
+    if (activeTab === 'reddit') {
+      fetchRedditAnalysisList()
+    }
+    if (activeTab === 'search') {
+      fetchSearchAnalysisList()
+    }
+  }, [activeTab, fetchRedditAnalysisList, fetchSearchAnalysisList])
+
+  // Auto-prepopulate reddit from brand when switching to reddit tab
+  useEffect(() => {
+    if (sharedModeRef.current) return
+    if (activeTab === 'reddit') {
+      fetchRedditAnalysisList()
+      if (selectedDomain) {
+        prepopulateRedditFromBrand(selectedDomain)
+        // Auto-load existing report if one exists for this domain
+        const existing = redditAnalysisList.find(a => domainKey(a.domain) === domainKey(selectedDomain))
+        if (existing) {
+          loadRedditAnalysis(existing.domain)
+        }
+      }
+    }
+  }, [activeTab, selectedDomain, prepopulateRedditFromBrand, fetchRedditAnalysisList, loadRedditAnalysis])
+
+  // Auto-load search analysis when switching to search tab
+  useEffect(() => {
+    if (sharedModeRef.current) return
+    if (activeTab === 'search') {
+      fetchSearchAnalysisList()
+      if (selectedDomain) {
+        const existing = searchAnalysisList.find(a => domainKey(a.domain) === domainKey(selectedDomain))
+        if (existing) {
+          loadSearchAnalysis(existing.domain)
+        }
+      }
+    }
+  }, [activeTab, selectedDomain, fetchSearchAnalysisList, loadSearchAnalysis])
+
+  // Auto-scroll SSE message containers to bottom
+  useEffect(() => { videoMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [videoMessages])
+  useEffect(() => { redditMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [redditMessages])
+  useEffect(() => { searchMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [searchMessages])
+
+  // Auto-load domain summary when selectedDomain changes
+  useEffect(() => {
+    if (selectedDomain) {
+      loadSummaryForDomain(selectedDomain)
+    } else {
+      setActiveSummary(null)
+      setActiveSummaryStale(false)
+    }
+  }, [selectedDomain, loadSummaryForDomain])
+
   const discoverCompetitors = useCallback(async () => {
     if (!brandDomain.trim()) return
+    await saveBrandProfile()
     setDiscoveredCompetitors([])
     setDiscoverSelected(new Set())
     await brandSSE(
@@ -1571,7 +2360,7 @@ export default function App() {
         } catch { /* ignore */ }
       },
     )
-  }, [brandDomain, brandSSE])
+  }, [brandDomain, brandSSE, saveBrandProfile])
 
   const addSelectedCompetitors = useCallback(() => {
     const newComps = discoveredCompetitors
@@ -1586,6 +2375,7 @@ export default function App() {
 
   const suggestQueries = useCallback(async () => {
     if (!brandDomain.trim()) return
+    await saveBrandProfile()
     setSuggestedQueries([])
     setSuggestSelected(new Set())
     await brandSSE(
@@ -1601,7 +2391,7 @@ export default function App() {
         } catch { /* ignore */ }
       },
     )
-  }, [brandDomain, brandSSE])
+  }, [brandDomain, brandSSE, saveBrandProfile])
 
   const addSelectedQueries = useCallback(() => {
     const newQueries = suggestedQueries
@@ -1651,6 +2441,7 @@ export default function App() {
 
   const suggestClaims = useCallback(async () => {
     if (!brandDomain.trim()) return
+    await saveBrandProfile()
     setSuggestedClaims([])
     setSuggestClaimSelected(new Set())
     await brandSSE(
@@ -1666,7 +2457,7 @@ export default function App() {
         } catch { /* ignore */ }
       },
     )
-  }, [brandDomain, brandSSE])
+  }, [brandDomain, brandSSE, saveBrandProfile])
 
   const addSelectedClaims = useCallback(() => {
     const newClaims = suggestedClaims
@@ -1681,6 +2472,7 @@ export default function App() {
 
   const predictDifferentiators = useCallback(async () => {
     if (!brandDomain.trim()) return
+    await saveBrandProfile()
     setSuggestedDiffs([])
     setSuggestDiffSelected(new Set())
     await brandSSE(
@@ -1700,7 +2492,7 @@ export default function App() {
         } catch { /* ignore */ }
       },
     )
-  }, [brandDomain, brandSSE])
+  }, [brandDomain, brandSSE, saveBrandProfile])
 
   const addSelectedDifferentiators = useCallback(() => {
     const newDiffs = suggestedDiffs
@@ -1876,7 +2668,7 @@ export default function App() {
           setOptList(data.optimizations.map((o: any) => ({
             id: o.id, domain: o.domain, question: o.question,
             question_index: o.question_index ?? -1,
-            overall_score: o.result?.overallScore ?? 0,
+            overall_score: o.result?.overall_score ?? 0,
             model: o.model, public: false,
             brand_status: o.brand_status || '',
             brand_context_used: o.brand_context_used,
@@ -1929,7 +2721,6 @@ export default function App() {
         // Map domain summary
         if (data.domain_summary) {
           setActiveSummary(data.domain_summary)
-          setActiveSummaryDomain(data.domain)
         }
         setSharedLoading(false)
       })
@@ -2055,6 +2846,10 @@ export default function App() {
       setSubscriptionModal(true)
       return
     }
+    if (saasEnabled && user && apiKeyStatus !== 'active') {
+      setApiKeyModal(true)
+      return
+    }
 
     const shouldForce = force ?? forceAnalyze
 
@@ -2172,6 +2967,10 @@ export default function App() {
 
   const optimizeQuestion = useCallback(async (questionIdx: number, force?: boolean) => {
     if (!resultMeta?.id) return
+    if (saasEnabled && user && apiKeyStatus !== 'active') {
+      setApiKeyModal(true)
+      return
+    }
 
     setOptimizing(true)
     setOptimizeMessages([])
@@ -2392,8 +3191,320 @@ export default function App() {
     )
   }
 
+  if (showResearch) {
+    return (
+      <div className="min-h-screen flex flex-col">
+        {/* Header */}
+        <header className="sticky top-0 z-50 bg-dark-900/80 backdrop-blur-xl border-b border-dark-800">
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <button onClick={() => setShowResearch(false)} className="flex items-center gap-3 cursor-pointer">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-accent-purple flex items-center justify-center">
+                  <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
+                  </svg>
+                </div>
+                <h1 className="text-xl font-semibold tracking-tight text-white">LLM Optimizer</h1>
+              </button>
+            </div>
+            <button onClick={() => setShowResearch(false)} className="text-dark-400 hover:text-white text-sm transition-colors cursor-pointer flex items-center gap-1.5">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /></svg>
+              Back to App
+            </button>
+          </div>
+        </header>
+
+        {/* Research Citations Content */}
+        <main className="flex-1 max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+          <h2 className="text-3xl font-bold text-white mb-2">Research Citations</h2>
+          <p className="text-dark-400 text-sm mb-8">The research underpinning LLM Optimizer's analysis methodology. All scoring frameworks, dimension weights, and recommendations are derived from peer-reviewed academic work and validated practitioner research.</p>
+
+          {/* Research Digest */}
+          <section className="mb-12 bg-dark-900/60 border border-dark-800 rounded-2xl p-6 sm:p-8">
+            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+              <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" /></svg>
+              Research Digest
+            </h3>
+            <div className="space-y-4 text-dark-300 text-sm leading-relaxed">
+              <p>The emerging science of LLM visibility reveals a fundamental shift in how information gains authority online. The most significant recent finding comes from <a href="#nanoknow" className="text-primary-400 hover:text-primary-300 transition-colors">NanoKnow (2026)</a>, which demonstrates that content appearing frequently in training data more than doubles a model's accuracy on related questions — and that the advantage compounds when content is both memorized during training and retrievable at inference time. This means the traditional SEO playbook of optimizing for a single ranking algorithm is being replaced by a dual imperative: getting into training corpora through widespread, high-quality publication, while simultaneously remaining citable through structured, authoritative web presence.</p>
+              <p>Across the research, a consistent pattern emerges: AI search engines overwhelmingly favor earned media over brand-owned content, citing third-party sources <a href="#geo-toronto" className="text-primary-400 hover:text-primary-300 transition-colors">72-92% of the time</a>. Content that includes quotations from authoritative sources gains <a href="#geo-princeton" className="text-primary-400 hover:text-primary-300 transition-colors">+41% visibility</a> — the single most effective optimization technique identified. Meanwhile, YouTube has rapidly become the dominant social citation source for LLMs, with its <a href="#youtube-citations" className="text-primary-400 hover:text-primary-300 transition-colors">share doubling to 39%</a> between August and December 2024. Critically, <a href="#livecc" className="text-primary-400 hover:text-primary-300 transition-colors">video LLMs process content through transcripts</a>, not visual analysis — a 7B model trained on YouTube transcripts outperformed 72B models, proving that transcript quality matters far more than production value.</p>
+              <p>Reddit has emerged as the <a href="#youtube-citations" className="text-primary-400 hover:text-primary-300 transition-colors">#2 social citation source for LLMs</a>, with unique authority dynamics. Reddit was foundational in LLM training through datasets like <a href="#reddit-webtext" className="text-primary-400 hover:text-primary-300 transition-colors">WebText</a> and the <a href="#reddit-common-crawl" className="text-primary-400 hover:text-primary-300 transition-colors">Common Crawl</a>, and continues through <a href="#reddit-data-deals" className="text-primary-400 hover:text-primary-300 transition-colors">$60M (Google) and $70M (OpenAI) annual licensing deals</a>. Unlike YouTube's channel-centric authority, Reddit's influence comes from <a href="#reddit-community-consensus" className="text-primary-400 hover:text-primary-300 transition-colors">multi-user validation</a> — upvoted comment consensus, especially in "best X for Y" recommendation threads, creates credibility signals that LLMs weight heavily. The <a href="#geo-toronto" className="text-primary-400 hover:text-primary-300 transition-colors">Toronto GEO paper</a> classifies Reddit as "Social" — a category AI search engines suppress in direct citations — yet Reddit's pervasive presence in training data means it heavily shapes baseline model knowledge even when not explicitly cited.</p>
+              <p>A critical "two-world" split has emerged between Google AI Overviews and standalone LLMs. <a href="#ahrefs-aio-citations" className="text-primary-400 hover:text-primary-300 transition-colors">76% of AI Overview citations</a> pull from top-10 organic pages — making traditional search rankings the primary signal for AIO inclusion. But for standalone LLMs like ChatGPT, <a href="#ahrefs-ai-search-overlap" className="text-primary-400 hover:text-primary-300 transition-colors">only 12% of cited URLs rank in Google's top 10</a>. The <a href="#ahrefs-75k-brands" className="text-primary-400 hover:text-primary-300 transition-colors">strongest predictor of AI citation across platforms is YouTube mentions (0.737 correlation)</a>, followed by web mentions (0.664) — not backlinks. Meanwhile, content freshness has become a significant signal: AI assistants cite content that is <a href="#ahrefs-freshness" className="text-primary-400 hover:text-primary-300 transition-colors">25.7% newer</a> than traditional search results, and <a href="#seer-recency" className="text-primary-400 hover:text-primary-300 transition-colors">65% of AI bot crawl hits target content less than a year old</a>. The <a href="#cloudflare-ai-crawlers" className="text-primary-400 hover:text-primary-300 transition-colors">explosive growth of AI crawlers (GPTBot up 305% YoY)</a> makes robots.txt policy a direct lever for AI visibility.</p>
+              <p>However, this new landscape comes with important caveats. Citation accuracy across AI answer engines remains <a href="#false-promise" className="text-primary-400 hover:text-primary-300 transition-colors">surprisingly poor (49-68%)</a>, with nearly a third of claims lacking any source backing. Citation concentration follows power-law dynamics, where the <a href="#news-citing-patterns" className="text-primary-400 hover:text-primary-300 transition-colors">top 20 sources capture 28-67% of all citations</a>. And LLMs exhibit strong <a href="#lost-in-the-middle" className="text-primary-400 hover:text-primary-300 transition-colors">positional bias</a>, reliably attending to content at the beginning and end of context while ignoring the middle. Together, these findings inform LLM Optimizer's scoring frameworks across answer optimization, video authority, Reddit authority, and search visibility analysis.</p>
+            </div>
+          </section>
+
+          {/* Source Papers */}
+          <section className="mb-12">
+            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+              <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" /></svg>
+              Source Papers
+            </h3>
+            <div className="space-y-3">
+              {[
+                { id: 'lost-in-the-middle', title: 'Lost in the Middle: How Language Models Use Long Contexts', venue: 'TACL 2024', url: 'https://arxiv.org/abs/2307.03172', contribution: 'Position bias in LLM context windows — U-shaped attention curve where content at the beginning and end is reliably used while middle content is ignored' },
+                { id: 'geo-princeton', title: 'GEO: Generative Engine Optimization', venue: 'Princeton / KDD 2024', url: 'https://arxiv.org/abs/2311.09735', contribution: 'Tested 9 content optimization strategies on 10,000 queries. Quotations (+41%), statistics (+33%), and fluency (+29%) are the most effective methods for improving LLM citation visibility' },
+                { id: 'nanoknow', title: 'NanoKnow: Probing LLM Knowledge by Linking Training Data to Answers', venue: '2026', url: 'https://arxiv.org/abs/2602.20122', contribution: 'Training data frequency more than doubles model accuracy. Even with oracle RAG, models score ~11 points higher on questions with answers in training data' },
+                { id: 'geo-toronto', title: 'GEO: How to Dominate AI Search — Source Preferences', venue: 'U of Toronto 2025', url: 'https://arxiv.org/abs/2509.08919', contribution: 'AI search engines cite earned media 72-92% of the time vs. 18-27% for brand-owned content. AI citations overlap with Google results only 15-50%' },
+                { id: 'youtube-citations', title: 'YouTube vs Reddit AI Citations', venue: 'Adweek / Bluefish / Emberos / Goodie AI, 2025', url: 'https://www.adweek.com/media/youtube-reddit-ai-search-engine-citations', contribution: 'YouTube appears in 16% of LLM answers (vs. 10% for Reddit). YouTube\'s social citation share doubled from 18.9% to 39.2% between Aug-Dec 2024' },
+                { id: 'news-citing-patterns', title: 'News Source Citing Patterns in AI Search Systems', venue: '2025', url: 'https://arxiv.org/abs/2507.05301', contribution: 'Citation concentration and gatekeeping dynamics across 366K citations. Top 20 sources capture 28-67% of all citations (Gini 0.69-0.83)' },
+                { id: 'livecc', title: 'LiveCC: Learning Video LLM with Streaming Speech Transcription', venue: 'CVPR 2025', url: 'https://arxiv.org/abs/2504.16030', contribution: 'How video LLMs are trained from ASR transcripts. A 7B model trained on YouTube transcripts surpassed 72B models, proving transcript quality matters more than model size' },
+                { id: 'false-promise', title: 'The False Promise of Factual and Verifiable Source-Cited Responses', venue: '2024', url: 'https://arxiv.org/abs/2410.22349', contribution: 'Citation accuracy ranges 49-68% across answer engines. 23-32% of claims have no source backing. Perplexity generates one-sided answers 83.4% of the time' },
+                { id: 'reddit-webtext', title: 'Language Models are Unsupervised Multitask Learners', venue: 'OpenAI, 2019 (Radford et al.)', url: 'https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf', contribution: 'Introduced WebText, a dataset of 8 million Reddit posts with 3+ karma score, as the foundational training corpus for GPT-2. Demonstrated that Reddit\'s community curation mechanism (karma voting) effectively serves as a quality filter for large-scale language model training data.' },
+                { id: 'reddit-common-crawl', title: 'Consent in Crisis: The Rapid Decline of the AI Data Commons', venue: 'ACM FAccT 2024 (Longpre et al.)', url: 'https://dl.acm.org/doi/10.1145/3630106.3659033', contribution: 'Comprehensive audit of AI training data sources documenting Reddit\'s persistent prominence in Common Crawl and other web corpora. Found that robots.txt restrictions increased 25%+ from 2023-2024 as sites restricted AI crawling, while Reddit data remained broadly available through licensing agreements.' },
+                { id: 'reddit-data-deals', title: 'Reddit Data Licensing: Google and OpenAI Deals', venue: 'Reuters / The Verge, 2024', url: 'https://www.reuters.com/technology/reddit-ai-content-licensing-deal-google-2024-02-22/', contribution: 'Google pays $60M/year and OpenAI $70M/year for Reddit data access. Reddit\'s API was locked down in 2023. Active litigation: Reddit v. Anthropic, Reddit v. Perplexity (scraping claims).' },
+                { id: 'reddit-community-consensus', title: 'Community Consensus as LLM Authority Signal', venue: 'Bluefish Labs / Emberos Research, 2025', url: 'https://www.adweek.com/media/youtube-reddit-ai-search-engine-citations', contribution: 'Reddit\'s multi-user validation (upvotes, comment consensus) creates credibility signals single-author content cannot match. "Best X for Y" recommendation threads are among the most influential for LLM comparison queries.' },
+                { id: 'ahrefs-aio-citations', title: 'AI Overview Citations and Search Rankings', venue: 'Ahrefs, 2025', url: 'https://ahrefs.com/blog/search-rankings-ai-citations/', contribution: '76% of AI Overview citations pull from top-10 organic pages. Median organic ranking for a cited URL is position 3. 86% of citations come from within the top 100 organic results.' },
+                { id: 'ahrefs-ai-search-overlap', title: 'AI Search Overlap: How AI Citations Differ from Google', venue: 'Ahrefs, 2025', url: 'https://ahrefs.com/blog/ai-search-overlap/', contribution: 'Only 12% of standalone LLM citations overlap with Google\'s top 10. Perplexity shows 28.6% overlap. 80%+ of ChatGPT/Claude/Gemini citations come from pages not ranking in Google at all.' },
+                { id: 'ahrefs-75k-brands', title: 'AI Brand Visibility Correlations (75K Brands)', venue: 'Ahrefs, 2025', url: 'https://ahrefs.com/blog/ai-brand-visibility-correlations/', contribution: 'YouTube mentions (0.737) and web mentions (0.664) are the strongest correlators with AI visibility. Brand search volume (0.334) outperforms backlinks (0.37). Top 25% brands get 12x more AIO mentions.' },
+                { id: 'ahrefs-freshness', title: 'Do AI Assistants Prefer to Cite Fresh Content?', venue: 'Ahrefs, 2025 (17M citations)', url: 'https://ahrefs.com/blog/do-ai-assistants-prefer-to-cite-fresh-content/', contribution: 'AI assistants cite content 25.7% newer than traditional search. ChatGPT: avg 1,023 days old. Perplexity pulls ~50% from current year. Google AIOs counter-trend: prefer older authoritative content.' },
+                { id: 'seer-recency', title: 'AI Brand Visibility and Content Recency', venue: 'Seer Interactive, 2025', url: 'https://www.seerinteractive.com/insights/study-ai-brand-visibility-and-content-recency', contribution: '65% of AI bot crawl hits target content published within the past year. 85% of AIO citations from last 2 years. 94% from last 5 years.' },
+                { id: 'llm-recency-bias', title: 'Do Large Language Models Favor Recent Content?', venue: 'arXiv, September 2025', url: 'https://arxiv.org/html/2509.11353v1', contribution: 'LLMs consistently promote "fresh" passages. Top-10 mean publication year shifts forward by up to 4.78 years. Individual items move up to 95 ranking positions based on recency signals alone.' },
+                { id: 'cloudflare-ai-crawlers', title: 'From Googlebot to GPTBot: Who\'s Crawling Your Site', venue: 'Cloudflare, 2025', url: 'https://blog.cloudflare.com/from-googlebot-to-gptbot-whos-crawling-your-site-in-2025/', contribution: 'GPTBot grew 305% YoY. OpenAI crawl-to-referral ratio: 1,700:1. Anthropic: 73,000:1. ~21% of top-1000 sites block GPTBot. Training crawls = 80% of AI bot activity.' },
+                { id: 'semrush-aio', title: 'AI Overviews Study: 200,000 Keywords', venue: 'Semrush, 2025', url: 'https://www.semrush.com/blog/semrush-ai-overviews-study/', contribution: 'Reddit (40.1%) and Wikipedia (26.3%) dominate AIO citations. 80% of AIO responses target informational queries. 82% appear for keywords with <1,000 monthly searches.' },
+              ].map((paper, i) => (
+                <a key={i} id={paper.id} href={paper.url} target="_blank" rel="noopener noreferrer" className="block bg-dark-900/50 border border-dark-800 rounded-xl p-4 hover:border-primary-500/40 transition-colors group scroll-mt-24">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-white text-sm font-medium group-hover:text-primary-300 transition-colors">{paper.title}</p>
+                      <p className="text-dark-500 text-xs mt-0.5">{paper.venue}</p>
+                      <p className="text-dark-400 text-xs mt-2 leading-relaxed">{paper.contribution}</p>
+                    </div>
+                    <svg className="w-4 h-4 text-dark-600 group-hover:text-primary-400 shrink-0 mt-1 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" /></svg>
+                  </div>
+                </a>
+              ))}
+            </div>
+          </section>
+
+          {/* Answer Optimization Framework */}
+          <section className="mb-12">
+            <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
+              <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5" /></svg>
+              Answer Optimization Scoring Framework
+            </h3>
+            <p className="text-dark-400 text-sm mb-6">Each optimization report scores how likely an LLM is to surface and cite a website's answer across four research-backed dimensions.</p>
+
+            <div className="space-y-4">
+              {[
+                {
+                  name: 'Content Authority Signals', weight: '30%', color: 'primary',
+                  source: 'GEO (Princeton/KDD 2024)',
+                  desc: 'Measures the presence of quotations from authoritative sources (+41% visibility), statistical evidence (+33%), source citations (+28%), fluency (+29%), and technical terminology (+19%). Penalizes keyword stuffing (-9%).',
+                },
+                {
+                  name: 'Structural Optimization', weight: '20%', color: 'accent-purple',
+                  source: 'Lost in the Middle (TACL 2024) + GEO (Toronto 2025)',
+                  desc: 'Evaluates answer prominence (front-loaded vs. buried), content conciseness, machine-readable structure (Schema.org, tables, comparison formats), and justification language that explains "why" rather than just "what."',
+                },
+                {
+                  name: 'Source Authority', weight: '30%', color: 'accent-emerald',
+                  source: 'GEO (Toronto 2025)',
+                  desc: 'Assesses third-party coverage and earned media presence. AI search engines cite earned media 72-92% of the time. Evaluates cross-engine consistency since different AI providers cite substantially different sources (similarity only 0.11-0.58).',
+                },
+                {
+                  name: 'Knowledge Persistence', weight: '20%', color: 'amber',
+                  source: 'NanoKnow (2026)',
+                  desc: 'Measures how deeply information is embedded in model training data. Answer frequency more than doubles accuracy. Content that is both in training data AND retrievable at inference compounds advantage by ~11 percentage points. Clear, educational writing outperforms natural text by 19+ points.',
+                },
+              ].map((dim, i) => (
+                <div key={i} className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-white font-medium text-sm">{dim.name}</h4>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-dark-800 text-dark-400 border border-dark-700">{dim.weight}</span>
+                  </div>
+                  <p className="text-dark-500 text-[11px] mb-2">Source: {dim.source}</p>
+                  <p className="text-dark-400 text-xs leading-relaxed">{dim.desc}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Video Authority Framework */}
+          <section className="mb-12">
+            <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
+              <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" /></svg>
+              Video Authority Scoring Framework
+            </h3>
+            <p className="text-dark-400 text-sm mb-6">Video analysis evaluates YouTube presence across four pillars, grounded in the finding that LLMs process video through transcripts, not visual content.</p>
+
+            <div className="space-y-4">
+              {[
+                {
+                  name: 'Transcript Authority', weight: '30%',
+                  source: 'LiveCC (CVPR 2025) + GEO (Princeton 2024)',
+                  desc: 'Transcript quality is the dominant signal for LLM visibility. Evaluates keyword alignment, quotability (standalone citable statements get +41% visibility per GEO), information density, and caption availability. Videos without captions are effectively invisible to LLMs.',
+                },
+                {
+                  name: 'Topical Dominance', weight: '25%',
+                  source: 'AI Search Arena (2025) + GEO (Toronto 2025)',
+                  desc: 'Measures topic coverage breadth and depth, share of voice across video content in the space, content gaps representing first-mover opportunities, and coverage depth (surface vs. in-depth treatment). Winner-take-all dynamics mean being first in a topic gap has outsized value.',
+                },
+                {
+                  name: 'Citation Network', weight: '25%',
+                  source: 'AI Search Arena (2025) + YouTube Citation Analysis (Adweek 2025)',
+                  desc: 'Analyzes who mentions the brand, their authority level, and concentration risk. Top 20 sources capture 28-67% of all AI citations. A mention by a high-authority channel outweighs dozens of small-channel mentions. Human engagement metrics (views, subscribers) do not predict AI citation.',
+                },
+                {
+                  name: 'Brand Narrative Quality', weight: '20%',
+                  source: 'False Promise of Source-Cited Responses (2024) + Lost in the Middle (2024)',
+                  desc: 'Evaluates sentiment, mention context and position (early mentions get priority per U-shaped attention), extractability (clear mentions are less likely to be misrepresented given 49-68% citation accuracy), and narrative coherence. Includes a confidence discount reflecting known citation inaccuracy rates.',
+                },
+              ].map((pillar, i) => (
+                <div key={i} className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-white font-medium text-sm">{pillar.name}</h4>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-dark-800 text-dark-400 border border-dark-700">{pillar.weight}</span>
+                  </div>
+                  <p className="text-dark-500 text-[11px] mb-2">Source: {pillar.source}</p>
+                  <p className="text-dark-400 text-xs leading-relaxed">{pillar.desc}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Reddit Authority Framework */}
+          <section className="mb-12">
+            <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
+              <svg className="w-5 h-5 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" /></svg>
+              Reddit Authority Scoring Framework
+            </h3>
+            <p className="text-dark-400 text-sm mb-6">Reddit analysis evaluates community discussion across four pillars, grounded in Reddit's unique role as a multi-user validation platform for LLM training data.</p>
+
+            <div className="space-y-4">
+              {[
+                {
+                  name: 'Presence', weight: '25%',
+                  source: 'Reddit Training Data Analysis (2024-2025) + GEO (Toronto 2025)',
+                  desc: 'Volume and breadth of brand mentions across relevant subreddits. Measures total mentions, unique subreddits reached, and mention trend over time. High presence in topic-specific subreddits carries more weight than general discussion.',
+                },
+                {
+                  name: 'Sentiment & Recommendations', weight: '25%',
+                  source: 'Community Consensus Research (Bluefish/Emberos 2025)',
+                  desc: 'Community tone and recommendation strength. Evaluates positive/negative sentiment balance, recommendation rate in "best X for Y" threads, and the specific praise/criticism themes that shape LLM perception.',
+                },
+                {
+                  name: 'Competitive Positioning', weight: '25%',
+                  source: 'GEO (Toronto 2025) + Reddit Community Analysis',
+                  desc: 'Head-to-head positioning against competitors in comparison threads. Measures win rate, cited differentiators, and competitor advantages not countered — these directly shape LLM comparison responses.',
+                },
+                {
+                  name: 'Training Signal Strength', weight: '25%',
+                  source: 'NanoKnow (2026) + Reddit Data Licensing (2024)',
+                  desc: 'Likelihood that Reddit discussions will influence LLM training. High-upvote threads in authoritative subreddits with deep comment engagement create the strongest training signals. Reddit data is actively licensed to OpenAI and Google.',
+                },
+              ].map((pillar, i) => (
+                <div key={i} className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-white font-medium text-sm">{pillar.name}</h4>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-dark-800 text-dark-400 border border-dark-700">{pillar.weight}</span>
+                  </div>
+                  <p className="text-dark-500 text-[11px] mb-2">Source: {pillar.source}</p>
+                  <p className="text-dark-400 text-xs leading-relaxed">{pillar.desc}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Search Visibility Framework */}
+          <section className="mb-12">
+            <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
+              <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>
+              Search Visibility Scoring Framework
+            </h3>
+            <p className="text-dark-400 text-sm mb-6">Search visibility analysis evaluates how search-related signals affect whether AI systems will discover, index, and cite your content — bridging traditional SEO signals with AI citation dynamics.</p>
+
+            <div className="space-y-4">
+              {[
+                {
+                  name: 'AI Overview Readiness', weight: '30%',
+                  source: 'Ahrefs AIO Citations Study (2025) + Semrush AIO Study (2025)',
+                  desc: '76% of AI Overview citations pull from top-10 organic pages. Evaluates organic ranking presence, structured data (Schema.org, JSON-LD), content format alignment with AIO-preferred informational queries, and answer prominence (front-loaded concise answers). AIOs favor long-tail keywords — 82% appear for terms with <1,000 monthly searches.',
+                },
+                {
+                  name: 'Crawl Accessibility', weight: '20%',
+                  source: 'Cloudflare AI Crawler Report (2025) + Consent in Crisis (ACM FAccT 2024)',
+                  desc: 'GPTBot grew 305% YoY with a crawl-to-referral ratio of 1,700:1. Evaluates robots.txt policy for AI crawlers (GPTBot, ClaudeBot, PerplexityBot and their SearchBot variants), sitemap completeness, and render accessibility. Blocking training bots while allowing search bots is a valid strategy; blocking everything eliminates AI visibility.',
+                },
+                {
+                  name: 'Brand Search Momentum', weight: '25%',
+                  source: 'Ahrefs 75K-Brand Study (2025) + Google Trends API (2025)',
+                  desc: 'Brand search volume has a 0.334 correlation with AI citation frequency — but web mentions (0.664) and YouTube mentions (0.737) are stronger. Winner-takes-all: top 25% brands average 169 AIO mentions vs. 14 for the 50th-75th percentile. Evaluates brand search trends, entity recognition, and competitive positioning.',
+                },
+                {
+                  name: 'Content Freshness', weight: '25%',
+                  source: 'Ahrefs 17M Citations Study (2025) + Seer Interactive (2025) + arXiv Recency Bias (2025)',
+                  desc: 'AI assistants cite content 25.7% newer than traditional search. 65% of AI bot hits target content <1 year old. Freshness signals can move items up to 95 ranking positions in LLM reranking. Evaluates content age, update frequency, freshness signals (dates, last-modified), and content decay risk. Note: Google AIOs counter-trend, preferring older authoritative content.',
+                },
+              ].map((pillar, i) => (
+                <div key={i} className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-white font-medium text-sm">{pillar.name}</h4>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-dark-800 text-dark-400 border border-dark-700">{pillar.weight}</span>
+                  </div>
+                  <p className="text-dark-500 text-[11px] mb-2">Source: {pillar.source}</p>
+                  <p className="text-dark-400 text-xs leading-relaxed">{pillar.desc}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Key Research Findings */}
+          <section className="mb-12">
+            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+              <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 18v-5.25m0 0a6.01 6.01 0 001.5-.189m-1.5.189a6.01 6.01 0 01-1.5-.189m3.75 7.478a12.06 12.06 0 01-4.5 0m3.75 2.383a14.406 14.406 0 01-3 0M14.25 18v-.192c0-.983.658-1.823 1.508-2.316a7.5 7.5 0 10-7.517 0c.85.493 1.509 1.333 1.509 2.316V18" /></svg>
+              Key Research Findings
+            </h3>
+            <div className="space-y-3">
+              {[
+                { finding: 'Quotations are the single most effective optimization method', detail: 'Adding quotes from authoritative sources improves LLM visibility by 41%, more than any other technique tested on 10,000 queries. Statistics (+33%) and fluency (+29%) follow.', source: 'GEO, Princeton/KDD 2024', anchor: '#geo-princeton' },
+                { finding: 'Lower-ranked sites benefit disproportionately', detail: 'Rank-5 sites saw +115% visibility improvement from citing sources, while rank-1 sites saw -30%. Generative engines can be more democratic than traditional search for well-optimized content.', source: 'GEO, Princeton/KDD 2024', anchor: '#geo-princeton' },
+                { finding: 'AI search overwhelmingly favors earned media', detail: 'AI search engines cite independent third-party sources 72-92% of the time, compared to only 18-27% for brand-owned content and virtually 0% for social content.', source: 'GEO, Toronto 2025', anchor: '#geo-toronto' },
+                { finding: 'Training data frequency more than doubles accuracy', detail: 'Models are more than twice as accurate on questions whose answers appear frequently (51+ documents) in training data vs. rarely (1-5 documents). Being in training data AND retrievable compounds advantage.', source: 'NanoKnow, 2026', anchor: '#nanoknow' },
+                { finding: 'YouTube is the #1 social citation source for LLMs', detail: 'YouTube\'s share of social citations doubled from 18.9% to 39.2% in just 5 months. It generates 18x more AI citations than Instagram and 50x more than TikTok. Views and subscriber counts do not predict AI citation.', source: 'Adweek / Bluefish / Emberos / Goodie AI, 2025', anchor: '#youtube-citations' },
+                { finding: 'Video LLMs are trained on transcripts, not visual content', detail: 'A 7B model trained on YouTube transcripts outperformed 72B models. No captions = invisible to LLMs. Transcript quality is the dominant factor, not production value.', source: 'LiveCC, CVPR 2025', anchor: '#livecc' },
+                { finding: 'Content position follows a U-shaped attention curve', detail: 'LLMs reliably use content at the beginning and end of their context window but effectively ignore the middle. Front-loading key information is critical for citation.', source: 'Lost in the Middle, TACL 2024', anchor: '#lost-in-the-middle' },
+                { finding: 'AI citation accuracy is surprisingly poor', detail: 'Perplexity achieves only 49% citation accuracy; You.com 68%; BingChat 66%. 23-32% of relevant statements have no source backing. Systems display more sources than they actually use.', source: 'False Promise of Source-Cited Responses, 2024', anchor: '#false-promise' },
+                { finding: 'Reddit is the #2 social citation source and foundational training data', detail: 'Reddit accounts for 10-40% of AI social citations depending on platform/timeframe. WebText (GPT-2 training) was built from 8M Reddit posts with 3+ karma. Reddit remains pervasive in Common Crawl and is actively licensed to Google ($60M/yr) and OpenAI ($70M/yr).', source: 'Multiple sources, 2024-2025', anchor: '#reddit-training-data' },
+                { finding: 'Community consensus creates unique credibility signals', detail: 'Upvoted comment threads, especially "best X for Y" recommendation discussions, create multi-user validation that LLMs weight heavily. This multi-user signal cannot be replicated by single-author content.', source: 'Bluefish Labs / Emberos, 2025', anchor: '#reddit-community-consensus' },
+                { finding: 'AI Overviews strongly favor top-ranked pages', detail: '76% of Google AI Overview citations come from top-10 organic pages, with median cited position at rank 3. But standalone LLMs (ChatGPT, Claude, Gemini) show only 12% overlap — they cite fundamentally different sources.', source: 'Ahrefs, 2025', anchor: '#ahrefs-aio-citations' },
+                { finding: 'Web mentions outperform backlinks for AI visibility', detail: 'Brand web mentions (0.664 correlation) and YouTube mentions (0.737) are far stronger predictors of AI citation than backlinks (0.37). Top 25% brands by web mentions get 12x more AI Overview mentions than the 50-75th percentile.', source: 'Ahrefs 75K Brands Study, 2025', anchor: '#ahrefs-75k-brands' },
+                { finding: 'AI assistants strongly prefer fresh content', detail: 'Content cited by AI assistants is 25.7% newer on average than traditional search results. 65% of AI bot crawl hits target content less than 1 year old. Freshness signals can shift LLM ranking positions by up to 95 places.', source: 'Ahrefs (17M citations) + arXiv, 2025', anchor: '#ahrefs-freshness' },
+                { finding: 'AI crawlers are growing explosively', detail: 'GPTBot grew 305% YoY, with OpenAI\'s crawl-to-referral ratio at 1,700:1. Each major AI company now runs 3 separate bots (training, indexing, user-fetch). Blocking training bots while allowing search bots is a valid strategy.', source: 'Cloudflare, 2025', anchor: '#cloudflare-ai-crawlers' },
+              ].map((item, i) => (
+                <a key={i} href={item.anchor} className="block bg-dark-900/50 border border-dark-800 rounded-xl p-4 hover:border-primary-500/40 transition-colors group">
+                  <p className="text-white text-sm font-medium group-hover:text-primary-300 transition-colors">{item.finding}</p>
+                  <p className="text-dark-400 text-xs mt-1.5 leading-relaxed">{item.detail}</p>
+                  <p className="text-dark-500 text-[11px] mt-2 flex items-center gap-1.5">{item.source} <svg className="w-3 h-3 text-dark-600 group-hover:text-primary-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12h15m0 0l-6.75-6.75M19.5 12l-6.75 6.75" /></svg></p>
+                </a>
+              ))}
+            </div>
+          </section>
+        </main>
+
+        {/* Footer */}
+        <footer className="border-t border-dark-700 bg-dark-900/80 py-8 mt-12">
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex flex-col items-center gap-4 text-xs">
+              <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-dark-400">
+                <a href="https://github.com/jonradoff/llmopt" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">GitHub (MIT License)</a>
+                <span className="text-dark-700">·</span>
+                <a href="https://www.metavert.io/privacy-policy" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">Privacy Policy</a>
+                <span className="text-dark-700">·</span>
+                <a href="https://www.metavert.io/terms-of-service" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">Terms of Service</a>
+                <span className="text-dark-700">·</span>
+                <button onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} className="hover:text-white transition-colors cursor-pointer">Research Citations</button>
+              </div>
+              <p className="text-dark-500">&copy; 2026 Metavert LLC. All content licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer" className="text-dark-400 hover:text-white transition-colors">Creative Commons Attribution 4.0</a>.</p>
+            </div>
+          </div>
+        </footer>
+      </div>
+    )
+  }
+
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen flex flex-col">
       {/* Header */}
       <header className="sticky top-0 z-50 bg-dark-900/80 backdrop-blur-xl border-b border-dark-800">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
@@ -2464,25 +3575,77 @@ export default function App() {
                 <a href="/signup" className="px-3 py-1.5 text-sm text-white bg-primary-500 hover:bg-primary-600 rounded-lg transition-colors">Sign Up</a>
               </>
             )}
-            <button
-              onClick={() => setActiveTab('status')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
-                activeTab === 'status' ? 'bg-dark-800 text-white' : 'hover:bg-dark-800/50 text-dark-400'
-              }`}
-            >
-              {healthHistory.length > 0 ? (() => {
-                const latest = healthHistory[0]
-                const anyAvailable = latest.models.some(m => m.status === 'available')
-                const allError = latest.models.every(m => m.status === 'error')
-                return <span className={`w-2.5 h-2.5 rounded-full ${anyAvailable ? 'bg-emerald-400' : allError ? 'bg-red-400' : 'bg-amber-400'}`} />
-              })() : <span className="w-2.5 h-2.5 rounded-full bg-dark-600" />}
-              <span className="text-sm">Status</span>
-            </button>
+            {(!saasEnabled || user) && (() => {
+              // Key status overrides for SaaS users
+              if (saasEnabled && user && (apiKeyStatus === 'unconfigured')) {
+                return (
+                  <a
+                    href="/last/settings"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 hover:bg-amber-500/20 transition-colors text-sm font-medium"
+                    title="Configure your API key"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+                    <span className="hidden sm:inline">API Key Needed</span>
+                  </a>
+                )
+              }
+              if (saasEnabled && user && apiKeyStatus === 'invalid') {
+                return (
+                  <a
+                    href="/last/settings"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors text-sm"
+                    title="API key is invalid"
+                  >
+                    <span className="w-2.5 h-2.5 rounded-full bg-red-400" />
+                    <span className="text-sm">Key Invalid</span>
+                  </a>
+                )
+              }
+              if (saasEnabled && user && apiKeyStatus === 'no_credits') {
+                return (
+                  <button
+                    onClick={() => setActiveTab('status')}
+                    className={`relative flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                      activeTab === 'status' ? 'bg-dark-800 text-white' : 'hover:bg-dark-800/50 text-dark-400'
+                    }`}
+                    title="API key needs credits"
+                  >
+                    <span className="relative">
+                      {healthHistory.length > 0 ? (() => {
+                        const latest = healthHistory[0]
+                        const anyAvailable = latest.models.some(m => m.status === 'available')
+                        const allError = latest.models.every(m => m.status === 'error')
+                        return <span className={`w-2.5 h-2.5 rounded-full inline-block ${anyAvailable ? 'bg-emerald-400' : allError ? 'bg-red-400' : 'bg-amber-400'}`} />
+                      })() : <span className="w-2.5 h-2.5 rounded-full inline-block bg-dark-600" />}
+                      <span className="absolute -top-1.5 -right-2 text-amber-400 text-[10px] font-bold">$</span>
+                    </span>
+                    <span className="text-sm">Status</span>
+                  </button>
+                )
+              }
+              // Default: normal status light
+              return (
+                <button
+                  onClick={() => setActiveTab('status')}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                    activeTab === 'status' ? 'bg-dark-800 text-white' : 'hover:bg-dark-800/50 text-dark-400'
+                  }`}
+                >
+                  {healthHistory.length > 0 ? (() => {
+                    const latest = healthHistory[0]
+                    const anyAvailable = latest.models.some(m => m.status === 'available')
+                    const allError = latest.models.every(m => m.status === 'error')
+                    return <span className={`w-2.5 h-2.5 rounded-full ${anyAvailable ? 'bg-emerald-400' : allError ? 'bg-red-400' : 'bg-amber-400'}`} />
+                  })() : <span className="w-2.5 h-2.5 rounded-full bg-dark-600" />}
+                  <span className="text-sm">Status</span>
+                </button>
+              )
+            })()}
           </div>
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+      <main className="flex-1 max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-12 w-full">
         {/* Hero */}
         {!readOnly && (
         <div className="text-center mb-8">
@@ -2571,8 +3734,8 @@ export default function App() {
             >
               Analyze
             </button>
-            {(['todos', 'brand', 'video', 'optimize'] as const).map(tab => {
-              const labels: Record<string, string> = { todos: 'To-Do', brand: 'Brand', video: 'Video', optimize: 'Optimize' }
+            {(['todos', 'brand', 'video', 'reddit', 'search', 'optimize'] as const).map(tab => {
+              const labels: Record<string, string> = { todos: 'To-Do', brand: 'Brand', video: 'YouTube', reddit: 'Reddit', search: 'Search', optimize: 'Optimize' }
               const disabled = !selectedDomain
               return (
                 <button
@@ -2595,7 +3758,12 @@ export default function App() {
                 >
                   {labels[tab]}
                   {tab === 'todos' && selectedDomain && (() => {
-                    const count = todos.filter(t => t.status === 'todo' && domainKey(t.domain) === domainKey(selectedDomain)).length
+                    const todoCount = todos.filter(t => t.status === 'todo' && domainKey(t.domain) === domainKey(selectedDomain)).length
+                    // Include virtual brand intel todo if brand is incomplete
+                    const brandPct = sharedMode
+                      ? (brandEditing ? brandCompleteness : 0)
+                      : (brandList.find(b => domainKey(b.domain) === domainKey(selectedDomain))?.completeness ?? 0)
+                    const count = todoCount + (brandPct < 100 ? 1 : 0)
                     return count > 0 ? (
                       <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] flex items-center justify-center px-1 text-[10px] font-bold bg-red-500 text-white rounded-full leading-none">
                         {count > 99 ? '99+' : count}
@@ -2618,10 +3786,33 @@ export default function App() {
                     return <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-amber-500 rounded-full" />
                   })()}
                   {tab === 'video' && videoAnalyzing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
+                  {tab === 'reddit' && redditAnalyzing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
+                  {tab === 'search' && searchAnalyzing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
                   {tab === 'optimize' && optimizing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
                 </button>
               )
             })}
+            {selectedDomain && !readOnly && (
+              optList.some(o => domainKey(o.domain) === domainKey(selectedDomain)) ||
+              videoAnalysisList.some(v => domainKey(v.domain) === domainKey(selectedDomain)) ||
+              redditAnalysisList.some(r => domainKey(r.domain) === domainKey(selectedDomain)) ||
+              searchAnalysisList.some(s => domainKey(s.domain) === domainKey(selectedDomain))
+            ) && (
+              <button
+                onClick={generatePDF}
+                disabled={pdfGenerating}
+                className="px-2 py-2 rounded-md text-dark-400 hover:text-white transition-all cursor-pointer ml-1 border-l border-dark-700 pl-2 relative"
+                title={pdfGenerating ? pdfProgress || 'Generating report...' : 'Download PDF Report'}
+              >
+                {pdfGenerating ? (
+                  <div className="w-4 h-4 border-2 border-dark-600 border-t-primary-400 rounded-full animate-spin" />
+                ) : (
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                )}
+              </button>
+            )}
           </div>
         </div>
 
@@ -2702,45 +3893,57 @@ export default function App() {
           <>
             {/* Popular Brands */}
             {state !== 'done' && popularDomains.length > 0 && (
-              <div className="max-w-2xl mx-auto mb-12 animate-fade-in">
+              <div className="max-w-4xl mx-auto mb-12 animate-fade-in">
                 <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest mb-4 text-center">
                   Popular Brands
                 </h3>
-                <div className="grid gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   {popularDomains.map(pd => (
                     <a
                       key={pd.share_id}
                       href={`/share/${pd.share_id}`}
-                      className="w-full text-left bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-xl p-4 hover:border-primary-500/50 transition-all cursor-pointer group block"
+                      className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-xl overflow-hidden hover:border-primary-500/50 transition-all cursor-pointer group block"
                     >
-                      <div className="flex items-center gap-3">
-                        {pd.avg_score > 0 ? (
-                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 border ${
-                            pd.avg_score >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' :
-                            pd.avg_score >= 60 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' :
-                            pd.avg_score >= 40 ? 'bg-orange-500/15 text-orange-400 border-orange-500/30' :
-                            'bg-red-500/15 text-red-400 border-red-500/30'
-                          }`}>
-                            {pd.avg_score}
-                          </div>
-                        ) : (
-                          <div className="w-10 h-10 rounded-lg flex items-center justify-center text-sm shrink-0 border bg-dark-800/50 text-dark-500 border-dark-700">
-                            --
-                          </div>
-                        )}
-                        <div className="flex-1 min-w-0">
-                          <p className="text-white text-sm font-medium group-hover:text-primary-300 transition-colors truncate">
-                            {pd.brand_name || pd.domain}
-                          </p>
-                          <p className="text-dark-500 text-xs">
-                            {pd.domain}
-                            {pd.report_count > 0 && <> · {pd.report_count} {pd.report_count === 1 ? 'report' : 'reports'}</>}
-                            {pd.has_video && <> · video</>}
-                          </p>
+                      {pd.has_screenshot && (
+                        <div className="w-full h-48 bg-dark-800 overflow-hidden">
+                          <img
+                            src={`/api/share/popular/${encodeURIComponent(pd.domain)}/screenshot`}
+                            alt={`${pd.brand_name || pd.domain} homepage`}
+                            className="w-full h-full object-cover object-top opacity-70 group-hover:opacity-90 transition-opacity"
+                            loading="lazy"
+                          />
                         </div>
-                        <svg className="w-4 h-4 text-dark-600 group-hover:text-primary-400 transition-colors shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-                        </svg>
+                      )}
+                      <div className="p-4">
+                        <div className="flex items-center gap-3">
+                          {pd.avg_score > 0 ? (
+                            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 border ${
+                              pd.avg_score >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' :
+                              pd.avg_score >= 60 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' :
+                              pd.avg_score >= 40 ? 'bg-orange-500/15 text-orange-400 border-orange-500/30' :
+                              'bg-red-500/15 text-red-400 border-red-500/30'
+                            }`}>
+                              {pd.avg_score}
+                            </div>
+                          ) : (
+                            <div className="w-10 h-10 rounded-lg flex items-center justify-center text-sm shrink-0 border bg-dark-800/50 text-dark-500 border-dark-700">
+                              --
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <p className="text-white text-sm font-medium group-hover:text-primary-300 transition-colors truncate">
+                              {pd.brand_name || pd.domain}
+                            </p>
+                            <p className="text-dark-500 text-xs">
+                              {pd.domain}
+                              {pd.report_count > 0 && <> · {pd.report_count} {pd.report_count === 1 ? 'report' : 'reports'}</>}
+                              {pd.has_video && <> · video</>}
+                            </p>
+                          </div>
+                          <svg className="w-4 h-4 text-dark-600 group-hover:text-primary-400 transition-colors shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                          </svg>
+                        </div>
                       </div>
                     </a>
                   ))}
@@ -2885,7 +4088,148 @@ export default function App() {
                   return null
                 })()}
 
-                {/* Summary Card */}
+                {/* Domain Executive Summary */}
+                {generatingSummary ? (
+                  <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
+                    <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest mb-4">Generating Executive Summary</h3>
+                    {summaryMessages.length > 0 && (
+                      <div className="space-y-3">
+                        {summaryMessages.map((msg, i) => (
+                          <div key={i} className="flex items-center gap-3 text-sm">
+                            {i < summaryMessages.length - 1 ? (
+                              <svg className="w-4 h-4 text-accent-emerald shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                              </svg>
+                            ) : (
+                              <div className="w-4 h-4 shrink-0 flex items-center justify-center">
+                                <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />
+                              </div>
+                            )}
+                            <span className={i < summaryMessages.length - 1 ? 'text-dark-500' : 'text-dark-300'}>{msg}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : activeSummary ? (
+                  <div className="space-y-4">
+                    {/* Summary header */}
+                    <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest">Executive Summary</h3>
+                        {!readOnly && (
+                          <button
+                            onClick={() => generateSummary(selectedDomain)}
+                            className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all cursor-pointer"
+                          >
+                            Regenerate
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Stale banner */}
+                      {activeSummaryStale && !readOnly && (
+                        <div className="flex items-center justify-between bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3 mb-4">
+                          <span className="text-amber-400 text-xs">New or updated reports available since this summary was generated.</span>
+                          <button
+                            onClick={() => generateSummary(selectedDomain)}
+                            className="text-xs px-3 py-1.5 bg-amber-500/20 border border-amber-500/30 text-amber-400 rounded-lg hover:bg-amber-500/30 transition-all cursor-pointer whitespace-nowrap ml-3"
+                          >
+                            Regenerate
+                          </button>
+                        </div>
+                      )}
+
+                      <div className="text-dark-300 text-sm leading-relaxed whitespace-pre-line mb-4">
+                        {activeSummary.result.executive_summary}
+                      </div>
+
+                      {/* Score + dimension bars */}
+                      {activeSummary.result.average_score > 0 && (
+                        <div className="flex items-start gap-4 pt-4 border-t border-dark-800">
+                          <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-lg font-bold border shrink-0 ${
+                            activeSummary.result.average_score >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' :
+                            activeSummary.result.average_score >= 60 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' :
+                            activeSummary.result.average_score >= 40 ? 'bg-orange-500/15 text-orange-400 border-orange-500/30' :
+                            'bg-red-500/15 text-red-400 border-red-500/30'
+                          }`}>
+                            {activeSummary.result.average_score}
+                          </div>
+                          <div className="flex-1">
+                            <div className="text-dark-500 text-xs mb-2">Avg Score (range {activeSummary.result.score_range[0]}–{activeSummary.result.score_range[1]})</div>
+                            {activeSummary.result.dimension_trends && (
+                              <div className="grid grid-cols-2 gap-2">
+                                {[
+                                  { key: 'content_authority', label: 'Content Authority' },
+                                  { key: 'structural_optimization', label: 'Structural' },
+                                  { key: 'source_authority', label: 'Source Authority' },
+                                  { key: 'knowledge_persistence', label: 'Persistence' },
+                                ].map(dim => {
+                                  const score = activeSummary.result.dimension_trends[dim.key] ?? 0
+                                  return (
+                                    <div key={dim.key} className="flex items-center gap-2">
+                                      <span className="text-dark-500 text-xs w-20 shrink-0">{dim.label}</span>
+                                      <div className="flex-1 h-1.5 bg-dark-700 rounded-full overflow-hidden">
+                                        <div className={`h-full rounded-full ${score >= 70 ? 'bg-emerald-500' : score >= 50 ? 'bg-amber-500' : 'bg-red-500'}`} style={{ width: `${score}%` }} />
+                                      </div>
+                                      <span className={`text-xs font-bold w-6 text-right ${score >= 70 ? 'text-emerald-400' : score >= 50 ? 'text-amber-400' : 'text-red-400'}`}>{score}</span>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Metadata */}
+                      <div className="flex items-center gap-3 text-xs text-dark-600 mt-3">
+                        <span>{[
+                          activeSummary.report_count > 0 ? `${activeSummary.report_count} optimization report${activeSummary.report_count !== 1 ? 's' : ''}` : null,
+                          activeSummary.includes_analysis ? 'Site Analysis' : null,
+                          activeSummary.includes_video ? 'YouTube' : null,
+                          activeSummary.includes_reddit ? 'Reddit' : null,
+                        ].filter(Boolean).join(' + ') || 'No reports'} analyzed</span>
+                        <span>·</span>
+                        <span>{new Date(activeSummary.generated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                      </div>
+                    </div>
+
+                    {/* Key Themes */}
+                    {activeSummary.result.themes?.length > 0 && (
+                      <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
+                        <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest mb-4">Key Themes</h3>
+                        <div className="space-y-3">
+                          {activeSummary.result.themes.map((theme, i) => (
+                            <div key={i} className="bg-dark-800/50 rounded-xl p-4">
+                              <h4 className="text-white font-medium text-sm mb-1">{theme.title}</h4>
+                              <p className="text-dark-400 text-sm leading-relaxed">{theme.description}</p>
+                              {theme.report_refs?.length > 0 && (
+                                <div className="mt-2 text-xs text-dark-500">From: {theme.report_refs.join(', ')}</div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                  </div>
+                ) : !readOnly ? (
+                  <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6 flex items-center justify-between">
+                    <div>
+                      <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest mb-1">Executive Summary</h3>
+                      <p className="text-dark-500 text-xs">Synthesize all reports for this domain into a strategic overview.</p>
+                    </div>
+                    <button
+                      onClick={() => generateSummary(selectedDomain)}
+                      className="text-xs px-4 py-2 bg-gradient-to-r from-primary-600 to-primary-500 text-white font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all cursor-pointer whitespace-nowrap"
+                    >
+                      Generate Summary
+                    </button>
+                  </div>
+                ) : null}
+
+                {/* Site Summary Card */}
                 <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
                   <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest mb-3">
                     Site Summary
@@ -3101,47 +4445,26 @@ export default function App() {
                 ) : (() => {
                   const filtered = optList.filter(o => domainKey(o.domain) === domainKey(selectedDomain))
                   const avgScore = filtered.length > 0 ? Math.round(filtered.reduce((s, o) => s + o.overall_score, 0) / filtered.length) : 0
-                  const canonicalDomain = filtered[0]?.domain || selectedDomain
-                  const status = summaryStatuses[canonicalDomain]
                   return filtered.length === 0 ? (
                     <div className="text-center text-dark-500 py-16">
                       No optimization reports for this domain yet.
                     </div>
                   ) : (
                     <div className="space-y-4">
-                      {/* Domain header with summary */}
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-sm font-bold shrink-0 border ${
-                            avgScore >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' :
-                            avgScore >= 60 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' :
-                            avgScore >= 40 ? 'bg-orange-500/15 text-orange-400 border-orange-500/30' :
-                            'bg-red-500/15 text-red-400 border-red-500/30'
-                          }`}>
-                            {avgScore}
-                          </div>
-                          <div>
-                            <h4 className="text-white font-medium text-sm">{selectedDomain}</h4>
-                            <span className="text-xs text-dark-500">{filtered.length} {filtered.length === 1 ? 'report' : 'reports'}</span>
-                          </div>
+                      {/* Domain header */}
+                      <div className="flex items-center gap-3">
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-sm font-bold shrink-0 border ${
+                          avgScore >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' :
+                          avgScore >= 60 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' :
+                          avgScore >= 40 ? 'bg-orange-500/15 text-orange-400 border-orange-500/30' :
+                          'bg-red-500/15 text-red-400 border-red-500/30'
+                        }`}>
+                          {avgScore}
                         </div>
-                        {(readOnly ? activeSummary : true) && (
-                          <button
-                            onClick={() => readOnly ? setOptimizeView('summary') : handleSummaryClick(canonicalDomain)}
-                            className={`text-xs px-3 py-1.5 rounded-lg border transition-all cursor-pointer flex items-center gap-1.5 ${
-                              readOnly || (status?.exists && !status?.stale)
-                                ? 'bg-primary-500/10 border-primary-500/30 text-primary-400 hover:bg-primary-500/20'
-                                : status?.stale
-                                ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20'
-                                : 'bg-dark-800 border-dark-700 text-dark-400 hover:bg-dark-700 hover:text-white'
-                            }`}
-                          >
-                            Summary
-                            {!readOnly && status?.stale && (
-                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                            )}
-                          </button>
-                        )}
+                        <div>
+                          <h4 className="text-white font-medium text-sm">{selectedDomain}</h4>
+                          <span className="text-xs text-dark-500">{filtered.length} {filtered.length === 1 ? 'report' : 'reports'}</span>
+                        </div>
                       </div>
                       {/* Report cards */}
                       <div className="space-y-2">
@@ -3186,246 +4509,6 @@ export default function App() {
                     </div>
                   )
                 })()}
-              </>
-            )}
-
-            {/* === Generating summary view === */}
-            {optimizeView === 'generating-summary' && (
-              <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest">
-                    Generating Domain Summary
-                  </h3>
-                </div>
-                {summaryMessages.length > 0 && (
-                  <div className="space-y-3">
-                    {summaryMessages.map((msg, i) => (
-                      <div key={i} className="flex items-center gap-3 text-sm">
-                        {i < summaryMessages.length - 1 ? (
-                          <svg className="w-4 h-4 text-accent-emerald shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                          </svg>
-                        ) : (
-                          <div className="w-4 h-4 shrink-0 flex items-center justify-center">
-                            <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />
-                          </div>
-                        )}
-                        <span className={i < summaryMessages.length - 1 ? 'text-dark-500' : 'text-dark-300'}>{msg}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {!generatingSummary && summaryMessages.some(m => m.startsWith('Error')) && (
-                  <button onClick={() => setOptimizeView('list')} className="text-xs text-dark-400 hover:text-white mt-4 cursor-pointer">
-                    Back to reports
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* === Summary detail view === */}
-            {optimizeView === 'summary' && (
-              <>
-                <button
-                  onClick={() => { setOptimizeView('list'); fetchOptList() }}
-                  className="text-xs text-dark-400 hover:text-white transition-colors cursor-pointer flex items-center gap-1"
-                >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-                  </svg>
-                  All reports
-                </button>
-
-                {!activeSummary ? (
-                  /* No summary exists */
-                  readOnly ? (
-                    <div className="text-center text-dark-500 py-16">
-                      No summary report available for this domain yet.
-                    </div>
-                  ) : (
-                    <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-8 text-center">
-                      <h3 className="text-white font-semibold text-lg mb-2">Domain Summary for {activeSummaryDomain}</h3>
-                      <p className="text-dark-400 text-sm mb-6 max-w-md mx-auto">
-                        Generate a comprehensive summary that synthesizes all optimization reports and brand intelligence for this domain into a unified strategic overview.
-                      </p>
-                      <button
-                        onClick={() => generateSummary(activeSummaryDomain)}
-                        className="px-5 py-2.5 bg-gradient-to-r from-primary-600 to-primary-500 text-white text-sm font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all cursor-pointer"
-                      >
-                        Generate Summary Report
-                      </button>
-                    </div>
-                  )
-                ) : (
-                  /* Summary exists — full detail */
-                  <div className="space-y-4">
-                    {/* Header */}
-                    <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
-                      <div className="flex items-center justify-between mb-3">
-                        <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest">
-                          Domain Summary
-                        </h3>
-                        {!readOnly && (
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => generateSummary(activeSummary.domain)}
-                              className="text-xs px-3 py-1.5 bg-dark-800 border border-dark-700 text-dark-300 rounded-lg hover:bg-dark-700 hover:text-white transition-all cursor-pointer"
-                            >
-                              Regenerate
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                      <h2 className="text-white font-medium text-lg mb-2">{activeSummary.domain}</h2>
-                      <div className="flex items-center gap-3 text-xs text-dark-500">
-                        <span>{activeSummary.report_count} reports analyzed</span>
-                        <span className="text-dark-600">·</span>
-                        <span>Generated {new Date(activeSummary.generated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
-                        {activeSummary.model && (
-                          <>
-                            <span className="text-dark-600">·</span>
-                            <span>via {activeSummary.model}</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Stale banner */}
-                    {activeSummaryStale && !readOnly && (
-                      <div className="flex items-center justify-between bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3">
-                        <span className="text-amber-400 text-sm">New reports have been added since this summary was generated.</span>
-                        <button
-                          onClick={() => generateSummary(activeSummary.domain)}
-                          className="text-xs px-3 py-1.5 bg-amber-500/20 border border-amber-500/30 text-amber-400 rounded-lg hover:bg-amber-500/30 transition-all cursor-pointer whitespace-nowrap ml-3"
-                        >
-                          Regenerate
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Score overview */}
-                    <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
-                      <div className="flex items-center gap-4 mb-4">
-                        <div className={`w-14 h-14 rounded-xl flex items-center justify-center text-xl font-bold border ${
-                          activeSummary.result.average_score >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' :
-                          activeSummary.result.average_score >= 60 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' :
-                          activeSummary.result.average_score >= 40 ? 'bg-orange-500/15 text-orange-400 border-orange-500/30' :
-                          'bg-red-500/15 text-red-400 border-red-500/30'
-                        }`}>
-                          {activeSummary.result.average_score}
-                        </div>
-                        <div>
-                          <div className="text-white font-medium">Average Score</div>
-                          <div className="text-dark-500 text-xs">Range: {activeSummary.result.score_range[0]} – {activeSummary.result.score_range[1]}</div>
-                        </div>
-                      </div>
-                      {activeSummary.result.dimension_trends && (
-                        <div className="grid grid-cols-2 gap-3">
-                          {[
-                            { key: 'content_authority', label: 'Content Authority' },
-                            { key: 'structural_optimization', label: 'Structural Optimization' },
-                            { key: 'source_authority', label: 'Source Authority' },
-                            { key: 'knowledge_persistence', label: 'Knowledge Persistence' },
-                          ].map(dim => {
-                            const score = activeSummary.result.dimension_trends[dim.key] ?? 0
-                            return (
-                              <div key={dim.key} className="bg-dark-800/50 rounded-lg p-3">
-                                <div className="flex items-center justify-between mb-1.5">
-                                  <span className="text-dark-400 text-xs">{dim.label}</span>
-                                  <span className={`text-xs font-bold ${score >= 70 ? 'text-emerald-400' : score >= 50 ? 'text-amber-400' : 'text-red-400'}`}>{score}</span>
-                                </div>
-                                <div className="w-full h-1.5 bg-dark-700 rounded-full overflow-hidden">
-                                  <div className={`h-full rounded-full transition-all ${score >= 70 ? 'bg-emerald-500' : score >= 50 ? 'bg-amber-500' : 'bg-red-500'}`} style={{ width: `${score}%` }} />
-                                </div>
-                              </div>
-                            )
-                          })}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Executive Summary */}
-                    <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
-                      <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest mb-3">Executive Summary</h3>
-                      <div className="text-dark-300 text-sm leading-relaxed whitespace-pre-line">
-                        {activeSummary.result.executive_summary}
-                      </div>
-                    </div>
-
-                    {/* Themes */}
-                    {activeSummary.result.themes?.length > 0 && (
-                      <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
-                        <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest mb-4">Key Themes</h3>
-                        <div className="space-y-3">
-                          {activeSummary.result.themes.map((theme, i) => (
-                            <div key={i} className="bg-dark-800/50 rounded-xl p-4">
-                              <h4 className="text-white font-medium text-sm mb-1">{theme.title}</h4>
-                              <p className="text-dark-400 text-sm leading-relaxed">{theme.description}</p>
-                              {theme.report_refs?.length > 0 && (
-                                <div className="mt-2 text-xs text-dark-500">From reports: {theme.report_refs.join(', ')}</div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Priority Action Items */}
-                    {activeSummary.result.action_items?.length > 0 && (
-                      <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
-                        <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest mb-4">Priority Actions</h3>
-                        <div className="space-y-2">
-                          {activeSummary.result.action_items.map((item, i) => (
-                            <div key={i} className="flex items-start gap-3 bg-dark-800/50 rounded-xl p-4">
-                              <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase shrink-0 mt-0.5 ${
-                                item.priority === 'high' ? 'bg-red-500/15 text-red-400 border border-red-500/20' :
-                                item.priority === 'medium' ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20' :
-                                'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'
-                              }`}>
-                                {item.priority}
-                              </span>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-white text-sm">{item.action}</p>
-                                {item.expected_impact && (
-                                  <p className="text-dark-500 text-xs mt-1">{item.expected_impact}</p>
-                                )}
-                                <div className="flex items-center gap-2 mt-1 text-xs text-dark-600">
-                                  {item.dimension && <span>{item.dimension.replace(/_/g, ' ')}</span>}
-                                  {item.source_reports?.length > 0 && (
-                                    <>
-                                      <span>·</span>
-                                      <span>From reports: {item.source_reports.join(', ')}</span>
-                                    </>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Contradictions */}
-                    {activeSummary.result.contradictions?.length > 0 && (
-                      <div className="bg-dark-900/50 backdrop-blur-sm border border-amber-500/20 rounded-2xl p-6">
-                        <h3 className="text-xs font-semibold text-amber-400 uppercase tracking-widest mb-4">Contradictions to Resolve</h3>
-                        <div className="space-y-3">
-                          {activeSummary.result.contradictions.map((c, i) => (
-                            <div key={i} className="bg-amber-500/5 border border-amber-500/10 rounded-xl p-4">
-                              <h4 className="text-white font-medium text-sm mb-2">{c.topic}</h4>
-                              <div className="space-y-1 mb-2">
-                                {c.positions.map((pos, j) => (
-                                  <p key={j} className="text-dark-400 text-sm pl-3 border-l-2 border-amber-500/30">{pos}</p>
-                                ))}
-                              </div>
-                              <p className="text-dark-300 text-sm"><span className="text-amber-400 font-medium">Recommendation:</span> {c.recommendation}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
               </>
             )}
 
@@ -3794,8 +4877,11 @@ export default function App() {
             {/* Brand Intel virtual todo for selected domain */}
             {(() => {
               const brand = brandList.find(b => domainKey(b.domain) === domainKey(selectedDomain))
-              const completeness = brand?.completeness ?? 0
-              const brandName = brand?.brand_name || selectedDomain
+              // In shared mode, use brandCompleteness from form state since brandList isn't populated
+              const completeness = sharedMode
+                ? (brandEditing ? brandCompleteness : 0)
+                : (brand?.completeness ?? 0)
+              const brandName = brand?.brand_name || (sharedMode ? (brandForm.brand_name || selectedDomain) : selectedDomain)
               const brandIntelItems = [{ domain: selectedDomain, completeness, brandName }]
 
               // Items with <100% go in "todo", items with 100% go in "completed"
@@ -3848,16 +4934,18 @@ export default function App() {
                               </div>
                             </div>
                           </div>
-                          <button
-                            onClick={() => {
-                              const brand = brandList.find(b => b.domain === item.domain)
-                              if (brand) { loadBrandProfile(item.domain); } else { startNewBrand(item.domain); }
-                              setActiveTab('brand')
-                            }}
-                            className="text-xs px-3 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg hover:bg-amber-500/20 transition-all cursor-pointer whitespace-nowrap shrink-0"
-                          >
-                            {item.completeness === 0 ? 'Set Up' : 'Complete'}
-                          </button>
+                          {!readOnly && (
+                            <button
+                              onClick={() => {
+                                const brand = brandList.find(b => b.domain === item.domain)
+                                if (brand) { loadBrandProfile(item.domain); } else { startNewBrand(item.domain); }
+                                setActiveTab('brand')
+                              }}
+                              className="text-xs px-3 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg hover:bg-amber-500/20 transition-all cursor-pointer whitespace-nowrap shrink-0"
+                            >
+                              {item.completeness === 0 ? 'Set Up' : 'Complete'}
+                            </button>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -3973,7 +5061,9 @@ export default function App() {
                                 </button>
                                 <div className="flex items-center gap-1.5 shrink-0">
                                   {todo.source_type === 'video' ? (
-                                    <span className="text-[9px] px-1 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 font-medium">Video</span>
+                                    <span className="text-[9px] px-1 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 font-medium">YouTube</span>
+                                  ) : todo.source_type === 'reddit' ? (
+                                    <span className="text-[9px] px-1 py-0.5 rounded bg-orange-500/20 text-orange-300 border border-orange-500/30 font-medium">Reddit</span>
                                   ) : (
                                     <span className="text-[9px] px-1 py-0.5 rounded bg-primary-500/20 text-primary-300 border border-primary-500/30 font-medium">Site</span>
                                   )}
@@ -3985,6 +5075,9 @@ export default function App() {
                                           if (todo.source_type === 'video') {
                                             loadVideoAnalysis(todo.domain)
                                             setActiveTab('video')
+                                          } else if (todo.source_type === 'reddit') {
+                                            loadRedditAnalysis(todo.domain)
+                                            setActiveTab('reddit')
                                           } else {
                                             loadOptimizationDetail(todo.optimization_id)
                                             setActiveTab('optimize')
@@ -4170,6 +5263,44 @@ export default function App() {
         {/* ===== STATUS TAB ===== */}
         {activeTab === 'status' && (
           <div className="max-w-2xl mx-auto animate-fade-in space-y-6">
+            {/* API Key Status Banner */}
+            {saasEnabled && user && apiKeyStatus === 'unconfigured' && (
+              <div className="flex items-center gap-3 p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl">
+                <svg className="w-5 h-5 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+                <div className="flex-1">
+                  <p className="text-sm text-amber-300 font-medium">Configure your API key to start analyzing</p>
+                  <p className="text-xs text-dark-400 mt-0.5">You need an Anthropic API key to use LLM features.</p>
+                </div>
+                <a href="/last/settings" className="px-3 py-1.5 text-sm bg-amber-500/20 text-amber-300 rounded-lg hover:bg-amber-500/30 transition-colors whitespace-nowrap">Go to Settings</a>
+              </div>
+            )}
+            {saasEnabled && user && apiKeyStatus === 'no_credits' && (
+              <div className="flex items-center gap-3 p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl">
+                <span className="text-amber-400 text-lg shrink-0">$</span>
+                <div className="flex-1">
+                  <p className="text-sm text-amber-300 font-medium">Your API key needs credits</p>
+                  <p className="text-xs text-dark-400 mt-0.5">Add credits to your Anthropic account to continue analyzing.</p>
+                </div>
+                <a href="/last/settings" className="px-3 py-1.5 text-sm bg-amber-500/20 text-amber-300 rounded-lg hover:bg-amber-500/30 transition-colors whitespace-nowrap">Settings</a>
+              </div>
+            )}
+            {saasEnabled && user && apiKeyStatus === 'invalid' && (
+              <div className="flex items-center gap-3 p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
+                <svg className="w-5 h-5 text-red-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+                <div className="flex-1">
+                  <p className="text-sm text-red-300 font-medium">Your API key is invalid</p>
+                  <p className="text-xs text-dark-400 mt-0.5">Please update your Anthropic API key in Settings.</p>
+                </div>
+                <a href="/last/settings" className="px-3 py-1.5 text-sm bg-red-500/20 text-red-300 rounded-lg hover:bg-red-500/30 transition-colors whitespace-nowrap">Settings</a>
+              </div>
+            )}
+            {saasEnabled && user && apiKeyStatus === 'active' && (
+              <div className="flex items-center gap-2 p-3 bg-emerald-500/5 border border-emerald-500/20 rounded-xl">
+                <svg className="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
+                <p className="text-sm text-emerald-400">Your API key is active</p>
+              </div>
+            )}
+
             {/* Current Status Card */}
             <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
               <div className="flex items-center justify-between mb-4">
@@ -4720,7 +5851,7 @@ export default function App() {
                               <button
                                 onClick={addSelectedCompetitors}
                                 disabled={discoverSelected.size === 0}
-                                className="text-xs text-primary-400 hover:text-primary-300 cursor-pointer disabled:opacity-50"
+                                className={`text-xs px-3 py-1 rounded-lg cursor-pointer disabled:opacity-50 transition-all font-medium ${discoverSelected.size > 0 ? 'bg-primary-600 text-white hover:bg-primary-500 animate-pulse' : 'bg-dark-700 text-dark-400'}`}
                               >
                                 Add Selected ({discoverSelected.size})
                               </button>
@@ -4901,7 +6032,7 @@ export default function App() {
                                 <button
                                   onClick={addSelectedQueries}
                                   disabled={suggestSelected.size === 0}
-                                  className="text-xs text-primary-400 hover:text-primary-300 cursor-pointer disabled:opacity-50"
+                                  className={`text-xs px-3 py-1 rounded-lg cursor-pointer disabled:opacity-50 transition-all font-medium ${suggestSelected.size > 0 ? 'bg-primary-600 text-white hover:bg-primary-500 animate-pulse' : 'bg-dark-700 text-dark-400'}`}
                                 >
                                   Add Selected ({suggestSelected.size})
                                 </button>
@@ -5037,7 +6168,7 @@ export default function App() {
                                 <button
                                   onClick={addSelectedClaims}
                                   disabled={suggestClaimSelected.size === 0}
-                                  className="text-xs px-2.5 py-1 bg-primary-600 text-white rounded-lg hover:bg-primary-500 cursor-pointer disabled:opacity-50"
+                                  className={`text-xs px-3 py-1 rounded-lg cursor-pointer disabled:opacity-50 transition-all font-medium ${suggestClaimSelected.size > 0 ? 'bg-primary-600 text-white hover:bg-primary-500 animate-pulse' : 'bg-dark-700 text-dark-400'}`}
                                 >
                                   Add Selected ({suggestClaimSelected.size})
                                 </button>
@@ -5122,7 +6253,7 @@ export default function App() {
                                 <button
                                   onClick={addSelectedDifferentiators}
                                   disabled={suggestDiffSelected.size === 0}
-                                  className="text-xs text-primary-400 hover:text-primary-300 cursor-pointer disabled:opacity-50"
+                                  className={`text-xs px-3 py-1 rounded-lg cursor-pointer disabled:opacity-50 transition-all font-medium ${suggestDiffSelected.size > 0 ? 'bg-primary-600 text-white hover:bg-primary-500 animate-pulse' : 'bg-dark-700 text-dark-400'}`}
                                 >
                                   Add Selected ({suggestDiffSelected.size})
                                 </button>
@@ -5391,19 +6522,28 @@ export default function App() {
                   </div>
 
                   <div>
-                    <label className="block text-sm text-dark-400 mb-1">Key Topics / Search Terms</label>
+                    <label className="block text-sm text-dark-400 mb-1">
+                      Key Topics / Search Terms
+                      {videoSearchTerms.some(t => videoSearchTermSources.get(t) === 'optimization') && (
+                        <span className="text-amber-400 text-xs ml-2">includes {videoSearchTerms.filter(t => videoSearchTermSources.get(t) === 'optimization').length} optimization {videoSearchTerms.filter(t => videoSearchTermSources.get(t) === 'optimization').length === 1 ? 'question' : 'questions'}</span>
+                      )}
+                    </label>
                     <div className="flex flex-wrap gap-2 mb-2">
-                      {videoSearchTerms.map((term, i) => (
-                        <span key={i} className="inline-flex items-center gap-1 px-3 py-1 bg-primary-500/20 text-primary-300 border border-primary-500/30 rounded-full text-sm">
-                          {term}
-                          <button
-                            onClick={() => setVideoSearchTerms(prev => prev.filter((_, j) => j !== i))}
-                            className="hover:text-white transition-colors cursor-pointer"
-                          >
-                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                          </button>
-                        </span>
-                      ))}
+                      {videoSearchTerms.map((term, i) => {
+                        const isOpt = videoSearchTermSources.get(term) === 'optimization'
+                        return (
+                          <span key={i} className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm border ${isOpt ? 'bg-amber-500/15 text-amber-300 border-amber-500/25' : 'bg-primary-500/20 text-primary-300 border-primary-500/30'}`}>
+                            {isOpt && <span className="text-[10px] opacity-60 mr-0.5">Q</span>}
+                            {term}
+                            <button
+                              onClick={() => setVideoSearchTerms(prev => prev.filter((_, j) => j !== i))}
+                              className="hover:text-white transition-colors cursor-pointer"
+                            >
+                              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                          </span>
+                        )
+                      })}
                     </div>
                     <input
                       type="text"
@@ -5464,7 +6604,10 @@ export default function App() {
                           onClick={() => loadVideoAnalysis(a.domain)}
                           className="w-full text-left px-4 py-3 bg-dark-800/50 border border-dark-700 rounded-xl hover:border-primary-500/30 transition-all cursor-pointer flex items-center justify-between"
                         >
-                          <div>
+                          <div className="flex items-center gap-2">
+                            {isVideoAnalysisStale(a.generated_at, a.domain) && (
+                              <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" title="New optimization questions since this analysis" />
+                            )}
                             <span className="text-dark-500 text-xs">
                               {a.video_count} videos &middot; {fmtDate(a.generated_at)}
                             </span>
@@ -5494,7 +6637,7 @@ export default function App() {
                 <p className="text-dark-400 text-center text-sm">Searching for videos related to {videoDomain}</p>
 
                 <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
-                  <div className="space-y-3">
+                  <div className="space-y-3 max-h-64 overflow-y-auto">
                     {videoMessages.map((msg, i) => (
                       <div key={i} className="flex items-center gap-3 text-sm">
                         {i < videoMessages.length - 1 ? (
@@ -5511,6 +6654,7 @@ export default function App() {
                         <span className="text-dark-300">Connecting to YouTube API...</span>
                       </div>
                     )}
+                    <div ref={videoMessagesEndRef} />
                   </div>
                 </div>
               </div>
@@ -5701,7 +6845,7 @@ export default function App() {
                       onChange={e => setVideoAutoArchive(e.target.checked)}
                       className="w-3.5 h-3.5 rounded border-dark-600 bg-dark-800 text-primary-500 focus:ring-primary-500/30 cursor-pointer"
                     />
-                    <span className="text-dark-400 text-xs">Automatically archive incomplete video recommendations in your to-do list</span>
+                    <span className="text-dark-400 text-xs">Automatically archive incomplete YouTube recommendations in your to-do list</span>
                   </label>
                 </div>
 
@@ -5770,7 +6914,7 @@ export default function App() {
                 <p className="text-dark-400 text-center text-sm">Full authority analysis for {videoDomain}</p>
 
                 <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
-                  <div className="space-y-3">
+                  <div className="space-y-3 max-h-64 overflow-y-auto">
                     {videoMessages.map((msg, i) => (
                       <div key={i} className="flex items-center gap-3 text-sm">
                         {i < videoMessages.length - 1 ? (
@@ -5787,6 +6931,7 @@ export default function App() {
                         <span className="text-dark-300">Starting analysis...</span>
                       </div>
                     )}
+                    <div ref={videoMessagesEndRef} />
                   </div>
                 </div>
 
@@ -5883,6 +7028,37 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Stale: new optimization questions since this analysis */}
+                {videoStaleOptimizations.length > 0 && (
+                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                        </svg>
+                        <span className="text-amber-400 text-sm font-medium">
+                          {videoStaleOptimizations.length} new optimization {videoStaleOptimizations.length === 1 ? 'question' : 'questions'} since this video analysis
+                        </span>
+                      </div>
+                      {!readOnly && (
+                        <button
+                          onClick={() => { setVideoView('input'); setVideoAnalysis(null) }}
+                          className="text-xs px-3 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg hover:bg-amber-500/20 transition-all cursor-pointer whitespace-nowrap shrink-0"
+                        >
+                          Re-run with New Questions
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {videoStaleOptimizations.map(o => (
+                        <span key={o.id} className="text-xs px-2 py-1 bg-amber-500/10 text-amber-300 border border-amber-500/20 rounded-md">
+                          {o.question}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Unified 4-Pillar Report */}
                 {videoAnalysis.result && (() => {
                   const r = videoAnalysis.result
@@ -5961,10 +7137,10 @@ export default function App() {
                         ))}
                       </div>
 
-                      {/* Executive Summary */}
+                      {/* Summary */}
                       {r.executive_summary && (
                         <div className="bg-primary-500/5 border border-primary-500/20 rounded-2xl p-6">
-                          <h3 className="text-primary-300 font-semibold mb-3">Executive Summary</h3>
+                          <h3 className="text-primary-300 font-semibold mb-3">Summary</h3>
                           <p className="text-dark-300 text-sm leading-relaxed whitespace-pre-wrap">{r.executive_summary}</p>
                         </div>
                       )}
@@ -6348,7 +7524,996 @@ export default function App() {
             )}
           </div>
         )}
+
+        {/* ─── Reddit Tab ──────────────────────────────────────── */}
+        {activeTab === 'reddit' && (
+          <div className="max-w-4xl mx-auto animate-fade-in">
+
+            {/* Input View */}
+            {redditView === 'input' && readOnly && (
+              <div className="text-center py-12">
+                <p className="text-dark-400">No Reddit analysis available for this domain.</p>
+              </div>
+            )}
+
+            {redditView === 'input' && !readOnly && (
+              <>
+                {/* Domain auto-populated — show as label */}
+                <div className="mb-6">
+                  <div className="flex items-center gap-3 mb-1">
+                    <h2 className="text-xl font-bold text-white">Reddit Authority Analyzer</h2>
+                  </div>
+                  <p className="text-dark-400 text-sm">Analyze Reddit discussions to assess how Reddit influences LLMs to recommend your brand.</p>
+                </div>
+
+                {/* Settings panel */}
+                <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl mb-6">
+                  <button
+                    onClick={() => setRedditSettingsOpen(!redditSettingsOpen)}
+                    className="w-full px-5 py-4 flex items-center justify-between cursor-pointer"
+                  >
+                    <span className="text-white font-medium text-sm">Settings</span>
+                    <svg className={`w-4 h-4 text-dark-400 transition-transform ${redditSettingsOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+                  </button>
+
+                  {redditSettingsOpen && (
+                    <div className="px-5 pb-5 space-y-5 border-t border-dark-800 pt-4">
+                      {/* Subreddits */}
+                      <div>
+                        <label className="block text-sm text-dark-400 mb-1">Subreddits to Search</label>
+                        <div className="flex flex-wrap gap-2 mb-2">
+                          {redditSubreddits.map((sub, i) => (
+                            <span key={i} className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm border bg-orange-500/15 text-orange-300 border-orange-500/25">
+                              r/{sub}
+                              <button onClick={() => setRedditSubreddits(prev => prev.filter((_, j) => j !== i))} className="ml-0.5 hover:text-white cursor-pointer">
+                                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                        <input
+                          type="text"
+                          value={redditSubredditInput}
+                          onChange={e => setRedditSubredditInput(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && redditSubredditInput.trim()) {
+                              e.preventDefault()
+                              const sub = redditSubredditInput.trim().replace(/^\/?(r\/)?/, '')
+                              if (sub && !redditSubreddits.includes(sub)) {
+                                setRedditSubreddits(prev => [...prev, sub])
+                              }
+                              setRedditSubredditInput('')
+                            }
+                          }}
+                          placeholder="Add subreddit (e.g. technology) and press Enter"
+                          className="w-full px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-white placeholder-dark-500 focus:outline-none focus:border-primary-500 text-sm"
+                        />
+                        {redditSubreddits.length === 0 && (
+                          <p className="text-dark-500 text-xs mt-1">No specific subreddits — will search all of Reddit</p>
+                        )}
+                      </div>
+
+                      {/* Time filter */}
+                      <div>
+                        <label className="block text-sm text-dark-400 mb-1">Time Range</label>
+                        <div className="flex gap-2">
+                          {([['month', 'Past Month'], ['year', 'Past Year'], ['all', 'All Time']] as const).map(([value, label]) => (
+                            <button
+                              key={value}
+                              onClick={() => setRedditTimeFilter(value)}
+                              className={`px-3 py-1.5 text-xs rounded-lg border cursor-pointer transition-colors ${
+                                redditTimeFilter === value
+                                  ? 'bg-primary-600/20 border-primary-500/40 text-primary-300'
+                                  : 'bg-dark-800 border-dark-700 text-dark-400 hover:text-white'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Search Terms */}
+                <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-5 mb-6">
+                  <label className="block text-sm text-dark-400 mb-1">
+                    Key Topics / Search Terms
+                    {redditSearchTerms.some(t => redditSearchTermSources.get(t) === 'optimization') && (
+                      <span className="text-amber-400 text-xs ml-2">
+                        includes {redditSearchTerms.filter(t => redditSearchTermSources.get(t) === 'optimization').length} optimization questions
+                      </span>
+                    )}
+                  </label>
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    {redditSearchTerms.map((term, i) => {
+                      const isOpt = redditSearchTermSources.get(term) === 'optimization'
+                      return (
+                        <span key={i} className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm border ${
+                          isOpt ? 'bg-amber-500/15 text-amber-300 border-amber-500/25' : 'bg-primary-500/20 text-primary-300 border-primary-500/30'
+                        }`}>
+                          {isOpt && <span className="text-[10px] opacity-60 mr-0.5">Q</span>}
+                          {term}
+                          <button onClick={() => {
+                            setRedditSearchTerms(prev => prev.filter((_, j) => j !== i))
+                            setRedditSearchTermSources(prev => { const m = new Map(prev); m.delete(term); return m })
+                          }} className="ml-0.5 hover:text-white cursor-pointer">
+                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                          </button>
+                        </span>
+                      )
+                    })}
+                  </div>
+                  <input
+                    type="text"
+                    value={redditSearchTermInput}
+                    onChange={e => setRedditSearchTermInput(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && redditSearchTermInput.trim()) {
+                        e.preventDefault()
+                        const term = redditSearchTermInput.trim()
+                        if (!redditSearchTerms.map(t => t.toLowerCase()).includes(term.toLowerCase())) {
+                          setRedditSearchTerms(prev => [...prev, term])
+                        }
+                        setRedditSearchTermInput('')
+                      }
+                    }}
+                    placeholder="Add a search term and press Enter"
+                    className="w-full px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-white placeholder-dark-500 focus:outline-none focus:border-primary-500 text-sm"
+                  />
+                </div>
+
+                {/* Discover button */}
+                <button
+                  onClick={redditDiscover}
+                  disabled={redditSearchTerms.length === 0 || redditDiscovering}
+                  className="w-full py-3 bg-gradient-to-r from-orange-600 to-orange-500 text-white font-semibold rounded-xl hover:from-orange-500 hover:to-orange-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer text-sm"
+                >
+                  {redditDiscovering ? 'Discovering...' : 'Discover Reddit Threads'}
+                </button>
+
+                {/* Previous analyses */}
+                {redditAnalysisList.length > 0 && (
+                  <div className="mt-8">
+                    <h3 className="text-sm font-medium text-dark-400 mb-3">Previous Analyses</h3>
+                    <div className="space-y-2">
+                      {redditAnalysisList.map(a => (
+                        <button
+                          key={a.id}
+                          onClick={() => loadRedditAnalysis(a.domain)}
+                          className="w-full text-left px-4 py-3 bg-dark-900/50 border border-dark-800 rounded-xl hover:border-primary-500/40 transition-colors cursor-pointer"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-white text-sm font-medium">{a.domain}</span>
+                            {a.overall_score != null && (
+                              <span className={`text-sm font-bold ${a.overall_score >= 80 ? 'text-emerald-400' : a.overall_score >= 60 ? 'text-amber-400' : a.overall_score >= 40 ? 'text-orange-400' : 'text-red-400'}`}>
+                                {a.overall_score}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {isRedditAnalysisStale(a.generated_at, a.domain) && (
+                              <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" title="New optimization questions since this analysis" />
+                            )}
+                            <span className="text-dark-500 text-xs">{a.thread_count} threads · {fmtDate(a.generated_at)}</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Discovering View */}
+            {redditView === 'discovering' && (
+              <div className="py-8">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="w-5 h-5 border-2 border-orange-400 border-t-transparent rounded-full animate-spin" />
+                  <span className="text-white font-medium">Discovering Reddit threads...</span>
+                </div>
+                <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                  {redditMessages.map((msg, i) => (
+                    <p key={i} className="text-dark-400 text-sm">{msg}</p>
+                  ))}
+                  <div ref={redditMessagesEndRef} />
+                </div>
+              </div>
+            )}
+
+            {/* Review View — show discovered threads */}
+            {redditView === 'review' && (
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-bold text-white">
+                    {discoveredThreads.length} Threads Found
+                  </h2>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => { setRedditView('input'); setDiscoveredThreads([]); setSelectedThreadIds(new Set()) }}
+                      className="px-3 py-1.5 text-xs text-dark-400 border border-dark-700 rounded-lg hover:text-white cursor-pointer"
+                    >
+                      Back
+                    </button>
+                    <button
+                      onClick={() => setSelectedThreadIds(prev => prev.size === discoveredThreads.length ? new Set() : new Set(discoveredThreads.map(t => t.id)))}
+                      className="px-3 py-1.5 text-xs text-dark-400 border border-dark-700 rounded-lg hover:text-white cursor-pointer"
+                    >
+                      {selectedThreadIds.size === discoveredThreads.length ? 'Deselect All' : 'Select All'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-2 max-h-[60vh] overflow-y-auto mb-6">
+                  {discoveredThreads.map(t => {
+                    const selected = selectedThreadIds.has(t.id)
+                    return (
+                      <div
+                        key={t.id}
+                        onClick={() => setSelectedThreadIds(prev => {
+                          const s = new Set(prev)
+                          if (s.has(t.id)) s.delete(t.id); else s.add(t.id)
+                          return s
+                        })}
+                        className={`px-4 py-3 rounded-xl border cursor-pointer transition-colors ${
+                          selected
+                            ? 'bg-orange-500/10 border-orange-500/30'
+                            : 'bg-dark-900/50 border-dark-800 hover:border-dark-700'
+                        }`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className={`w-4 h-4 rounded border mt-0.5 flex items-center justify-center shrink-0 ${selected ? 'bg-orange-500 border-orange-500' : 'border-dark-600'}`}>
+                            {selected && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-0.5">
+                              <span className="text-xs px-1.5 py-0.5 bg-orange-500/15 text-orange-300 border border-orange-500/20 rounded">r/{t.subreddit}</span>
+                              <span className="text-dark-500 text-xs">{t.score} pts · {t.num_comments} comments</span>
+                              <span className="text-dark-600 text-xs">· {fmtDate(t.created_utc)}</span>
+                            </div>
+                            <p className="text-white text-sm">{t.title}</p>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                <button
+                  onClick={redditAnalyze}
+                  disabled={selectedThreadIds.size === 0}
+                  className="w-full py-3 bg-gradient-to-r from-orange-600 to-orange-500 text-white font-semibold rounded-xl hover:from-orange-500 hover:to-orange-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer text-sm"
+                >
+                  Analyze {selectedThreadIds.size} Thread{selectedThreadIds.size !== 1 ? 's' : ''}
+                </button>
+                <label className="flex items-center gap-2 cursor-pointer mt-2">
+                  <input
+                    type="checkbox"
+                    checked={redditAutoArchive}
+                    onChange={e => setRedditAutoArchive(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-dark-600 bg-dark-800 text-orange-500 focus:ring-orange-500/30 cursor-pointer"
+                  />
+                  <span className="text-dark-400 text-xs">Archive to-dos for previous Reddit findings</span>
+                </label>
+              </div>
+            )}
+
+            {/* Running View */}
+            {redditView === 'running' && (
+              <div className="py-8">
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-3">
+                    <div className="w-5 h-5 border-2 border-orange-400 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-white font-medium">Analyzing Reddit threads...</span>
+                  </div>
+                  <button onClick={redditAnalyzeStop} className="px-3 py-1.5 text-xs text-dark-400 border border-dark-700 rounded-lg hover:text-white cursor-pointer">
+                    Stop
+                  </button>
+                </div>
+                <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                  {redditMessages.map((msg, i) => (
+                    <p key={i} className={`text-sm ${i === redditMessages.length - 1 ? 'text-white' : 'text-dark-500'}`}>{msg}</p>
+                  ))}
+                  <div ref={redditMessagesEndRef} />
+                </div>
+              </div>
+            )}
+
+            {/* Results View */}
+            {redditView === 'results' && redditAnalysis?.result && (() => {
+              const r = redditAnalysis.result
+              const scoreColor = (s: number) => s >= 80 ? 'text-emerald-400' : s >= 60 ? 'text-amber-400' : s >= 40 ? 'text-orange-400' : 'text-red-400'
+              const barColor = (s: number) => s >= 80 ? 'bg-emerald-400' : s >= 60 ? 'bg-amber-400' : s >= 40 ? 'bg-orange-400' : 'bg-red-400'
+
+              return (
+                <div className="space-y-6">
+                  {/* Staleness banner */}
+                  {redditStaleOptimizations.length > 0 && (
+                    <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 space-y-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+                          <span className="text-amber-400 text-sm font-medium">
+                            {redditStaleOptimizations.length} new optimization {redditStaleOptimizations.length === 1 ? 'question' : 'questions'} since this Reddit analysis
+                          </span>
+                        </div>
+                        {!readOnly && (
+                          <button onClick={() => { setRedditView('input'); setRedditAnalysis(null) }} className="px-3 py-1.5 text-xs font-medium text-amber-400 border border-amber-500/30 rounded-lg hover:bg-amber-500/10 transition-colors cursor-pointer whitespace-nowrap">
+                            Re-run with New Questions
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {redditStaleOptimizations.map(o => (
+                          <span key={o.id} className="text-xs px-2 py-1 bg-amber-500/10 text-amber-300 border border-amber-500/20 rounded-md">{o.question}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Header with overall score */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                      <div className={`w-16 h-16 rounded-2xl border-2 flex items-center justify-center text-2xl font-bold ${
+                        r.overall_score >= 80 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+                        : r.overall_score >= 60 ? 'border-amber-500/40 bg-amber-500/10 text-amber-400'
+                        : r.overall_score >= 40 ? 'border-orange-500/40 bg-orange-500/10 text-orange-400'
+                        : 'border-red-500/40 bg-red-500/10 text-red-400'
+                      }`}>
+                        {r.overall_score}
+                      </div>
+                      <div>
+                        <h2 className="text-white font-bold text-lg">{redditDomain}</h2>
+                        <div className="flex items-center gap-2 text-dark-500 text-xs mt-0.5">
+                          <span>{redditAnalysis.threads?.length || 0} threads analyzed</span>
+                          <span>·</span>
+                          <span>{fmtDate(redditAnalysis.generated_at)}</span>
+                          {redditAnalysis.brand_context_used && (
+                            <>
+                              <span>·</span>
+                              <span className="text-primary-400">Brand context used</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    {!readOnly && (
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => { setRedditView('input'); setRedditAnalysis(null) }}
+                          className="px-3 py-1.5 text-xs text-dark-400 border border-dark-700 rounded-lg hover:text-white cursor-pointer"
+                        >
+                          New Analysis
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteRedditAnalysis(true)}
+                          className="px-3 py-1.5 text-xs text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/10 cursor-pointer"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 4-Pillar Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {[
+                      { name: 'Presence', weight: '25%', score: r.presence?.score || 0, desc: 'Volume and breadth of mentions across subreddits' },
+                      { name: 'Sentiment', weight: '25%', score: r.sentiment?.score || 0, desc: 'Community tone, recommendation frequency' },
+                      { name: 'Competitive', weight: '25%', score: r.competitive?.score || 0, desc: 'Head-to-head positioning vs. competitors' },
+                      { name: 'Training Signal', weight: '25%', score: r.training_signal?.score || 0, desc: 'Likelihood Reddit content influences LLM training' },
+                    ].map(dim => (
+                      <div key={dim.name} className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-5">
+                        <div className="flex items-center justify-between mb-3">
+                          <div>
+                            <h4 className="text-white font-medium text-sm">{dim.name}</h4>
+                            <span className="text-dark-500 text-xs">{dim.weight} weight</span>
+                          </div>
+                          <span className={`text-lg font-bold ${scoreColor(dim.score)}`}>{dim.score}</span>
+                        </div>
+                        <div className="h-1.5 bg-dark-800 rounded-full mb-3 overflow-hidden">
+                          <div className={`h-full rounded-full ${barColor(dim.score)}`} style={{ width: `${dim.score}%` }} />
+                        </div>
+                        <p className="text-dark-500 text-xs leading-relaxed">{dim.desc}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Summary */}
+                  {r.executive_summary && (
+                    <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
+                      <h3 className="text-white font-semibold text-sm mb-3">Summary</h3>
+                      <div className="text-dark-300 text-sm leading-relaxed whitespace-pre-wrap">{r.executive_summary}</div>
+                    </div>
+                  )}
+
+                  {/* Sentiment breakdown */}
+                  {r.sentiment?.sentiment && (
+                    <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
+                      <h3 className="text-white font-semibold text-sm mb-4">What Reddit Thinks About You</h3>
+                      <div className="grid grid-cols-3 gap-4 mb-4">
+                        {[
+                          { label: 'Positive', count: r.sentiment.sentiment.positive, color: 'text-emerald-400' },
+                          { label: 'Neutral', count: r.sentiment.sentiment.neutral, color: 'text-dark-400' },
+                          { label: 'Negative', count: r.sentiment.sentiment.negative, color: 'text-red-400' },
+                        ].map(s => (
+                          <div key={s.label} className="text-center">
+                            <div className={`text-2xl font-bold ${s.color}`}>{s.count}</div>
+                            <div className="text-dark-500 text-xs">{s.label}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {r.sentiment.recommendation_rate > 0 && (
+                        <div className="text-center mb-4 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+                          <span className="text-emerald-400 font-medium text-sm">{r.sentiment.recommendation_rate}% recommendation rate</span>
+                        </div>
+                      )}
+                      {r.sentiment.top_praise?.length > 0 && (
+                        <div className="mb-3">
+                          <h4 className="text-dark-400 text-xs font-medium mb-1.5">Top Praise</h4>
+                          <div className="flex flex-wrap gap-1.5">
+                            {r.sentiment.top_praise.map((p, i) => (
+                              <span key={i} className="text-xs px-2 py-1 bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 rounded-md">{p}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {r.sentiment.top_criticism?.length > 0 && (
+                        <div>
+                          <h4 className="text-dark-400 text-xs font-medium mb-1.5">Top Criticism</h4>
+                          <div className="flex flex-wrap gap-1.5">
+                            {r.sentiment.top_criticism.map((c, i) => (
+                              <span key={i} className="text-xs px-2 py-1 bg-red-500/10 text-red-300 border border-red-500/20 rounded-md">{c}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Share of Voice */}
+                  {r.presence?.share_of_voice?.length > 0 && (
+                    <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
+                      <h3 className="text-white font-semibold text-sm mb-3">Share of Voice</h3>
+                      <div className="space-y-2">
+                        {r.presence.share_of_voice.map((sov, i) => (
+                          <div key={i} className="flex items-center gap-3">
+                            <span className="text-white text-sm w-32 truncate">{sov.brand_name}</span>
+                            <div className="flex-1 h-2 bg-dark-800 rounded-full overflow-hidden">
+                              <div className={`h-full rounded-full ${i === 0 ? 'bg-orange-400' : 'bg-dark-600'}`} style={{ width: `${sov.percentage}%` }} />
+                            </div>
+                            <span className="text-dark-400 text-xs w-12 text-right">{sov.percentage}%</span>
+                            <span className="text-dark-500 text-xs w-16 text-right">{sov.mention_count} mentions</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Competitive Positioning */}
+                  {(r.competitive?.differentiators?.length > 0 || r.competitive?.competitor_strengths?.length > 0) && (
+                    <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
+                      <h3 className="text-white font-semibold text-sm mb-4">Competitive Positioning</h3>
+                      {r.competitive.win_rate > 0 && (
+                        <div className="text-center mb-4 py-2 bg-primary-500/10 border border-primary-500/20 rounded-lg">
+                          <span className="text-primary-400 font-medium text-sm">Win rate: {r.competitive.win_rate}% in head-to-head comparisons</span>
+                          <span className="text-dark-500 text-xs ml-2">({r.competitive.comparison_threads} comparison threads)</span>
+                        </div>
+                      )}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {r.competitive.differentiators?.length > 0 && (
+                          <div>
+                            <h4 className="text-emerald-400 text-xs font-medium mb-2">Your Differentiators</h4>
+                            <ul className="space-y-1">
+                              {r.competitive.differentiators.map((d, i) => (
+                                <li key={i} className="text-dark-300 text-xs flex items-start gap-1.5">
+                                  <span className="text-emerald-400 mt-0.5">+</span>{d}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {r.competitive.competitor_strengths?.length > 0 && (
+                          <div>
+                            <h4 className="text-red-400 text-xs font-medium mb-2">Competitor Advantages</h4>
+                            <ul className="space-y-1">
+                              {r.competitive.competitor_strengths.map((s, i) => (
+                                <li key={i} className="text-dark-300 text-xs flex items-start gap-1.5">
+                                  <span className="text-red-400 mt-0.5">-</span>{s}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Training Signal */}
+                  {r.training_signal && (
+                    <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
+                      <h3 className="text-white font-semibold text-sm mb-3">LLM Training Signal</h3>
+                      <div className="grid grid-cols-3 gap-4 mb-4">
+                        <div className="text-center">
+                          <div className="text-xl font-bold text-white">{r.training_signal.high_score_threads}</div>
+                          <div className="text-dark-500 text-xs">High-score threads</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-xl font-bold text-white">{r.training_signal.deep_threads}</div>
+                          <div className="text-dark-500 text-xs">Deep threads</div>
+                        </div>
+                        <div className="text-center">
+                          <div className={`text-xl font-bold capitalize ${
+                            r.training_signal.authority_tier === 'strong' ? 'text-emerald-400'
+                            : r.training_signal.authority_tier === 'moderate' ? 'text-amber-400'
+                            : 'text-red-400'
+                          }`}>{r.training_signal.authority_tier}</div>
+                          <div className="text-dark-500 text-xs">Authority tier</div>
+                        </div>
+                      </div>
+                      {r.training_signal.evidence?.length > 0 && (
+                        <ul className="space-y-1 mb-3">
+                          {r.training_signal.evidence.map((e, i) => (
+                            <li key={i} className="text-dark-400 text-xs flex items-start gap-1.5">
+                              <span className="text-dark-600">•</span>{e}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Notable Mentions */}
+                  {r.sentiment?.notable_mentions?.length > 0 && (
+                    <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
+                      <h3 className="text-white font-semibold text-sm mb-3">Notable Mentions</h3>
+                      <div className="space-y-3">
+                        {r.sentiment.notable_mentions.map((m, i) => (
+                          <div key={i} className="border border-dark-800 rounded-xl p-4">
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="text-xs px-1.5 py-0.5 bg-orange-500/15 text-orange-300 border border-orange-500/20 rounded">r/{m.subreddit}</span>
+                              <span className={`text-xs px-1.5 py-0.5 rounded ${
+                                m.sentiment === 'positive' ? 'bg-emerald-500/15 text-emerald-300'
+                                : m.sentiment === 'negative' ? 'bg-red-500/15 text-red-300'
+                                : 'bg-dark-700 text-dark-400'
+                              }`}>{m.sentiment}</span>
+                              {m.is_recommendation && <span className="text-xs px-1.5 py-0.5 bg-primary-500/15 text-primary-300 rounded">Recommends</span>}
+                              <span className="text-dark-500 text-xs">{m.score} pts</span>
+                            </div>
+                            <p className="text-white text-sm mb-1">{m.title}</p>
+                            {m.context && <p className="text-dark-400 text-xs italic">&ldquo;{m.context}&rdquo;</p>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Recommendations */}
+                  {r.recommendations?.length > 0 && (
+                    <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
+                      <h3 className="text-white font-semibold text-sm mb-3">Recommendations</h3>
+                      <div className="space-y-3">
+                        {r.recommendations.map((rec, i) => (
+                          <div key={i} className="flex items-start gap-3 border border-dark-800 rounded-xl p-4">
+                            <span className={`px-1.5 py-0.5 text-[10px] rounded font-medium mt-0.5 ${
+                              rec.priority === 'high' ? 'bg-red-500/20 text-red-300'
+                              : rec.priority === 'medium' ? 'bg-amber-500/20 text-amber-300'
+                              : 'bg-dark-700 text-dark-400'
+                            }`}>{rec.priority}</span>
+                            <div className="flex-1">
+                              <p className="text-white text-sm">{rec.action}</p>
+                              <p className="text-dark-500 text-xs mt-0.5">{rec.expected_impact}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Confidence note */}
+                  {r.confidence_note && (
+                    <p className="text-dark-500 text-xs italic px-1">{r.confidence_note}</p>
+                  )}
+                </div>
+              )
+            })()}
+          </div>
+        )}
+
+        {/* ─── Search Tab ──────────────────────────────────────── */}
+        {activeTab === 'search' && (
+          <div className="max-w-4xl mx-auto animate-fade-in">
+
+            {/* No results yet — show analyze prompt */}
+            {!searchAnalysis && !searchAnalyzing && (
+              <>
+                <div className="mb-6">
+                  <div className="flex items-center gap-3 mb-1">
+                    <h2 className="text-xl font-bold text-white">Search Visibility Analyzer</h2>
+                  </div>
+                  <p className="text-dark-400 text-sm">Analyze how search signals affect whether AI systems will discover, index, and cite your content.</p>
+                </div>
+
+                {/* Info cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+                  <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <svg className="w-4 h-4 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>
+                      <h3 className="text-white text-sm font-medium">AI Overview Readiness</h3>
+                    </div>
+                    <p className="text-dark-400 text-xs">76% of Google AI Overview citations come from top-10 organic pages. Structured data and content format matter.</p>
+                  </div>
+                  <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <svg className="w-4 h-4 text-accent-emerald" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" /></svg>
+                      <h3 className="text-white text-sm font-medium">Crawl Accessibility</h3>
+                    </div>
+                    <p className="text-dark-400 text-xs">GPTBot grew 305% YoY. AI crawlers need access to your content — robots.txt policy directly affects visibility.</p>
+                  </div>
+                  <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <svg className="w-4 h-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" /></svg>
+                      <h3 className="text-white text-sm font-medium">Brand Momentum</h3>
+                    </div>
+                    <p className="text-dark-400 text-xs">Brand search volume has a 0.334 correlation with AI citation frequency. Web mentions are the strongest predictor.</p>
+                  </div>
+                  <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <svg className="w-4 h-4 text-accent-purple" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                      <h3 className="text-white text-sm font-medium">Content Freshness</h3>
+                    </div>
+                    <p className="text-dark-400 text-xs">AI assistants cite content 25.7% newer than traditional search. 65% of AI bot hits target content less than 1 year old.</p>
+                  </div>
+                </div>
+
+                {/* Auto-archive toggle */}
+                <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-4 mb-6">
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={searchAutoArchive}
+                      onChange={e => setSearchAutoArchive(e.target.checked)}
+                      className="w-4 h-4 rounded border-dark-600 bg-dark-800 text-primary-500 focus:ring-primary-500/30"
+                    />
+                    <div>
+                      <span className="text-white text-sm font-medium">Auto-archive previous to-dos</span>
+                      <p className="text-dark-500 text-xs mt-0.5">Archive existing Search to-dos before generating new ones</p>
+                    </div>
+                  </label>
+                </div>
+
+                {/* Analyze button */}
+                <button
+                  onClick={searchAnalyze}
+                  disabled={!selectedDomain || readOnly}
+                  className="w-full py-3.5 rounded-xl font-semibold text-white bg-gradient-to-r from-primary-600 to-primary-500 hover:from-primary-500 hover:to-primary-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer text-sm"
+                >
+                  Analyze Search Visibility
+                </button>
+              </>
+            )}
+
+            {/* Running state */}
+            {searchAnalyzing && (
+              <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-white font-semibold flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />
+                    Analyzing Search Visibility...
+                  </h3>
+                  <button onClick={searchAnalyzeStop} className="text-xs text-dark-400 hover:text-red-400 transition-colors cursor-pointer">Stop</button>
+                </div>
+                <div className="space-y-1 max-h-60 overflow-y-auto text-xs font-mono">
+                  {searchMessages.map((msg, i) => (
+                    <p key={i} className={`${msg.startsWith('Error') ? 'text-red-400' : 'text-dark-400'}`}>{msg}</p>
+                  ))}
+                  <div ref={searchMessagesEndRef} />
+                </div>
+              </div>
+            )}
+
+            {/* Results view */}
+            {searchAnalysis?.result && !searchAnalyzing && (() => {
+              const r = searchAnalysis.result!
+              const scoreColor = (s: number) => s >= 70 ? 'text-accent-emerald' : s >= 40 ? 'text-amber-400' : 'text-red-400'
+              const scoreBg = (s: number) => s >= 70 ? 'bg-accent-emerald/20 border-accent-emerald/30' : s >= 40 ? 'bg-amber-500/20 border-amber-500/30' : 'bg-red-500/20 border-red-500/30'
+              const barColor = (s: number) => s >= 70 ? 'bg-accent-emerald' : s >= 40 ? 'bg-amber-400' : 'bg-red-400'
+
+              return (
+                <div className="space-y-6">
+                  {/* Header with overall score */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="text-xl font-bold text-white">Search Visibility</h2>
+                      <p className="text-dark-400 text-sm mt-1">
+                        Analyzed {new Date(searchAnalysis.generated_at).toLocaleDateString()} · {searchAnalysis.model}
+                        {searchAnalysis.brand_context_used && <span className="ml-2 text-xs text-primary-400">+ Brand Intelligence</span>}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className={`text-3xl font-bold ${scoreColor(r.overall_score)}`}>{r.overall_score}</div>
+                      <div className="text-dark-500 text-xs">/100</div>
+                      {!readOnly && (
+                        <div className="flex items-center gap-1 ml-3">
+                          <button onClick={searchAnalyze} className="px-3 py-1.5 text-xs font-medium text-primary-400 border border-primary-500/30 rounded-lg hover:bg-primary-500/10 transition-colors cursor-pointer" title="Re-analyze">
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
+                          </button>
+                          <button onClick={() => setConfirmDeleteSearchAnalysis(true)} className="px-3 py-1.5 text-xs font-medium text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/10 transition-colors cursor-pointer" title="Delete">
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Executive Summary */}
+                  <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
+                    <h3 className="text-white font-medium text-sm mb-3">Executive Summary</h3>
+                    <div className="text-dark-300 text-sm leading-relaxed whitespace-pre-line">{r.executive_summary}</div>
+                  </div>
+
+                  {/* 4-Pillar Scores */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {[
+                      { label: 'AI Overview Readiness', score: r.aio_readiness.score, weight: '30%' },
+                      { label: 'Crawl Accessibility', score: r.crawl_accessibility.score, weight: '20%' },
+                      { label: 'Brand Momentum', score: r.brand_momentum.score, weight: '25%' },
+                      { label: 'Content Freshness', score: r.content_freshness.score, weight: '25%' },
+                    ].map((p, i) => (
+                      <div key={i} className={`border rounded-xl p-4 text-center ${scoreBg(p.score)}`}>
+                        <div className={`text-2xl font-bold ${scoreColor(p.score)}`}>{p.score}</div>
+                        <div className="text-white text-xs font-medium mt-1">{p.label}</div>
+                        <div className="text-dark-500 text-[10px] mt-0.5">{p.weight} weight</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* AIO Readiness Detail */}
+                  <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-white font-medium text-sm flex items-center gap-2">
+                        <svg className="w-4 h-4 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>
+                        AI Overview Readiness
+                      </h3>
+                      <span className={`text-lg font-bold ${scoreColor(r.aio_readiness.score)}`}>{r.aio_readiness.score}/100</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 mb-4">
+                      {[
+                        { label: 'Organic Presence', value: r.aio_readiness.organic_presence },
+                        { label: 'Structured Data', value: r.aio_readiness.structured_data },
+                        { label: 'Content Format', value: r.aio_readiness.content_format },
+                        { label: 'Answer Prominence', value: r.aio_readiness.answer_prominence },
+                      ].map((m, i) => (
+                        <div key={i}>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-dark-400 text-xs">{m.label}</span>
+                            <span className={`text-xs font-medium ${scoreColor(m.value)}`}>{m.value}</span>
+                          </div>
+                          <div className="h-1.5 bg-dark-800 rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${barColor(m.value)}`} style={{ width: `${m.value}%` }} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="space-y-1">
+                      {r.aio_readiness.evidence.map((e, i) => (
+                        <p key={i} className="text-dark-400 text-xs flex items-start gap-2"><span className="text-primary-400 mt-0.5">•</span>{e}</p>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Crawl Accessibility Detail */}
+                  <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-white font-medium text-sm flex items-center gap-2">
+                        <svg className="w-4 h-4 text-accent-emerald" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" /></svg>
+                        Crawl Accessibility
+                      </h3>
+                      <span className={`text-lg font-bold ${scoreColor(r.crawl_accessibility.score)}`}>{r.crawl_accessibility.score}/100</span>
+                    </div>
+                    {/* robots.txt policy */}
+                    <div className="bg-dark-800/50 rounded-lg p-3 mb-4">
+                      <p className="text-dark-400 text-xs font-medium mb-1">robots.txt Policy</p>
+                      <p className="text-dark-300 text-sm">{r.crawl_accessibility.robots_txt_policy}</p>
+                    </div>
+                    {/* Crawler details */}
+                    {r.crawl_accessibility.crawler_details?.length > 0 && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+                        {r.crawl_accessibility.crawler_details.map((c, i) => (
+                          <div key={i} className="flex items-center gap-2 bg-dark-800/30 rounded-lg px-3 py-2">
+                            <span className={`w-2 h-2 rounded-full ${c.allowed ? 'bg-accent-emerald' : 'bg-red-400'}`} />
+                            <span className="text-white text-xs font-medium">{c.name}</span>
+                            <span className={`text-xs ${c.allowed ? 'text-accent-emerald' : 'text-red-400'}`}>{c.allowed ? 'Allowed' : 'Blocked'}</span>
+                            {c.notes && <span className="text-dark-500 text-[10px] ml-auto truncate max-w-[120px]" title={c.notes}>{c.notes}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="grid grid-cols-3 gap-3 mb-4">
+                      {[
+                        { label: 'AI Bot Access', value: r.crawl_accessibility.ai_bot_access },
+                        { label: 'Sitemap Quality', value: r.crawl_accessibility.sitemap_quality },
+                        { label: 'Render Access', value: r.crawl_accessibility.render_accessibility },
+                      ].map((m, i) => (
+                        <div key={i}>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-dark-400 text-xs">{m.label}</span>
+                            <span className={`text-xs font-medium ${scoreColor(m.value)}`}>{m.value}</span>
+                          </div>
+                          <div className="h-1.5 bg-dark-800 rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${barColor(m.value)}`} style={{ width: `${m.value}%` }} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="space-y-1">
+                      {r.crawl_accessibility.evidence.map((e, i) => (
+                        <p key={i} className="text-dark-400 text-xs flex items-start gap-2"><span className="text-accent-emerald mt-0.5">•</span>{e}</p>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Brand Momentum Detail */}
+                  <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-white font-medium text-sm flex items-center gap-2">
+                        <svg className="w-4 h-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.307a11.95 11.95 0 015.814-5.519l2.74-1.22m0 0l-5.94-2.28m5.94 2.28l-2.28 5.941" /></svg>
+                        Brand Search Momentum
+                      </h3>
+                      <span className={`text-lg font-bold ${scoreColor(r.brand_momentum.score)}`}>{r.brand_momentum.score}/100</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4 mb-4">
+                      <div className="bg-dark-800/50 rounded-lg p-3">
+                        <p className="text-dark-400 text-xs font-medium mb-1">Search Trend</p>
+                        <p className={`text-sm font-medium ${r.brand_momentum.brand_search_trend === 'growing' ? 'text-accent-emerald' : r.brand_momentum.brand_search_trend === 'declining' ? 'text-red-400' : 'text-amber-400'}`}>
+                          {r.brand_momentum.brand_search_trend === 'growing' ? '↑ Growing' : r.brand_momentum.brand_search_trend === 'declining' ? '↓ Declining' : '→ Stable'}
+                        </p>
+                      </div>
+                      <div className="bg-dark-800/50 rounded-lg p-3">
+                        <p className="text-dark-400 text-xs font-medium mb-1">Entity Recognition</p>
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 h-1.5 bg-dark-700 rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${barColor(r.brand_momentum.entity_recognition)}`} style={{ width: `${r.brand_momentum.entity_recognition}%` }} />
+                          </div>
+                          <span className={`text-xs font-medium ${scoreColor(r.brand_momentum.entity_recognition)}`}>{r.brand_momentum.entity_recognition}</span>
+                        </div>
+                      </div>
+                    </div>
+                    {r.brand_momentum.competitor_compare && (
+                      <div className="bg-dark-800/50 rounded-lg p-3 mb-4">
+                        <p className="text-dark-400 text-xs font-medium mb-1">vs. Competitors</p>
+                        <p className="text-dark-300 text-xs leading-relaxed">{r.brand_momentum.competitor_compare}</p>
+                      </div>
+                    )}
+                    <div className="space-y-1">
+                      {r.brand_momentum.evidence.map((e, i) => (
+                        <p key={i} className="text-dark-400 text-xs flex items-start gap-2"><span className="text-amber-400 mt-0.5">•</span>{e}</p>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Content Freshness Detail */}
+                  <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-white font-medium text-sm flex items-center gap-2">
+                        <svg className="w-4 h-4 text-accent-purple" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                        Content Freshness
+                      </h3>
+                      <span className={`text-lg font-bold ${scoreColor(r.content_freshness.score)}`}>{r.content_freshness.score}/100</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4 mb-4">
+                      <div className="bg-dark-800/50 rounded-lg p-3">
+                        <p className="text-dark-400 text-xs font-medium mb-1">Content Age</p>
+                        <p className="text-dark-300 text-sm">{r.content_freshness.average_content_age}</p>
+                      </div>
+                      <div className="bg-dark-800/50 rounded-lg p-3">
+                        <p className="text-dark-400 text-xs font-medium mb-1">Update Frequency</p>
+                        <p className={`text-sm font-medium ${r.content_freshness.update_frequency === 'frequent' ? 'text-accent-emerald' : r.content_freshness.update_frequency === 'stale' ? 'text-red-400' : 'text-amber-400'}`}>
+                          {r.content_freshness.update_frequency.charAt(0).toUpperCase() + r.content_freshness.update_frequency.slice(1)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 mb-4">
+                      {[
+                        { label: 'Freshness Signals', value: r.content_freshness.freshness_signals },
+                        { label: 'Content Decay Risk', value: 100 - r.content_freshness.content_decay_risk },
+                      ].map((m, i) => (
+                        <div key={i}>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-dark-400 text-xs">{m.label}</span>
+                            <span className={`text-xs font-medium ${scoreColor(m.value)}`}>{m.value}</span>
+                          </div>
+                          <div className="h-1.5 bg-dark-800 rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${barColor(m.value)}`} style={{ width: `${m.value}%` }} />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="space-y-1">
+                      {r.content_freshness.evidence.map((e, i) => (
+                        <p key={i} className="text-dark-400 text-xs flex items-start gap-2"><span className="text-accent-purple mt-0.5">•</span>{e}</p>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Recommendations */}
+                  {r.recommendations?.length > 0 && (
+                    <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
+                      <h3 className="text-white font-medium text-sm mb-4">Recommendations</h3>
+                      <div className="space-y-3">
+                        {r.recommendations.map((rec, i) => (
+                          <div key={i} className="flex items-start gap-3">
+                            <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-bold rounded uppercase ${rec.priority === 'high' ? 'bg-red-500/20 text-red-400' : rec.priority === 'medium' ? 'bg-amber-500/20 text-amber-400' : 'bg-dark-700 text-dark-400'}`}>{rec.priority}</span>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-white text-sm">{rec.action}</p>
+                              <p className="text-dark-400 text-xs mt-0.5">{rec.expected_impact}</p>
+                              <p className="text-dark-500 text-[10px] mt-0.5">{rec.dimension}</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Confidence note */}
+                  {r.confidence_note && (
+                    <p className="text-dark-500 text-xs italic px-1">{r.confidence_note}</p>
+                  )}
+                </div>
+              )
+            })()}
+          </div>
+        )}
       </main>
+
+      {/* Delete search analysis confirmation modal */}
+      {confirmDeleteSearchAnalysis && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-900 border border-dark-700 rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+            <h3 className="text-white font-semibold text-lg mb-2">Delete Search Analysis</h3>
+            <p className="text-dark-400 text-sm mb-6">Permanently delete the Search Visibility analysis for <span className="text-white font-medium">{selectedDomain}</span>? This cannot be undone.</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setConfirmDeleteSearchAnalysis(false)}
+                className="flex-1 px-4 py-2 text-sm text-dark-300 border border-dark-700 rounded-lg hover:bg-dark-800 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={deleteSearchAnalysis}
+                className="flex-1 px-4 py-2 text-sm text-white bg-red-600 rounded-lg hover:bg-red-500 transition-colors cursor-pointer"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete reddit analysis confirmation modal */}
+      {confirmDeleteRedditAnalysis && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-900 border border-dark-700 rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+            <h3 className="text-white font-semibold text-lg mb-2">Delete Reddit Analysis</h3>
+            <p className="text-dark-400 text-sm mb-6">Permanently delete the Reddit analysis for <span className="text-white font-medium">{redditDomain}</span>? This cannot be undone.</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setConfirmDeleteRedditAnalysis(false)}
+                className="flex-1 px-4 py-2 text-sm text-dark-300 border border-dark-700 rounded-lg hover:bg-dark-800 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={deleteRedditAnalysis}
+                className="flex-1 px-4 py-2 text-sm text-white bg-red-600 rounded-lg hover:bg-red-500 transition-colors cursor-pointer font-medium"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete video analysis confirmation modal */}
       {confirmDeleteVideoAnalysis && (
@@ -6730,6 +8895,83 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {apiKeyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-900 border border-dark-700 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-amber-500/10 flex items-center justify-center">
+                <svg className="w-5 h-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" /></svg>
+              </div>
+              <h3 className="text-white font-semibold text-lg">API Key Required</h3>
+            </div>
+            <p className="text-dark-400 text-sm mb-6">
+              {userTenantRole === 'owner'
+                ? 'You need to configure an API key before generating reports. Set up your Anthropic API key in Settings to get started.'
+                : 'Your team needs an API key configured before you can generate reports. Ask your team owner to set up an Anthropic API key in Settings.'}
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setApiKeyModal(false)}
+                className="px-4 py-2 text-dark-400 hover:text-white text-sm transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setApiKeyModal(false); window.location.href = '/last/settings' }}
+                className="px-4 py-2 bg-gradient-to-r from-primary-600 to-primary-500 text-white text-sm font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all cursor-pointer"
+              >
+                {userTenantRole === 'owner' ? 'Set Keys' : 'View Settings'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {welcomeKeyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-dark-900 border border-dark-700 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-primary-500/10 flex items-center justify-center">
+                <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" /></svg>
+              </div>
+              <h3 className="text-white font-semibold text-lg">Welcome! One More Step</h3>
+            </div>
+            <p className="text-dark-400 text-sm mb-2">
+              To start generating AI-powered reports, you'll need to connect your Anthropic API key.
+            </p>
+            <p className="text-dark-500 text-xs mb-6">
+              Don't have one yet? You can create a free account at console.anthropic.com and generate an API key in seconds.
+            </p>
+            <div className="flex justify-end">
+              <button
+                onClick={() => { setWelcomeKeyModal(false); window.location.href = '/last/settings' }}
+                className="px-4 py-2 bg-gradient-to-r from-primary-600 to-primary-500 text-white text-sm font-medium rounded-lg hover:from-primary-500 hover:to-primary-400 transition-all cursor-pointer"
+              >
+                Set Up API Key
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Site Footer */}
+      <footer className="border-t border-dark-700 bg-dark-900/80 py-8 mt-12">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex flex-col items-center gap-4 text-xs">
+            <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-dark-400">
+              <a href="https://github.com/jonradoff/llmopt" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">GitHub (MIT License)</a>
+              <span className="text-dark-700">·</span>
+              <a href="https://www.metavert.io/privacy-policy" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">Privacy Policy</a>
+              <span className="text-dark-700">·</span>
+              <a href="https://www.metavert.io/terms-of-service" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">Terms of Service</a>
+              <span className="text-dark-700">·</span>
+              <button onClick={() => { setShowResearch(true); window.scrollTo({ top: 0 }) }} className="hover:text-white transition-colors cursor-pointer">Research Citations</button>
+            </div>
+            <p className="text-dark-500">&copy; 2026 Metavert LLC. All content licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer" className="text-dark-400 hover:text-white transition-colors">Creative Commons Attribution 4.0</a>.</p>
+          </div>
+        </div>
+      </footer>
     </div>
   )
 }

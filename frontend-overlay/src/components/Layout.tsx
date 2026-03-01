@@ -2,6 +2,7 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Settings, LogOut, Shield, ChevronDown, Bell, CreditCard, Zap,
   FileText, Image, Globe, Star, Heart, BookOpen, MessageCircle, HelpCircle, Upload, ArrowLeft,
+  UserCircle, AlertTriangle, DollarSign,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTenant } from '../contexts/TenantContext';
@@ -27,6 +28,8 @@ export default function Layout() {
   const [hasBundles, setHasBundles] = useState(false);
   const [showTeam, setShowTeam] = useState(true);
   const [healthLight, setHealthLight] = useState<'green' | 'amber' | 'red' | 'gray'>('gray');
+  const [keyStatus, setKeyStatus] = useState<'active' | 'invalid' | 'no_credits' | 'unconfigured'>('unconfigured');
+  const [hasKey, setHasKey] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const isActive = (path: string) => location.pathname === path || location.pathname.startsWith(path + '/');
@@ -47,6 +50,21 @@ export default function Layout() {
       bundlesApi.list()
         .then((data) => setHasBundles(data.bundles.length > 0))
         .catch(() => {});
+      // Fetch user's API key status
+      const token = localStorage.getItem('token');
+      if (token) {
+        fetch('/api/settings/api-keys/status', {
+          headers: { 'Authorization': `Bearer ${token}` },
+        })
+          .then(r => r.ok ? r.json() : null)
+          .then(data => {
+            if (data) {
+              setHasKey(data.has_key || false);
+              setKeyStatus(data.status || 'unconfigured');
+            }
+          })
+          .catch(() => {});
+      }
     }
     // Fetch health status (public endpoint, no auth needed)
     fetch('/api/health/history')
@@ -81,7 +99,6 @@ export default function Layout() {
   const defaultNavItems = [
     ...(showTeam ? [{ path: '/last/team', icon: Users, label: 'Team' }] : []),
     { path: '/last/plan', icon: CreditCard, label: 'Plan' },
-    { path: '/last/settings', icon: Settings, label: 'Settings' },
   ];
 
   const navItems = branding.navItems.length > 0
@@ -229,7 +246,14 @@ export default function Layout() {
                 </Link>
 
                 {/* User info + Logout */}
-                <span className="text-sm text-dark-400 hidden sm:block">{user?.displayName}</span>
+                <Link
+                  to="/last/settings"
+                  className="flex items-center gap-1.5 text-sm text-dark-400 hover:text-white transition-colors hidden sm:flex"
+                  title="Settings"
+                >
+                  <UserCircle className="w-4 h-4" />
+                  <span>{user?.displayName}</span>
+                </Link>
                 <button
                   onClick={handleLogout}
                   className="flex items-center gap-2 text-dark-400 hover:text-white transition-colors"
@@ -237,19 +261,56 @@ export default function Layout() {
                   <LogOut className="w-4 h-4" />
                 </button>
 
-                {/* Status light — rightmost */}
-                <a
-                  href="/?tab=status"
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-dark-400 hover:text-white hover:bg-dark-800/50 transition-colors"
-                  title="AI Model Status"
-                >
-                  <span className={`w-2.5 h-2.5 rounded-full ${
-                    healthLight === 'green' ? 'bg-emerald-400' :
-                    healthLight === 'red' ? 'bg-red-400' :
-                    healthLight === 'amber' ? 'bg-amber-400' : 'bg-dark-600'
-                  }`} />
-                  <span className="text-sm">Status</span>
-                </a>
+                {/* Status / API Key indicator — rightmost */}
+                {!hasKey || keyStatus === 'unconfigured' ? (
+                  <Link
+                    to="/last/settings"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 hover:bg-amber-500/20 transition-colors text-sm font-medium"
+                    title="Configure your API key"
+                  >
+                    <AlertTriangle className="w-4 h-4" />
+                    <span className="hidden sm:inline">API Key Needed</span>
+                    <span className="sm:hidden">!</span>
+                  </Link>
+                ) : keyStatus === 'no_credits' ? (
+                  <a
+                    href="/?tab=status"
+                    className="relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-dark-400 hover:text-white hover:bg-dark-800/50 transition-colors"
+                    title="API key needs credits"
+                  >
+                    <span className="relative">
+                      <span className={`w-2.5 h-2.5 rounded-full inline-block ${
+                        healthLight === 'green' ? 'bg-emerald-400' :
+                        healthLight === 'red' ? 'bg-red-400' :
+                        healthLight === 'amber' ? 'bg-amber-400' : 'bg-dark-600'
+                      }`} />
+                      <DollarSign className="w-3 h-3 text-amber-400 absolute -top-1.5 -right-2" />
+                    </span>
+                    <span className="text-sm">Status</span>
+                  </a>
+                ) : keyStatus === 'invalid' ? (
+                  <Link
+                    to="/last/settings"
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors text-sm"
+                    title="API key is invalid"
+                  >
+                    <span className="w-2.5 h-2.5 rounded-full bg-red-400" />
+                    <span className="text-sm">Key Invalid</span>
+                  </Link>
+                ) : (
+                  <a
+                    href="/?tab=status"
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-dark-400 hover:text-white hover:bg-dark-800/50 transition-colors"
+                    title="AI Model Status"
+                  >
+                    <span className={`w-2.5 h-2.5 rounded-full ${
+                      healthLight === 'green' ? 'bg-emerald-400' :
+                      healthLight === 'red' ? 'bg-red-400' :
+                      healthLight === 'amber' ? 'bg-amber-400' : 'bg-dark-600'
+                    }`} />
+                    <span className="text-sm">Status</span>
+                  </a>
+                )}
               </div>
             )}
           </div>

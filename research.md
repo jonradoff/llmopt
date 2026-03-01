@@ -337,3 +337,177 @@ Use Claude with web_search to:
 - Cache optimization results linked to the specific analysis + question index
 - Same 30-day expiry as site analyses
 - Force re-analysis option available
+
+---
+
+## 8. Search Visibility and AI Crawl Accessibility
+
+Traditional SEO is fragmenting into two distinct optimization pathways: Google AI Overviews (which still favor organically top-ranked pages) and standalone LLMs (which operate on fundamentally different signals). Understanding this split — and the role of crawl accessibility, content freshness, and brand search momentum — is critical for comprehensive LLM visibility assessment.
+
+### Source Papers
+
+| Paper / Report | Year | Key Contribution |
+|----------------|------|------------------|
+| [How LLMs & AI Agents Get Info From Your Site](https://ahrefs.com/blog/llms-and-ai-agents/) (Ahrefs, 1.9M citations) | 2025 | AI Overview citation patterns — 76% from Google's top-10 organic results |
+| [Where Do AI Search Engines Get Results?](https://ahrefs.com/blog/ai-search-traffic-study/) (Ahrefs, 17M citations) | 2025 | The two-world split — only 12% overlap between Google top-10 and ChatGPT/Perplexity citations |
+| [AI Brand Visibility Study: 75K Brands](https://ahrefs.com/blog/ai-brand-visibility-study/) (Ahrefs) | 2025 | Brand search volume, web mentions, and YouTube as strongest predictors of AI citation |
+| [Content Freshness and AI Answers](https://ahrefs.com/blog/freshness-seo/) (Ahrefs) | 2025 | AI assistants cite content 25.7% newer on average than traditional search |
+| [The Impact of Content Recency on AI Visibility](https://www.seerinteractive.com/insights/content-recency-ai-overview) (Seer Interactive) | 2025 | Freshness signals shift LLM ranking by up to 95 positions |
+| [Recency Bias in AI: LLM Performance on Outdated Facts](https://arxiv.org/abs/2504.01248) | 2025 | Systematic recency bias in LLM knowledge — newer facts preferred even when wrong |
+| [2025 AI Bot & Crawler Report](https://blog.cloudflare.com/ai-crawlers-update-2025) (Cloudflare) | 2025 | GPTBot traffic grew 305% YoY; 3-bot architecture per AI provider; robots.txt as visibility lever |
+| [AIO Study: 200K Keywords](https://www.semrush.com/blog/ai-overviews/) (Semrush) | 2025 | Only 12.47% of keywords trigger AI Overviews; 73% of AIO sources are in organic top-10 |
+
+---
+
+### 8.1 The Two-World Split: AI Overviews vs. Standalone LLMs
+
+The most critical finding for search visibility assessment is that **Google AI Overviews and standalone LLMs cite fundamentally different sources.**
+
+**Google AI Overviews (AIO):**
+- **76% of AIO citations** come from pages already in Google's top-10 organic results (Ahrefs, 1.9M citations)
+- 63% of AIO sources have **Domain Rating (DR) 70+** — established, authoritative domains dominate
+- Only **12.47% of keywords** trigger AI Overviews at all (Semrush, 200K keywords)
+- AIO strongly favors informational queries, how-to content, and educational material
+- Organic SEO ranking is effectively a **prerequisite** for AIO citation
+
+**Standalone LLMs (ChatGPT, Perplexity, Claude):**
+- Only **12% overlap** between Google's top-10 organic results and ChatGPT/Perplexity citations (Ahrefs, 17M citations)
+- LLMs cite from a much wider pool of sources, weighted by training data presence and earned media signals
+- Brand authority and web mention frequency matter more than traditional link-based authority
+- Content structure (Schema.org, tables, clear definitions) plays a larger role than backlink profiles
+
+**Implication:** A site can rank #1 in Google and still be invisible to ChatGPT — and vice versa. Comprehensive search visibility assessment must evaluate both pathways independently.
+
+---
+
+### 8.2 AI Crawl Accessibility
+
+The Cloudflare 2025 crawler report reveals that AI companies now operate a **3-bot architecture**, each requiring separate robots.txt consideration:
+
+| Bot Type | Purpose | Examples |
+|----------|---------|---------|
+| Training bots | Scrape content for model training | GPTBot, Google-Extended, ClaudeBot, Applebot-Extended |
+| Indexing bots | Build real-time retrieval indexes | ChatGPT-User, PerplexityBot, Google-Extended |
+| User-fetch bots | Fetch pages live during conversations | ChatGPT-User, PerplexityBot |
+
+**Key metrics:**
+- **GPTBot traffic grew 305% YoY** — AI crawlers are now a major share of web traffic
+- **ClaudeBot and Bytespider grew 246% and 76%** respectively
+- Approximately **30-40% of high-traffic sites** now block at least one AI crawler
+- Blocking training bots prevents future knowledge acquisition; blocking user-fetch bots prevents real-time citation
+- Sites that block user-fetch bots (e.g., ChatGPT-User) are **invisible in real-time AI conversations** regardless of training data presence
+
+**robots.txt is now a direct AI visibility lever:**
+- `Disallow: /` for GPTBot = excluded from OpenAI's training AND real-time fetch
+- Selective blocking is possible (e.g., allow indexing bots, block training bots)
+- Many sites have overly broad blocks that unintentionally exclude themselves from AI search
+- Sitemap presence and quality affect how efficiently AI crawlers can index content
+
+---
+
+### 8.3 Brand Search Momentum
+
+The Ahrefs 75K brands study quantified which signals predict whether an AI assistant will mention a brand:
+
+| Signal | Correlation with AI Citation | Notes |
+|--------|------------------------------|-------|
+| YouTube mentions | **0.737** | Strongest single predictor |
+| Web mentions (earned media) | **0.664** | Second strongest — independent coverage |
+| Brand search volume | **0.334** | Google Trends searches for the brand name |
+| Domain authority / backlinks | 0.12-0.18 | Surprisingly weak predictor |
+| Social media followers | <0.1 | Nearly irrelevant |
+
+**Key findings:**
+- Brand search volume is a **proxy for real-world prominence** — brands that people actively search for are more likely to appear in AI answers
+- Web mentions (being talked about by others) are **3.7x more predictive** than traditional domain authority
+- YouTube mentions are the **strongest single signal** (0.737 correlation) — this connects to our Video Authority findings in Section 6
+- Traditional SEO metrics (backlinks, DA) are **poor predictors** of AI citation — the signal landscape has shifted
+
+**Entity recognition** also matters: brands that Google recognizes as named entities (appearing in Knowledge Panels) receive disproportionate AI citation, suggesting that entity databases (Wikidata, Google Knowledge Graph) influence LLM knowledge.
+
+---
+
+### 8.4 Content Freshness Bias
+
+Multiple studies confirm that AI systems systematically prefer newer content:
+
+**Ahrefs (17M citations study):**
+- AI assistants cite content that is **25.7% newer** on average than content cited in traditional Google results
+- The median age of AI-cited content is **~14 months** vs. **~18 months** for Google organic results
+- For rapidly evolving topics (technology, health, policy), the freshness bias is even more extreme
+
+**Seer Interactive:**
+- Content freshness signals can shift an article's **position by up to 95 ranks** in AI search results
+- Pages updated within the last 6 months receive **significantly higher** AIO citation rates than stale content
+- The effect is strongest for queries with informational intent
+
+**arXiv — LLM Recency Bias (2025):**
+- LLMs show systematic recency bias: they prefer information from more recent sources even when older sources contain more accurate answers
+- This bias is **inherent to training data distributions** — more recent web pages are overrepresented in training corpora
+- The bias compounds in RAG systems: retrieval algorithms also favor recent documents, amplifying the preference
+
+**Implications for optimization:**
+- Regular content updates provide an ongoing visibility advantage in AI search
+- "Content decay" is real — pages that haven't been updated in 12+ months lose AI visibility even if the information remains accurate
+- Publication and modification dates should be explicitly marked in structured data (Schema.org `dateModified`)
+- Evergreen content strategies must include regular refresh cycles to maintain AI visibility
+
+---
+
+### 8.5 Search Visibility Scoring Framework
+
+Based on the research above, we assess a website's search visibility for AI search engines across four dimensions:
+
+#### Pillar 1: AI Overview Readiness (30%)
+How well-positioned is the site to appear in Google AI Overviews?
+
+- **Organic presence** — Does the site rank in Google's top-10 for relevant queries? (76% of AIO sources come from top-10)
+- **Structured data** — Schema.org markup, FAQ schema, HowTo schema that AIO can extract from
+- **Content format** — Clear, concise answers to common questions; comparison tables; step-by-step formats
+- **Answer prominence** — Key answers front-loaded in content; not buried in long-form prose
+
+#### Pillar 2: Crawl Accessibility (20%)
+Can AI systems actually access and index the site's content?
+
+- **robots.txt policy** — Which AI bots are allowed vs. blocked? Overly broad blocks?
+- **AI bot access** — Are training bots, indexing bots, and user-fetch bots specifically addressed?
+- **Sitemap quality** — Is there a valid, comprehensive sitemap? Is it submitted to search engines?
+- **Render accessibility** — Can content be accessed without JavaScript rendering? Are there bot-specific barriers?
+
+#### Pillar 3: Brand Search Momentum (25%)
+How visible is the brand in the broader search and mention landscape?
+
+- **Brand search trend** — Is brand search volume growing, stable, or declining? (Google Trends signal)
+- **Competitor comparison** — How does brand search volume compare to key competitors?
+- **Web mention strength** — Is the brand mentioned by independent third-party sources? (0.664 correlation with AI citation)
+- **Entity recognition** — Does Google recognize the brand as a named entity? (Knowledge Panel presence)
+
+#### Pillar 4: Content Freshness (25%)
+How current is the site's content, and is it being maintained?
+
+- **Average content age** — How old is the typical page on the site? (AI prefers content 25.7% newer)
+- **Update frequency** — How often is content being refreshed or added?
+- **Freshness signals** — Are `dateModified` and `datePublished` structured data present and accurate?
+- **Content decay risk** — What percentage of content hasn't been updated in 12+ months?
+
+#### Scoring
+
+| Pillar | Weight | Rationale |
+|--------|--------|-----------|
+| AI Overview Readiness | 30% | AIO is the primary discovery channel; 76% organic top-10 correlation |
+| Crawl Accessibility | 20% | Binary gate — if bots can't crawl, nothing else matters |
+| Brand Search Momentum | 25% | Web mentions (0.664) and brand search (0.334) are strong AI citation predictors |
+| Content Freshness | 25% | 25.7% newer content preference; up to 95-position ranking shifts |
+
+### Implementation Notes
+
+The Search Visibility analysis uses Claude with `web_search` to check:
+- The site's robots.txt file for AI crawler policies
+- Google search results for organic ranking signals
+- Third-party mentions and earned media coverage
+- Content publication dates and update patterns
+- Structured data and Schema.org markup presence
+- Sitemap availability and quality
+- Brand search trends and competitor comparison
+
+Results are cached for 30 days per domain, with force re-analysis option. Recommendations are auto-converted to actionable todos when priority is high or medium.
