@@ -4941,8 +4941,20 @@ func digestThirdPartyVideos(ctx context.Context, provider LLMProvider, apiKey st
 	return result, nil
 }
 
-func buildVideoAuthorityPrompt(domain string, ownVideos []YouTubeVideo, thirdPartyCount int, digests []BatchDigest, competitors, searchTerms []string, brandInfo BrandContextInfo, assessments map[string]*VideoAssessment) string {
-	var sb strings.Builder
+// videoContextParams holds the shared context for all pillar prompts.
+type videoContextParams struct {
+	Domain          string
+	BrandName       string
+	SearchTerms     []string
+	Competitors     []string
+	BrandInfo       BrandContextInfo
+	OwnVideos       []YouTubeVideo
+	ThirdPartyCount int
+	Digests         []BatchDigest
+	Assessments     map[string]*VideoAssessment
+}
+
+func newVideoContextParams(domain string, ownVideos []YouTubeVideo, thirdPartyCount int, digests []BatchDigest, competitors, searchTerms []string, brandInfo BrandContextInfo, assessments map[string]*VideoAssessment) videoContextParams {
 	brandName := domain
 	if brandInfo.Used {
 		for _, line := range strings.Split(brandInfo.ContextString, "\n") {
@@ -4952,72 +4964,71 @@ func buildVideoAuthorityPrompt(domain string, ownVideos []YouTubeVideo, thirdPar
 			}
 		}
 	}
-
-	sb.WriteString(fmt.Sprintf(`You are an expert in Video LLM Authority analysis. Your job is to assess how strongly a brand's video ecosystem signals expertise to LLMs.
-
-LLMs don't watch videos — they consume transcripts, titles, descriptions, and metadata. A 7B model trained on quality YouTube transcripts surpassed 72B models (LiveCC, CVPR 2025). Transcript IS the video to an LLM.
-
-RESEARCH CONTEXT:
-- Quotation-ready content gets +41%% LLM visibility; statistics add +33%% (GEO, Princeton 2024)
-- Citation accuracy in AI search is only 49-68%%. 23-32%% of claims are unsupported.
-- Citation concentration is extreme: top 20 sources capture 28-67%% of all citations (Gini 0.69-0.83). Being #1 vs #2 has outsized impact.
-- Views and subscriber counts do NOT predict AI citation. Structural factors matter most.
-- LLMs have U-shaped attention: beginning and end of transcripts get disproportionate weight.
-- YouTube is #1 social citation source for LLMs (16%% of answers). Its share doubled from 19%% to 39%% in 4 months.
-- Perplexity generates one-sided answers 83.4%% of the time — negative patterns get amplified.
-- First-mover advantage in content gaps captures disproportionate citation share.
-- Different AI providers cite different sources (cross-family similarity only 0.11-0.58).
-
-NOTE: Each video below includes a pre-computed transcript assessment with keyword alignment, quotability, info density scores, key quotes, topics, and sentiment. Use these assessments as your primary evidence — they were produced by analyzing the full transcript text.
-
-Brand: %s
-Domain: %s
-Target Search Terms: %s
-Known Competitors: %s
-`, brandName, domain, strings.Join(searchTerms, ", "), strings.Join(competitors, ", ")))
-
-	if brandInfo.Used {
-		sb.WriteString(brandInfo.ContextString)
+	return videoContextParams{
+		Domain:          domain,
+		BrandName:       brandName,
+		SearchTerms:     searchTerms,
+		Competitors:     competitors,
+		BrandInfo:       brandInfo,
+		OwnVideos:       ownVideos,
+		ThirdPartyCount: thirdPartyCount,
+		Digests:         digests,
+		Assessments:     assessments,
 	}
+}
 
-	// Helper to write assessment or fallback for a video
-	writeVideoAssessment := func(v YouTubeVideo) {
-		a := assessments[v.VideoID]
-		if a != nil && a.HasTranscript {
-			sb.WriteString(fmt.Sprintf("Assessment: keyword_alignment=%d, quotability=%d, info_density=%d\n", a.KeywordAlignment, a.Quotability, a.InfoDensity))
-			if len(a.KeyQuotes) > 0 {
-				sb.WriteString(fmt.Sprintf("Key Quotes: \"%s\"\n", strings.Join(a.KeyQuotes, "\" | \"")))
+// writeVideoAssessment writes a single video's assessment data to a string builder.
+func writeVideoAssessment(sb *strings.Builder, v YouTubeVideo, assessments map[string]*VideoAssessment) {
+	a := assessments[v.VideoID]
+	if a != nil && a.HasTranscript {
+		sb.WriteString(fmt.Sprintf("Assessment: keyword_alignment=%d, quotability=%d, info_density=%d\n", a.KeywordAlignment, a.Quotability, a.InfoDensity))
+		if len(a.KeyQuotes) > 0 {
+			sb.WriteString(fmt.Sprintf("Key Quotes: \"%s\"\n", strings.Join(a.KeyQuotes, "\" | \"")))
+		}
+		if len(a.Topics) > 0 {
+			sb.WriteString(fmt.Sprintf("Topics: %s\n", strings.Join(a.Topics, ", ")))
+		}
+		sb.WriteString(fmt.Sprintf("Brand Sentiment: %s\n", a.BrandSentiment))
+		sb.WriteString(fmt.Sprintf("Summary: %s\n", a.Summary))
+	} else if v.Transcript != "" {
+		transcript := v.Transcript
+		if len(transcript) > 1000 {
+			transcript = transcript[:1000] + "... [truncated]"
+		}
+		sb.WriteString(fmt.Sprintf("Transcript (raw): %s\n", transcript))
+	} else {
+		sb.WriteString("Transcript: [NOT AVAILABLE — invisible to LLMs]\n")
+		if v.Description != "" {
+			desc := v.Description
+			if len(desc) > 500 {
+				desc = desc[:500] + "..."
 			}
-			if len(a.Topics) > 0 {
-				sb.WriteString(fmt.Sprintf("Topics: %s\n", strings.Join(a.Topics, ", ")))
-			}
-			sb.WriteString(fmt.Sprintf("Brand Sentiment: %s\n", a.BrandSentiment))
-			sb.WriteString(fmt.Sprintf("Summary: %s\n", a.Summary))
-		} else if v.Transcript != "" {
-			// Fallback: assessment failed but transcript exists
-			transcript := v.Transcript
-			if len(transcript) > 1000 {
-				transcript = transcript[:1000] + "... [truncated]"
-			}
-			sb.WriteString(fmt.Sprintf("Transcript (raw): %s\n", transcript))
-		} else {
-			sb.WriteString("Transcript: [NOT AVAILABLE — invisible to LLMs]\n")
-			if v.Description != "" {
-				desc := v.Description
-				if len(desc) > 500 {
-					desc = desc[:500] + "..."
-				}
-				sb.WriteString(fmt.Sprintf("Description: %s\n", desc))
-			}
+			sb.WriteString(fmt.Sprintf("Description: %s\n", desc))
 		}
 	}
+}
 
-	// Own channel videos — detailed
-	if len(ownVideos) > 0 {
-		sb.WriteString(fmt.Sprintf("\n\n=== OWN CHANNEL VIDEOS (%d) ===\n\n", len(ownVideos)))
-		for i, v := range ownVideos {
+// writePreamble writes the shared context header for any pillar prompt.
+func writePreamble(sb *strings.Builder, p videoContextParams) {
+	sb.WriteString(fmt.Sprintf(`You are an expert in Video LLM Authority analysis.
+
+Brand: %s | Domain: %s
+Target Search Terms: %s
+Known Competitors: %s
+`, p.BrandName, p.Domain, strings.Join(p.SearchTerms, ", "), strings.Join(p.Competitors, ", ")))
+	if p.BrandInfo.Used {
+		sb.WriteString(p.BrandInfo.ContextString)
+		sb.WriteString("\n")
+	}
+}
+
+// writeOwnChannelVideos writes the own-channel video data section.
+func writeOwnChannelVideos(sb *strings.Builder, p videoContextParams) {
+	if len(p.OwnVideos) > 0 {
+		sb.WriteString(fmt.Sprintf("\n=== OWN CHANNEL VIDEOS (%d) ===\n\n", len(p.OwnVideos)))
+		for i, v := range p.OwnVideos {
 			sb.WriteString(fmt.Sprintf("--- Own Video %d ---\n", i+1))
-			sb.WriteString(fmt.Sprintf("Title: %s\nVideo ID: %s\n", v.Title, v.VideoID))
+			sb.WriteString(fmt.Sprintf("Title: %s | Video ID: %s\n", v.Title, v.VideoID))
 			sb.WriteString(fmt.Sprintf("Views: %d | Likes: %d | Comments: %d\n", v.ViewCount, v.LikeCount, v.CommentCount))
 			sb.WriteString(fmt.Sprintf("Duration: %s | Published: %s\n", v.Duration, v.PublishedAt.Format("2006-01-02")))
 			if v.Description != "" {
@@ -5030,16 +5041,17 @@ Known Competitors: %s
 			if len(v.Tags) > 0 {
 				sb.WriteString(fmt.Sprintf("Tags: %s\n", strings.Join(v.Tags, ", ")))
 			}
-			writeVideoAssessment(v)
+			writeVideoAssessment(sb, v, p.Assessments)
 			sb.WriteString("\n")
 		}
 	}
+}
 
-	// Third-party videos — compact batch digests (map-reduce output)
-	if len(digests) > 0 {
-		sb.WriteString(fmt.Sprintf("\n\n=== THIRD-PARTY VIDEO DIGESTS (%d videos across %d batches) ===\n\n", thirdPartyCount, len(digests)))
-		sb.WriteString("NOTE: These are pre-computed batch summaries. Each digest condenses ~40 third-party video assessments into key signals.\n\n")
-		for _, d := range digests {
+// writeDigests writes the third-party batch digest section.
+func writeDigests(sb *strings.Builder, p videoContextParams) {
+	if len(p.Digests) > 0 {
+		sb.WriteString(fmt.Sprintf("\n=== THIRD-PARTY VIDEO DIGESTS (%d videos, %d batches) ===\n\n", p.ThirdPartyCount, len(p.Digests)))
+		for _, d := range p.Digests {
 			sb.WriteString(fmt.Sprintf("--- Batch %d (%d videos) ---\n", d.BatchIndex+1, d.VideoCount))
 			sb.WriteString(fmt.Sprintf("Summary: %s\n", d.Summary))
 			if len(d.TopCreators) > 0 {
@@ -5061,110 +5073,157 @@ Known Competitors: %s
 			sb.WriteString("\n")
 		}
 	}
+}
 
+// buildPillar1Prompt builds the Transcript Authority + Video Scorecards prompt.
+func buildPillar1Prompt(p videoContextParams) string {
+	var sb strings.Builder
+	writePreamble(&sb, p)
+	writeOwnChannelVideos(&sb, p)
 	sb.WriteString(fmt.Sprintf(`
-Produce a unified Video LLM Authority report with 4 pillar scores (each 0-100):
+Analyze the own-channel videos above for TRANSCRIPT AUTHORITY — how well the brand's spoken content signals expertise to LLMs.
 
-=== PILLAR 1: TRANSCRIPT AUTHORITY (weight 30%%) ===
-How well does the brand's own video content establish expertise through spoken words that LLMs ingest?
-- Assess ONLY the own channel videos above.
-- CRITICAL: If a video has no transcript, cap its contribution at 10. No captions = invisible.
-- Keyword alignment: Do target search terms appear naturally in spoken words?
-- Quotability: Standalone, citable statements? ("X is the best Y for Z because...") → +41%% visibility
-- Statistical evidence: Specific numbers/benchmarks spoken aloud? → +33%% visibility
-- Information density: Focused explainer vs. rambling content
-- Front-loading: Key claims in first 20%% of transcript? (U-shaped attention)
-- Entity explicitness: Brand/product name spoken clearly, not just shown on screen?
+LLMs consume transcripts, not video. Quotation-ready content gets +41%%%% visibility; statistics +33%%%%. U-shaped attention: beginning and end of transcripts get disproportionate weight.
 
-Sub-metrics to include: transcript_coverage (%%  of own videos with transcripts), keyword_alignment (0-100), quotability_score (0-100), information_density (0-100).
-Evidence: 2-4 specific observations.
+Evaluate:
+- Keyword alignment: target search terms in spoken words?
+- Quotability: standalone citable statements?
+- Statistical evidence: specific numbers/benchmarks?
+- Information density: focused vs. rambling?
+- Front-loading: key claims in first 20%%%% of transcript?
+- Entity explicitness: brand name spoken clearly?
+- CRITICAL: No transcript = cap contribution at 10.
 
-Per own-channel video, produce a scorecard: video_id, title, overall_score, transcript_power, structural_extractability, discovery_surface, has_transcript, key_findings (2-4 items).
-- transcript_power (45%%): spoken content quality as LLM training data
-- structural_extractability (30%%): how easily LLMs can parse and represent it (topic segmentation, Q&A patterns, claim clarity, metadata alignment)
-- discovery_surface (25%%): findability by AI retrieval (title optimization, description depth, tag coverage, freshness)
+Also produce a scorecard for EACH own-channel video:
+- transcript_power (45%%%%): spoken content quality as LLM training data
+- structural_extractability (30%%%%): how easily LLMs can parse it
+- discovery_surface (25%%%%): findability by AI retrieval
 - overall_score = transcript_power * 0.45 + structural_extractability * 0.30 + discovery_surface * 0.25
 
-=== PILLAR 2: TOPICAL DOMINANCE (weight 25%%) ===
-How comprehensively does the brand own key topic areas vs. the competitive landscape?
-- Analyze ALL videos (own + third-party) to map topic coverage.
-- Topics covered vs. total topics in the space
-- Coverage depth: surface mentions vs. in-depth treatment
-- Share of voice: %% of videos mentioning each brand. Include per-brand breakdown.
-- Content gaps: topics where competitors are present but brand is absent. Score each gap's opportunity (0-100).
-- First-mover opportunities in unclaimed territory.
-
-Sub-metrics: topics_covered, topics_total, coverage_depth (0-100), vs_competitors (narrative comparison).
-Include share_of_voice array and content_gaps array.
-
-=== PILLAR 3: CITATION NETWORK (weight 25%%) ===
-How connected and referenced is the brand by other authoritative creators?
-- Analyze third-party videos for brand mentions and creator authority.
-- Score creator authority (0-100) based on transcript quality, topical consistency — NOT subscriber count.
-- Assess each creator's role: advocate/critic/neutral.
-- Flag concentration risk: is the narrative dominated by 1-2 creators?
-- Identify high-authority creators who cover competitors but NOT the brand (outreach targets).
-
-Sub-metrics: creator_mentions (count), authoritative_refs (count of high-authority mentions), concentration_risk (narrative).
-Include top_creators array and creator_targets array.
-
-=== PILLAR 4: BRAND NARRATIVE QUALITY (weight 20%%) ===
-When the brand appears in third-party video content, how is it framed?
-- For each brand mention: sentiment (positive/negative/neutral), mention_context (recommendation/tutorial/comparison/complaint/passing), mention_position (early/middle/late), extractability (high/medium/low), competitors_mentioned.
-- Weight early + high-extractability mentions higher (U-shaped attention).
-- Apply 30%% confidence discount: LLM-constructed narrative may diverge from actual content.
-- Narrative coherence: are mentions consistent or contradictory?
-- Vulnerability assessment: negative patterns that LLMs would amplify?
-
-Sub-metrics: sentiment breakdown (positive/neutral/negative/total), narrative_coherence (0-100).
-Write narrative_summary: what an LLM would conclude about "%s" from this video evidence.
-Include brand_mentions array and key_themes array.
-
-=== OVERALL SCORE ===
-overall_score = transcript_authority * 0.30 + topical_dominance * 0.25 + citation_network * 0.25 + brand_narrative * 0.20
-
-Write executive_summary: 2-3 paragraph strategic overview of the brand's video LLM authority position.
-Write confidence_note: explicit statement about citation accuracy limitations and what they mean for this brand.
-
-Provide 5-12 structured recommendations. Each: action, expected_impact, dimension (one of "transcript_authority", "topical_dominance", "citation_network", "brand_narrative"), priority ("high"/"medium"/"low"), optionally video_id.
-
-Return ONLY valid JSON matching this structure exactly:
+Return ONLY valid JSON:
 {
-  "overall_score": 58,
   "transcript_authority": {
     "score": 65, "evidence": ["...", "..."],
     "transcript_coverage": 80, "keyword_alignment": 55, "quotability_score": 60, "information_density": 70
   },
+  "video_scorecards": [
+    {"video_id": "...", "title": "...", "overall_score": 70, "transcript_power": 60, "structural_extractability": 75, "discovery_surface": 80, "has_transcript": true, "key_findings": ["...", "..."]}
+  ]
+}`))
+	return sb.String()
+}
+
+// buildPillar2Prompt builds the Topical Dominance prompt.
+func buildPillar2Prompt(p videoContextParams) string {
+	var sb strings.Builder
+	writePreamble(&sb, p)
+	writeOwnChannelVideos(&sb, p)
+	writeDigests(&sb, p)
+	sb.WriteString(fmt.Sprintf(`
+Analyze ALL video data above for TOPICAL DOMINANCE — how comprehensively the brand owns key topic areas vs. competitors.
+
+Evaluate:
+- Topics covered vs. total topics in the space
+- Coverage depth: surface mentions vs. in-depth treatment
+- Share of voice: %%%% of videos mentioning each brand
+- Content gaps: topics where competitors are present but %s is absent (score each 0-100)
+- First-mover opportunities in unclaimed territory
+
+Return ONLY valid JSON:
+{
   "topical_dominance": {
     "score": 50, "evidence": ["...", "..."],
     "topics_covered": 4, "topics_total": 8, "coverage_depth": 55, "vs_competitors": "...",
-    "share_of_voice": [{"brand_name": "%s", "mention_count": 10, "percentage": 25.0}],
+    "share_of_voice": [{"brand_name": "X", "mention_count": 10, "percentage": 25.0}],
     "content_gaps": [{"query": "...", "competitors_mentioned": ["A"], "opportunity_score": 80, "video_count": 5, "recommendation": "..."}]
-  },
+  }
+}`, p.BrandName))
+	return sb.String()
+}
+
+// buildPillar3Prompt builds the Citation Network prompt.
+func buildPillar3Prompt(p videoContextParams) string {
+	var sb strings.Builder
+	writePreamble(&sb, p)
+	writeDigests(&sb, p)
+	sb.WriteString(`
+Analyze the third-party video digests for CITATION NETWORK — how connected and referenced the brand is by other creators.
+
+Views and subscriber counts do NOT predict AI citation. Structural factors matter most.
+
+Evaluate:
+- Creator authority (0-100) based on transcript quality, topical consistency — NOT subscriber count
+- Each creator's role: advocate/critic/neutral
+- Concentration risk: is narrative dominated by 1-2 creators?
+- High-authority creators who cover competitors but NOT the brand (outreach targets)
+
+Return ONLY valid JSON:
+{
   "citation_network": {
     "score": 45, "evidence": ["...", "..."],
     "creator_mentions": 8, "authoritative_refs": 3, "concentration_risk": "...",
     "top_creators": [{"channel_title": "...", "channel_id": "...", "subscriber_count": 100000, "sentiment": "positive", "video_count": 2, "total_views": 50000, "role": "advocate", "authority_score": 75}],
     "creator_targets": [{"channel_title": "...", "channel_id": "...", "subscriber_count": 500000, "category_relevance": "...", "competitors_mentioned": ["A"], "outreach_reason": "..."}]
-  },
+  }
+}`)
+	return sb.String()
+}
+
+// buildPillar4Prompt builds the Brand Narrative Quality prompt.
+func buildPillar4Prompt(p videoContextParams) string {
+	var sb strings.Builder
+	writePreamble(&sb, p)
+	writeDigests(&sb, p)
+	sb.WriteString(fmt.Sprintf(`
+Analyze the third-party video digests for BRAND NARRATIVE QUALITY — how %s is framed when it appears in third-party content.
+
+Perplexity generates one-sided answers 83.4%%%% of the time — negative patterns get amplified. Citation accuracy is only 49-68%%%%.
+
+Evaluate:
+- For brand mentions: sentiment, mention_context (recommendation/tutorial/comparison/complaint/passing), mention_position (early/middle/late), extractability (high/medium/low)
+- Weight early + high-extractability mentions higher (U-shaped attention)
+- Apply 30%%%% confidence discount for LLM narrative divergence
+- Narrative coherence: consistent or contradictory?
+- Vulnerability assessment: negative patterns LLMs would amplify?
+
+Return ONLY valid JSON:
+{
   "brand_narrative": {
     "score": 62, "evidence": ["...", "..."],
     "sentiment": {"positive": 6, "neutral": 3, "negative": 1, "total": 10},
     "narrative_summary": "Based on the video evidence...",
     "narrative_coherence": 70, "key_themes": ["Theme 1", "Theme 2"],
     "brand_mentions": [{"video_id": "...", "title": "...", "channel_title": "...", "view_count": 50000, "sentiment": "positive", "mention_context": "Recommended as top pick", "mention_position": "early", "extractability": "high", "competitors_mentioned": ["A"]}]
-  },
-  "video_scorecards": [
-    {"video_id": "...", "title": "...", "overall_score": 70, "transcript_power": 60, "structural_extractability": 75, "discovery_surface": 80, "has_transcript": true, "key_findings": ["...", "..."]}
-  ] // IMPORTANT: Include scorecards for ALL own-channel videos. Third-party videos are summarized in batch digests above — do not generate individual scorecards for them.,
+  }
+}`, p.BrandName))
+	return sb.String()
+}
+
+// buildSynthesisPrompt takes the 4 pillar JSON results and produces overall score + executive summary + recommendations.
+func buildSynthesisPrompt(brandName string, pillar1, pillar2, pillar3, pillar4 string) string {
+	return fmt.Sprintf(`You are synthesizing a Video LLM Authority report for %s from 4 independently-analyzed pillars.
+
+PILLAR RESULTS:
+%s
+%s
+%s
+%s
+
+TASK:
+1. Calculate overall_score = transcript_authority.score * 0.30 + topical_dominance.score * 0.25 + citation_network.score * 0.25 + brand_narrative.score * 0.20
+2. Write executive_summary: 2-3 paragraph strategic overview of the brand's video LLM authority position, drawing on all 4 pillars.
+3. Write confidence_note: explicit statement about citation accuracy limitations (49-68%%) and what they mean for this brand.
+4. Provide 5-12 structured recommendations spanning all 4 dimensions.
+
+Return ONLY valid JSON:
+{
+  "overall_score": 58,
   "executive_summary": "...",
   "confidence_note": "...",
   "recommendations": [
     {"action": "...", "expected_impact": "...", "dimension": "transcript_authority", "priority": "high", "video_id": "..."}
   ]
-}`, brandName, brandName))
-
-	return sb.String()
+}`, brandName, pillar1, pillar2, pillar3, pillar4)
 }
 
 func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool, systemYTKey string) http.HandlerFunc {
@@ -5469,27 +5528,151 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 			}
 		}
 
-		// Phase 2b: Final synthesis with compact digests
+		// Phase 2b: Run 4 pillar analyses concurrently
+		ctxParams := newVideoContextParams(req.Domain, ownVideos, len(thirdPartyVideos), digests, competitorNames, req.Config.SearchTerms, brandInfo, assessments)
+
+		type pillarResult struct {
+			pillar int // 1-4
+			json   string
+			model  string
+			err    error
+		}
+
+		pillarCh := make(chan pillarResult, 4)
+		pillarPrompts := map[int]struct {
+			name   string
+			prompt string
+		}{
+			1: {"Transcript Authority", buildPillar1Prompt(ctxParams)},
+			2: {"Topical Dominance", buildPillar2Prompt(ctxParams)},
+			3: {"Citation Network", buildPillar3Prompt(ctxParams)},
+			4: {"Brand Narrative", buildPillar4Prompt(ctxParams)},
+		}
+
 		sendSSE(w, flusher, "status", map[string]string{
-			"message": fmt.Sprintf("Phase 2b: Synthesizing %d own-channel + %d third-party videos into 4-pillar analysis...",
-				len(ownVideos), len(thirdPartyVideos)),
+			"message": "Phase 2b: Analyzing 4 pillars concurrently...",
 		})
 
-		prompt := buildVideoAuthorityPrompt(req.Domain, ownVideos, len(thirdPartyVideos), digests, competitorNames, req.Config.SearchTerms, brandInfo, assessments)
-		resultJSON, modelName, err := runAnalysis(prompt, "Video Authority")
-		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Analysis failed: " + err.Error()})
-			return
+		for pNum, pp := range pillarPrompts {
+			go func(num int, name, prompt string) {
+				rJSON, mName, pErr := runAnalysis(prompt, name)
+				pillarCh <- pillarResult{pillar: num, json: stripJSONFencing(rJSON), model: mName, err: pErr}
+			}(pNum, pp.name, pp.prompt)
 		}
-		usedModel = modelName
 
-		resultJSON = stripJSONFencing(resultJSON)
-		var result VideoAuthorityResult
-		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
-			log.Printf("Warning: failed to parse video authority result: %v", err)
-			sendSSE(w, flusher, "error", map[string]string{"message": "Failed to parse analysis result"})
+		pillarJSONs := make(map[int]string)
+		var pillarErr error
+		for i := 0; i < 4; i++ {
+			pr := <-pillarCh
+			if pr.err != nil {
+				if pillarErr == nil {
+					pillarErr = fmt.Errorf("pillar %d: %w", pr.pillar, pr.err)
+				}
+				log.Printf("Pillar %d failed: %v", pr.pillar, pr.err)
+			} else {
+				pillarJSONs[pr.pillar] = pr.json
+				if usedModel == "" {
+					usedModel = pr.model
+				}
+			}
+			sendSSE(w, flusher, "progress", map[string]string{
+				"message": fmt.Sprintf("Pillar analysis %d/4 complete...", i+1),
+			})
+		}
+
+		if len(pillarJSONs) < 4 {
+			sendSSE(w, flusher, "error", map[string]string{"message": "Analysis failed: " + pillarErr.Error()})
 			return
 		}
+
+		// Parse each pillar result into the unified struct
+		var result VideoAuthorityResult
+
+		// Pillar 1: Transcript Authority + Video Scorecards
+		var p1 struct {
+			TranscriptAuthority TranscriptAuthorityPillar `json:"transcript_authority"`
+			VideoScorecards     []VideoScorecard          `json:"video_scorecards"`
+		}
+		if err := json.Unmarshal([]byte(pillarJSONs[1]), &p1); err != nil {
+			log.Printf("Warning: failed to parse pillar 1: %v", err)
+		} else {
+			result.TranscriptAuthority = p1.TranscriptAuthority
+			result.VideoScorecards = p1.VideoScorecards
+		}
+
+		// Pillar 2: Topical Dominance
+		var p2 struct {
+			TopicalDominance TopicalDominancePillar `json:"topical_dominance"`
+		}
+		if err := json.Unmarshal([]byte(pillarJSONs[2]), &p2); err != nil {
+			log.Printf("Warning: failed to parse pillar 2: %v", err)
+		} else {
+			result.TopicalDominance = p2.TopicalDominance
+		}
+
+		// Pillar 3: Citation Network
+		var p3 struct {
+			CitationNetwork CitationNetworkPillar `json:"citation_network"`
+		}
+		if err := json.Unmarshal([]byte(pillarJSONs[3]), &p3); err != nil {
+			log.Printf("Warning: failed to parse pillar 3: %v", err)
+		} else {
+			result.CitationNetwork = p3.CitationNetwork
+		}
+
+		// Pillar 4: Brand Narrative
+		var p4 struct {
+			BrandNarrative BrandNarrativePillar `json:"brand_narrative"`
+		}
+		if err := json.Unmarshal([]byte(pillarJSONs[4]), &p4); err != nil {
+			log.Printf("Warning: failed to parse pillar 4: %v", err)
+		} else {
+			result.BrandNarrative = p4.BrandNarrative
+		}
+
+		// Phase 2c: Synthesis — overall score, executive summary, recommendations
+		sendSSE(w, flusher, "status", map[string]string{
+			"message": "Phase 2c: Synthesizing overall report...",
+		})
+		synthPrompt := buildSynthesisPrompt(ctxParams.BrandName, pillarJSONs[1], pillarJSONs[2], pillarJSONs[3], pillarJSONs[4])
+		synthJSON, synthModel, err := runAnalysis(synthPrompt, "Synthesis")
+		if err != nil {
+			// Synthesis failed — compute overall score manually and proceed without summary
+			log.Printf("Synthesis failed, computing score manually: %v", err)
+			result.OverallScore = int(float64(result.TranscriptAuthority.Score)*0.30 +
+				float64(result.TopicalDominance.Score)*0.25 +
+				float64(result.CitationNetwork.Score)*0.25 +
+				float64(result.BrandNarrative.Score)*0.20)
+			result.ExecutiveSummary = "Synthesis unavailable — pillar scores computed independently."
+			result.ConfidenceNote = "Citation accuracy in AI search is 49-68%. Results should be interpreted with caution."
+		} else {
+			if synthModel != "" {
+				usedModel = synthModel
+			}
+			synthJSON = stripJSONFencing(synthJSON)
+			var synth struct {
+				OverallScore     int                   `json:"overall_score"`
+				ExecutiveSummary string                `json:"executive_summary"`
+				ConfidenceNote   string                `json:"confidence_note"`
+				Recommendations  []VideoRecommendation `json:"recommendations"`
+			}
+			if err := json.Unmarshal([]byte(synthJSON), &synth); err != nil {
+				log.Printf("Warning: failed to parse synthesis: %v", err)
+				result.OverallScore = int(float64(result.TranscriptAuthority.Score)*0.30 +
+					float64(result.TopicalDominance.Score)*0.25 +
+					float64(result.CitationNetwork.Score)*0.25 +
+					float64(result.BrandNarrative.Score)*0.20)
+			} else {
+				result.OverallScore = synth.OverallScore
+				result.ExecutiveSummary = synth.ExecutiveSummary
+				result.ConfidenceNote = synth.ConfidenceNote
+				result.Recommendations = synth.Recommendations
+			}
+		}
+
+		// Marshal the final result for storage
+		resultBytes, _ := json.Marshal(result)
+		resultJSON := string(resultBytes)
 
 		sendSSE(w, flusher, "status", map[string]string{
 			"message": fmt.Sprintf("Analysis complete — Overall Score: %d/100", result.OverallScore),
