@@ -3328,6 +3328,21 @@ export default function App() {
           setVideoDomain(data.domain)
           setVideoView('results')
         }
+        // Map reddit analysis
+        if (data.reddit_analysis) {
+          setRedditAnalysis(data.reddit_analysis)
+          setRedditDomain(data.domain)
+          setRedditView('results')
+        }
+        // Map search analysis
+        if (data.search_analysis) {
+          setSearchAnalysis(data.search_analysis)
+        }
+        // Map LLM test results
+        if (data.llm_test) {
+          setTestResults(data.llm_test)
+          setTestView('results')
+        }
         // Map todos
         if (data.todos?.length > 0) {
           setTodos(data.todos)
@@ -9468,8 +9483,14 @@ curl -X PATCH \\
         {activeTab === 'search' && (
           <div className="max-w-4xl mx-auto animate-fade-in">
 
-            {/* No results yet — show analyze prompt */}
-            {!searchAnalysis && !searchAnalyzing && (
+            {/* No results yet — read-only placeholder in shared mode */}
+            {!searchAnalysis && !searchAnalyzing && readOnly && (
+              <div className="text-center py-16">
+                <p className="text-dark-500 text-sm">No Search Visibility analysis available for this domain yet.</p>
+              </div>
+            )}
+            {/* No results yet — show analyze prompt (authenticated only) */}
+            {!searchAnalysis && !searchAnalyzing && !readOnly && (
               <>
                 <div className="mb-6">
                   <div className="flex items-center gap-3 mb-1">
@@ -9922,13 +9943,15 @@ curl -X PATCH \\
                 <div className="space-y-6">
                   {/* Back button row */}
                   <div className="flex items-center justify-between">
-                    <button
-                      onClick={() => { setTestView('input'); setTestResults(null) }}
-                      className="text-dark-400 hover:text-white transition-colors cursor-pointer text-sm flex items-center gap-1"
-                    >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
-                      Re-run or Change Settings
-                    </button>
+                    {!readOnly ? (
+                      <button
+                        onClick={() => { setTestView('input'); setTestResults(null) }}
+                        className="text-dark-400 hover:text-white transition-colors cursor-pointer text-sm flex items-center gap-1"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
+                        Re-run or Change Settings
+                      </button>
+                    ) : <div />}
                     <div className="flex items-center gap-3">
                       {saasEnabled && user && (user.role === 'owner' || user.role === 'admin') && selectedDomain && (
                         <button onClick={() => { setDomainShareState(null); setShareModalDomain(selectedDomain); fetchDomainShare(selectedDomain) }}
@@ -10195,8 +10218,13 @@ curl -X PATCH \\
               </div>
             )}
 
-            {/* Setup view */}
-            {testView === 'input' && !testAnalyzing && !testResults && (
+            {/* Setup view — read-only placeholder when no results in shared mode */}
+            {testView === 'input' && !testAnalyzing && !testResults && readOnly && (
+              <div className="text-center py-16">
+                <p className="text-dark-500 text-sm">No LLM Brand Test results available for this domain yet.</p>
+              </div>
+            )}
+            {testView === 'input' && !testAnalyzing && !testResults && !readOnly && (
               <div className="space-y-6">
                 <div>
                   <h2 className="text-xl font-bold text-white mb-1">LLM Brand Test</h2>

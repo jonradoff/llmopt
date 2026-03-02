@@ -217,6 +217,8 @@ func buildReportPDF(
 	optimizations []Optimization,
 	videoAnalysis *VideoAnalysis,
 	redditAnalysis *RedditAnalysis,
+	searchAnalysis *SearchAnalysis,
+	llmTest *LLMTest,
 	summary *DomainSummary,
 	todos []TodoItem,
 ) ([]byte, error) {
@@ -268,6 +270,16 @@ func buildReportPDF(
 	}
 	if redditAnalysis != nil && redditAnalysis.Model != "" {
 		modelSet[redditAnalysis.Model] = true
+	}
+	if searchAnalysis != nil && searchAnalysis.Model != "" {
+		modelSet[searchAnalysis.Model] = true
+	}
+	if llmTest != nil {
+		for _, ps := range llmTest.ProviderSummaries {
+			if ps.Model != "" {
+				modelSet[ps.Model] = true
+			}
+		}
 	}
 	if len(modelSet) > 0 {
 		modelNames := make([]string, 0, len(modelSet))
@@ -593,7 +605,174 @@ func buildReportPDF(
 		toc = append(toc, tocEntry{name: "Reddit Authority", missing: true})
 	}
 
-	// --- 6. Recommendations (consolidated) ---
+	// --- 6. Search Visibility ---
+	if searchAnalysis != nil && searchAnalysis.Result != nil {
+		pdf.AddPage()
+		toc = append(toc, tocEntry{name: "Search Visibility", page: pdf.PageNo()})
+		pdfSectionHeader(pdf, "Search Visibility")
+
+		sr := searchAnalysis.Result
+
+		r, g, b := scoreToRGB(sr.OverallScore)
+		pdf.SetFont("Helvetica", "B", 18)
+		pdf.SetTextColor(r, g, b)
+		pdf.CellFormat(30, 10, fmt.Sprintf("%d", sr.OverallScore), "", 0, "L", false, 0, "")
+		pdf.SetFont("Helvetica", "", 11)
+		pdf.SetTextColor(120, 120, 120)
+		pdf.CellFormat(0, 10, "/ 100  Overall Search Visibility Score", "", 1, "L", false, 0, "")
+		pdf.Ln(4)
+
+		pdfScoreBox(pdf, "AI Overview Readiness", sr.AIOReadiness.Score)
+		pdfScoreBox(pdf, "Crawl Accessibility", sr.CrawlAccess.Score)
+		pdfScoreBox(pdf, "Brand Search Momentum", sr.BrandMomentum.Score)
+		pdfScoreBox(pdf, "Content Freshness", sr.ContentFreshness.Score)
+		if sr.CategoryDiscovery != nil {
+			pdfScoreBox(pdf, "Category Discovery", sr.CategoryDiscovery.Score)
+		}
+		pdf.Ln(4)
+
+		if sr.ExecutiveSummary != "" {
+			pdfSubHeader(pdf, "Summary")
+			pdfBodyText(pdf, sr.ExecutiveSummary)
+		}
+
+		// Crawler details
+		if len(sr.CrawlAccess.CrawlerDetails) > 0 {
+			pdfCheckPageBreak(pdf, 20)
+			pdfSubHeader(pdf, "AI Crawler Access")
+			for _, c := range sr.CrawlAccess.CrawlerDetails {
+				pdfCheckPageBreak(pdf, 6)
+				pdf.SetFont("Helvetica", "B", 9)
+				if c.Allowed {
+					pdf.SetTextColor(16, 185, 129) // emerald
+				} else {
+					pdf.SetTextColor(239, 68, 68) // red
+				}
+				status := "Blocked"
+				if c.Allowed {
+					status = "Allowed"
+				}
+				pdf.CellFormat(20, 5, status, "", 0, "L", false, 0, "")
+				pdf.SetFont("Helvetica", "", 9)
+				pdf.SetTextColor(60, 60, 60)
+				pdf.CellFormat(30, 5, c.Name, "", 0, "L", false, 0, "")
+				if c.Notes != "" {
+					pdf.SetTextColor(100, 100, 100)
+					notes := c.Notes
+					if len(notes) > 70 {
+						notes = notes[:67] + "..."
+					}
+					pdf.CellFormat(0, 5, pdfCleanText(notes), "", 0, "L", false, 0, "")
+				}
+				pdf.Ln(5)
+			}
+			pdf.Ln(2)
+		}
+
+	} else {
+		toc = append(toc, tocEntry{name: "Search Visibility", missing: true})
+	}
+
+	// --- 7. LLM Brand Test ---
+	if llmTest != nil && len(llmTest.ProviderSummaries) > 0 {
+		pdf.AddPage()
+		toc = append(toc, tocEntry{name: "LLM Brand Test", page: pdf.PageNo()})
+		pdfSectionHeader(pdf, "LLM Brand Test")
+
+		r, g, b := scoreToRGB(llmTest.OverallScore)
+		pdf.SetFont("Helvetica", "B", 18)
+		pdf.SetTextColor(r, g, b)
+		pdf.CellFormat(30, 10, fmt.Sprintf("%d", llmTest.OverallScore), "", 0, "L", false, 0, "")
+		pdf.SetFont("Helvetica", "", 11)
+		pdf.SetTextColor(120, 120, 120)
+		pdf.CellFormat(0, 10, "/ 100  Overall Brand Test Score", "", 1, "L", false, 0, "")
+		pdf.Ln(4)
+
+		// Provider summaries table
+		pdfSubHeader(pdf, "Provider Results")
+		pdf.SetFont("Helvetica", "B", 9)
+		pdf.SetTextColor(80, 80, 80)
+		pdf.SetFillColor(245, 245, 245)
+		pdf.CellFormat(45, 6, "Provider / Model", "B", 0, "L", true, 0, "")
+		pdf.CellFormat(20, 6, "Score", "B", 0, "C", true, 0, "")
+		pdf.CellFormat(25, 6, "Mention", "B", 0, "C", true, 0, "")
+		pdf.CellFormat(30, 6, "Recommend", "B", 0, "C", true, 0, "")
+		pdf.CellFormat(25, 6, "Accuracy", "B", 0, "C", true, 0, "")
+		pdf.CellFormat(0, 6, "Sentiment", "B", 1, "C", true, 0, "")
+
+		for _, ps := range llmTest.ProviderSummaries {
+			pdfCheckPageBreak(pdf, 6)
+			pdf.SetFont("Helvetica", "", 9)
+			pdf.SetTextColor(60, 60, 60)
+			label := ps.ProviderName
+			if ps.Model != "" {
+				label += " (" + ps.Model + ")"
+			}
+			if len(label) > 30 {
+				label = label[:27] + "..."
+			}
+			pdf.CellFormat(45, 5, label, "", 0, "L", false, 0, "")
+			sr, sg, sb := scoreToRGB(ps.OverallScore)
+			pdf.SetTextColor(sr, sg, sb)
+			pdf.SetFont("Helvetica", "B", 9)
+			pdf.CellFormat(20, 5, fmt.Sprintf("%d", ps.OverallScore), "", 0, "C", false, 0, "")
+			pdf.SetFont("Helvetica", "", 9)
+			pdf.SetTextColor(60, 60, 60)
+			pdf.CellFormat(25, 5, fmt.Sprintf("%d%%", ps.MentionRate), "", 0, "C", false, 0, "")
+			pdf.CellFormat(30, 5, fmt.Sprintf("%d%%", ps.RecommendRate), "", 0, "C", false, 0, "")
+			pdf.CellFormat(25, 5, fmt.Sprintf("%d%%", ps.AccuracyRate), "", 0, "C", false, 0, "")
+			pdf.CellFormat(0, 5, fmt.Sprintf("%d/100", ps.SentimentScore), "", 1, "C", false, 0, "")
+		}
+		pdf.Ln(4)
+
+		// Query-level results (top 15)
+		if len(llmTest.Results) > 0 {
+			pdfCheckPageBreak(pdf, 20)
+			limit := len(llmTest.Results)
+			if limit > 15 {
+				limit = 15
+			}
+			pdfSubHeader(pdf, fmt.Sprintf("Query Results (%d queries)", len(llmTest.Results)))
+			for _, qr := range llmTest.Results[:limit] {
+				pdfCheckPageBreak(pdf, 12)
+				pdf.SetFont("Helvetica", "B", 9)
+				pdf.SetTextColor(50, 50, 50)
+				query := pdfCleanText(qr.Query.Query)
+				if len(query) > 80 {
+					query = query[:77] + "..."
+				}
+				pdf.CellFormat(0, 5, query, "", 1, "L", false, 0, "")
+				pdf.SetFont("Helvetica", "", 8)
+				for _, pr := range qr.ProviderResults {
+					pdf.SetTextColor(100, 100, 100)
+					nameStr := pr.ProviderName
+					if len(nameStr) > 15 {
+						nameStr = nameStr[:12] + "..."
+					}
+					pdf.CellFormat(28, 4.5, "  "+nameStr, "", 0, "L", false, 0, "")
+					psr, psg, psb := scoreToRGB(pr.Score)
+					pdf.SetTextColor(psr, psg, psb)
+					pdf.CellFormat(12, 4.5, fmt.Sprintf("%d", pr.Score), "", 0, "L", false, 0, "")
+					pdf.SetTextColor(100, 100, 100)
+					mentioned := "not mentioned"
+					if pr.Mentioned {
+						mentioned = "mentioned"
+					}
+					recommended := ""
+					if pr.Recommended {
+						recommended = ", recommended"
+					}
+					pdf.CellFormat(0, 4.5, mentioned+recommended, "", 1, "L", false, 0, "")
+				}
+				pdf.Ln(1.5)
+			}
+		}
+
+	} else {
+		toc = append(toc, tocEntry{name: "LLM Brand Test", missing: true})
+	}
+
+	// --- 8. Recommendations (consolidated) ---
 	type pdfRec struct {
 		action   string
 		priority string
@@ -625,6 +804,8 @@ func buildReportPDF(
 			source = "YouTube"
 		} else if t.SourceType == "reddit" {
 			source = "Reddit"
+		} else if t.SourceType == "search" {
+			source = "Search"
 		}
 		addRec(t.Action, t.Priority, source, t.ExpectedImpact)
 	}
@@ -651,6 +832,13 @@ func buildReportPDF(
 	if redditAnalysis != nil && redditAnalysis.Result != nil {
 		for _, rec := range redditAnalysis.Result.Recommendations {
 			addRec(rec.Action, rec.Priority, "Reddit", rec.ExpectedImpact)
+		}
+	}
+
+	// Search recommendations
+	if searchAnalysis != nil && searchAnalysis.Result != nil {
+		for _, rec := range searchAnalysis.Result.Recommendations {
+			addRec(rec.Action, rec.Priority, "Search", rec.ExpectedImpact)
 		}
 	}
 
@@ -724,17 +912,19 @@ func buildReportPDF(
 		toc = append(toc, tocEntry{name: "Recommendations", missing: true})
 	}
 
-	// --- 7. Supporting Research ---
+	// --- 9. Supporting Research ---
 	pdf.AddPage()
 	toc = append(toc, tocEntry{name: "Supporting Research", page: pdf.PageNo()})
 	pdfSectionHeader(pdf, "Supporting Research")
 
 	pdfSubHeader(pdf, "Research Digest")
 	researchParagraphs := []string{
+		"Brand Recognition vs. Discovery. A key framework throughout LLM Optimizer is the distinction between brand recognition -- how well AI represents your brand when people search for it by name -- and inbound discovery -- how often AI surfaces your brand when people search your category without prior knowledge of you. Both matter, but they require different strategies. Brand recognition improves through authority signals, earned media, and training data presence. Discovery requires appearing in category-level content, answering the questions your audience asks before they know you exist, and being present in the YouTube videos, Reddit threads, and web pages that LLMs cite for category queries.",
 		"The emerging science of LLM visibility reveals a fundamental shift in how information gains authority online. The most significant recent finding comes from NanoKnow (2026), which demonstrates that content appearing frequently in training data more than doubles a model's accuracy on related questions -- and that the advantage compounds when content is both memorized during training and retrievable at inference time. This means the traditional SEO playbook of optimizing for a single ranking algorithm is being replaced by a dual imperative: getting into training corpora through widespread, high-quality publication, while simultaneously remaining citable through structured, authoritative web presence.",
 		"Across the research, a consistent pattern emerges: AI search engines overwhelmingly favor earned media over brand-owned content, citing third-party sources 72-92% of the time. Content that includes quotations from authoritative sources gains +41% visibility -- the single most effective optimization technique identified. Meanwhile, YouTube has rapidly become the dominant social citation source for LLMs, with its share doubling to 39% between August and December 2024. Critically, video LLMs process content through transcripts, not visual analysis -- a 7B model trained on YouTube transcripts outperformed 72B models, proving that transcript quality matters far more than production value.",
-		"Reddit has emerged as the #2 social citation source for LLMs, with unique authority dynamics. Reddit was foundational in LLM training through datasets like WebText and the Common Crawl, and continues through $60M (Google) and $70M (OpenAI) annual licensing deals. Unlike YouTube's channel-centric authority, Reddit's influence comes from multi-user validation -- upvoted comment consensus, especially in \"best X for Y\" recommendation threads, creates credibility signals that LLMs weight heavily.",
-		"However, this new landscape comes with important caveats. Citation accuracy across AI answer engines remains surprisingly poor (49-68%), with nearly a third of claims lacking any source backing. Citation concentration follows power-law dynamics, where the top 20 sources capture 28-67% of all citations. And LLMs exhibit strong positional bias, reliably attending to content at the beginning and end of context while ignoring the middle. Together, these findings inform LLM Optimizer's scoring frameworks across answer optimization, video authority, and Reddit authority analysis.",
+		"Reddit has emerged as the #2 social citation source for LLMs, with unique authority dynamics. Reddit was foundational in LLM training through datasets like WebText and the Common Crawl, and continues through $60M (Google) and $70M (OpenAI) annual licensing deals. Unlike YouTube's channel-centric authority, Reddit's influence comes from multi-user validation -- upvoted comment consensus, especially in \"best X for Y\" recommendation threads, creates credibility signals that LLMs weight heavily. The Toronto GEO paper classifies Reddit as \"Social\" -- a category AI search engines suppress in direct citations -- yet Reddit's pervasive presence in training data means it heavily shapes baseline model knowledge even when not explicitly cited.",
+		"A critical \"two-world\" split has emerged between Google AI Overviews and standalone LLMs. 76% of AI Overview citations pull from top-10 organic pages -- making traditional search rankings the primary signal for AIO inclusion. But for standalone LLMs like ChatGPT, only 12% of cited URLs rank in Google's top 10. The strongest predictor of AI citation across platforms is YouTube mentions (0.737 correlation), followed by web mentions (0.664) -- not backlinks. Meanwhile, content freshness has become a significant signal: AI assistants cite content that is 25.7% newer than traditional search results, and 65% of AI bot crawl hits target content less than a year old. The explosive growth of AI crawlers (GPTBot up 305% YoY) makes robots.txt policy a direct lever for AI visibility.",
+		"However, this new landscape comes with important caveats. Citation accuracy across AI answer engines remains surprisingly poor (49-68%), with nearly a third of claims lacking any source backing. Citation concentration follows power-law dynamics, where the top 20 sources capture 28-67% of all citations. And LLMs exhibit strong positional bias, reliably attending to content at the beginning and end of context while ignoring the middle. Together, these findings inform LLM Optimizer's scoring frameworks across answer optimization, video authority, Reddit authority, and search visibility analysis.",
 	}
 	for _, para := range researchParagraphs {
 		pdfCheckPageBreak(pdf, 25)
@@ -763,6 +953,14 @@ func buildReportPDF(
 		{"[10]", "Consent in Crisis: The Rapid Decline of the AI Data Commons", "ACM FAccT 2024 (Longpre et al.)", "https://dl.acm.org/doi/10.1145/3630106.3659033"},
 		{"[11]", "Reddit Data Licensing: Google and OpenAI Deals", "Reuters / The Verge, 2024", "https://www.reuters.com/technology/reddit-ai-content-licensing-deal-google-2024-02-22/"},
 		{"[12]", "Community Consensus as LLM Authority Signal", "Bluefish Labs / Emberos Research, 2025", "https://www.adweek.com/media/youtube-reddit-ai-search-engine-citations"},
+		{"[13]", "AI Overview Citations and Search Rankings", "Ahrefs, 2025", "https://ahrefs.com/blog/search-rankings-ai-citations/"},
+		{"[14]", "AI Search Overlap: How AI Citations Differ from Google", "Ahrefs, 2025", "https://ahrefs.com/blog/ai-search-overlap/"},
+		{"[15]", "AI Brand Visibility Correlations (75K Brands)", "Ahrefs, 2025", "https://ahrefs.com/blog/ai-brand-visibility-correlations/"},
+		{"[16]", "Do AI Assistants Prefer to Cite Fresh Content?", "Ahrefs, 2025 (17M citations)", "https://ahrefs.com/blog/do-ai-assistants-prefer-to-cite-fresh-content/"},
+		{"[17]", "AI Brand Visibility and Content Recency", "Seer Interactive, 2025", "https://www.seerinteractive.com/insights/study-ai-brand-visibility-and-content-recency"},
+		{"[18]", "Do Large Language Models Favor Recent Content?", "arXiv, September 2025", "https://arxiv.org/html/2509.11353v1"},
+		{"[19]", "From Googlebot to GPTBot: Who's Crawling Your Site", "Cloudflare, 2025", "https://blog.cloudflare.com/from-googlebot-to-gptbot-whos-crawling-your-site-in-2025/"},
+		{"[20]", "AI Overviews Study: 200,000 Keywords", "Semrush, 2025", "https://www.semrush.com/blog/semrush-ai-overviews-study/"},
 	}
 
 	for _, bib := range bibliography {
@@ -933,6 +1131,28 @@ func handleGeneratePDF(mongoDB *MongoDB) http.HandlerFunc {
 			redditAnalysis = &ra
 		}
 
+		// Search analysis
+		sendSSE(w, flusher, "status", map[string]string{"message": "Loading search analysis..."})
+		var searchAnalysis *SearchAnalysis
+		var sa SearchAnalysis
+		saFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
+		saOpts := options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}).SetProjection(bson.D{{Key: "rawText", Value: 0}})
+		if err := mongoDB.SearchAnalyses().FindOne(ctx, saFilter, saOpts).Decode(&sa); err == nil {
+			searchAnalysis = &sa
+		}
+
+		// LLM test
+		sendSSE(w, flusher, "status", map[string]string{"message": "Loading LLM test results..."})
+		var llmTest *LLMTest
+		var lt LLMTest
+		ltFilter := tenantFilter(r.Context(), bson.D{
+			{Key: "domain", Value: domain},
+			{Key: "competitorOf", Value: bson.D{{Key: "$in", Value: bson.A{"", nil}}}},
+		})
+		if err := mongoDB.LLMTests().FindOne(ctx, ltFilter, options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}})).Decode(&lt); err == nil {
+			llmTest = &lt
+		}
+
 		// Domain summary
 		sendSSE(w, flusher, "status", map[string]string{"message": "Loading executive summary..."})
 		var summary *DomainSummary
@@ -964,7 +1184,7 @@ func handleGeneratePDF(mongoDB *MongoDB) http.HandlerFunc {
 
 		// Build PDF
 		sendSSE(w, flusher, "status", map[string]string{"message": "Generating PDF report..."})
-		pdfBytes, err := buildReportPDF(domain, brandProfile, analysis, optimizations, videoAnalysis, redditAnalysis, summary, todos)
+		pdfBytes, err := buildReportPDF(domain, brandProfile, analysis, optimizations, videoAnalysis, redditAnalysis, searchAnalysis, llmTest, summary, todos)
 		if err != nil {
 			sendSSE(w, flusher, "error", map[string]string{"message": "Failed to generate PDF: " + err.Error()})
 			return

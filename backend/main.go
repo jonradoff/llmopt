@@ -2746,6 +2746,9 @@ func handleGetSharedDomain(mongoDB *MongoDB) http.HandlerFunc {
 			optimizations   []Optimization
 			brandProfile    *BrandProfile
 			videoAnalysis   *VideoAnalysis
+			redditAnalysis  *RedditAnalysis
+			searchAnalysis  *SearchAnalysis
+			llmTest         *LLMTest
 			todos           []TodoItem
 			domainSummary   *DomainSummary
 			visibilityScore map[string]any
@@ -2794,6 +2797,40 @@ func handleGetSharedDomain(mongoDB *MongoDB) http.HandlerFunc {
 			if err := mongoDB.VideoAnalyses().FindOne(gctx, tenantDomain).Decode(&va); err == nil {
 				va.RawText = ""
 				videoAnalysis = &va
+			}
+			return nil
+		})
+
+		g.Go(func() error {
+			var ra RedditAnalysis
+			if err := mongoDB.RedditAnalyses().FindOne(gctx, tenantDomain,
+				options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}})).Decode(&ra); err == nil {
+				ra.RawText = ""
+				redditAnalysis = &ra
+			}
+			return nil
+		})
+
+		g.Go(func() error {
+			var sa SearchAnalysis
+			if err := mongoDB.SearchAnalyses().FindOne(gctx, tenantDomain,
+				options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}})).Decode(&sa); err == nil {
+				sa.RawText = ""
+				searchAnalysis = &sa
+			}
+			return nil
+		})
+
+		g.Go(func() error {
+			var lt LLMTest
+			testFilter := bson.M{
+				"tenantId":     ds.TenantID,
+				"domain":       ds.Domain,
+				"competitorOf": bson.M{"$in": []any{"", nil}},
+			}
+			if err := mongoDB.LLMTests().FindOne(gctx, testFilter,
+				options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}})).Decode(&lt); err == nil {
+				llmTest = &lt
 			}
 			return nil
 		})
@@ -2943,6 +2980,9 @@ func handleGetSharedDomain(mongoDB *MongoDB) http.HandlerFunc {
 			"optimizations":    optimizations,
 			"brand_profile":    brandProfile,
 			"video_analysis":   videoAnalysis,
+			"reddit_analysis":  redditAnalysis,
+			"search_analysis":  searchAnalysis,
+			"llm_test":         llmTest,
 			"todos":            todos,
 			"domain_summary":   domainSummary,
 			"visibility_score": visibilityScore,
