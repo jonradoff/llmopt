@@ -5533,7 +5533,8 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 			}
 		}
 
-		// Phase 2b: Run 4 pillar analyses concurrently
+		// Phase 2b: Run 4 pillar analyses concurrently using non-streaming Call()
+		// (compact JSON output, avoids concurrent SSE write issues)
 		ctxParams := newVideoContextParams(req.Domain, ownVideos, len(thirdPartyVideos), digests, competitorNames, req.Config.SearchTerms, brandInfo, assessments)
 
 		type pillarResult struct {
@@ -5541,6 +5542,46 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 			json   string
 			model  string
 			err    error
+		}
+
+		callPillar := func(prompt, phaseName string) (string, string, error) {
+			for _, model := range models {
+				const maxRetries = 3
+				backoff := 3 * time.Second
+				var lastErr error
+
+				for attempt := 0; attempt <= maxRetries; attempt++ {
+					if attempt > 0 {
+						if r.Context().Err() != nil {
+							return "", "", fmt.Errorf("request cancelled")
+						}
+						select {
+						case <-time.After(backoff):
+						case <-r.Context().Done():
+							return "", "", fmt.Errorf("request cancelled")
+						}
+						backoff *= 2
+					}
+
+					text, err := provider.Call(r.Context(), apiKey, model.ID, prompt, 16384)
+					if err != nil {
+						retryable := errors.Is(err, ErrOverloaded) || (strings.Contains(err.Error(), "context deadline exceeded") && r.Context().Err() == nil)
+						if retryable && attempt < maxRetries {
+							log.Printf("%s (%s) retryable for %s (attempt %d/%d): %v", provider.Name(), model.ID, phaseName, attempt+1, maxRetries, err)
+							lastErr = err
+							continue
+						}
+						if errors.Is(err, ErrOverloaded) {
+							lastErr = err
+							break // try next model
+						}
+						return "", "", err
+					}
+					return stripJSONFencing(text), model.Name, nil
+				}
+				log.Printf("%s (%s) exhausted retries for %s: %v", provider.Name(), model.ID, phaseName, lastErr)
+			}
+			return "", "", fmt.Errorf("all models failed for pillar analysis")
 		}
 
 		pillarCh := make(chan pillarResult, 4)
@@ -5560,8 +5601,8 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 
 		for pNum, pp := range pillarPrompts {
 			go func(num int, name, prompt string) {
-				rJSON, mName, pErr := runAnalysis(prompt, name)
-				pillarCh <- pillarResult{pillar: num, json: stripJSONFencing(rJSON), model: mName, err: pErr}
+				rJSON, mName, pErr := callPillar(prompt, name)
+				pillarCh <- pillarResult{pillar: num, json: rJSON, model: mName, err: pErr}
 			}(pNum, pp.name, pp.prompt)
 		}
 

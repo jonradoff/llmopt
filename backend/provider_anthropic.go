@@ -59,8 +59,8 @@ func (p *AnthropicProvider) Call(ctx context.Context, apiKey, model, prompt stri
 		},
 	})
 
-	// Use a per-call timeout of 60s so a hung request doesn't block indefinitely
-	callCtx, callCancel := context.WithTimeout(ctx, 60*time.Second)
+	// Use a per-call timeout of 90s so a hung request doesn't block indefinitely
+	callCtx, callCancel := context.WithTimeout(ctx, 90*time.Second)
 	defer callCancel()
 
 	httpReq, err := http.NewRequestWithContext(callCtx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
@@ -115,8 +115,8 @@ func (p *AnthropicProvider) Stream(ctx context.Context, apiKey string, body []by
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 529 {
-		log.Printf("Claude API returned 529 (overloaded)")
+	if resp.StatusCode == 529 || resp.StatusCode == 429 {
+		log.Printf("Claude API returned %d (overloaded/rate-limited)", resp.StatusCode)
 		return nil, ErrOverloaded
 	}
 	if resp.StatusCode != 200 {
