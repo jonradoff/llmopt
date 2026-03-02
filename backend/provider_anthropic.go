@@ -67,7 +67,7 @@ func (p *AnthropicProvider) Call(ctx context.Context, apiKey, model, prompt stri
 	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := llmHTTPClient.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}
@@ -105,7 +105,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, apiKey string, body []by
 	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := llmStreamClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -253,7 +253,7 @@ func (p *AnthropicProvider) VerifyKey(ctx context.Context, apiKey string) (strin
 	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := llmHTTPClient.Do(httpReq)
 	if err != nil {
 		return "error", fmt.Errorf("request failed: %w", err)
 	}

@@ -101,3 +101,15 @@ func resolvePrimaryLLM(ctx context.Context, mongoDB *MongoDB, encKey []byte, fal
 func resolveAnthropicKey(ctx context.Context, mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) (string, error) {
 	return resolveProviderKey(ctx, mongoDB, encKey, fallbackKey, saasEnabled, "anthropic")
 }
+
+// resolveYouTubeKey resolves the YouTube Data API v3 key for the current tenant.
+// In non-SaaS mode, falls back to the system YOUTUBE_API_KEY env var.
+func resolveYouTubeKey(ctx context.Context, mongoDB *MongoDB, encKey []byte, systemKey string, saasEnabled bool) (string, error) {
+	if !saasEnabled {
+		if systemKey != "" {
+			return systemKey, nil
+		}
+		return "", fmt.Errorf("youtube_key_required")
+	}
+	return resolveProviderKey(ctx, mongoDB, encKey, "", saasEnabled, "youtube")
+}

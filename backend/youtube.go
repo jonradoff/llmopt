@@ -26,6 +26,9 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+// ytHTTPClient is a shared HTTP client for YouTube Data API v3 calls.
+var ytHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 const (
 	youtubeAPIBase = "https://www.googleapis.com/youtube/v3"
 	cacheTTL        = 14 * 24 * time.Hour  // 14 days for API search/metadata results
@@ -35,12 +38,34 @@ const (
 
 // ── YouTube Data API v3 ─────────────────────────────────────────────────
 
+// verifyYouTubeKey checks if a YouTube Data API v3 key is valid by making
+// a lightweight search call. Returns "active", "invalid", or "error".
+func verifyYouTubeKey(ctx context.Context, apiKey string) string {
+	u := fmt.Sprintf("%s/search?part=id&q=test&type=video&maxResults=1&key=%s", youtubeAPIBase, apiKey)
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return "error"
+	}
+	resp, err := ytHTTPClient.Do(req)
+	if err != nil {
+		return "error"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		return "active"
+	}
+	if resp.StatusCode == 400 || resp.StatusCode == 403 {
+		return "invalid"
+	}
+	return "error"
+}
+
 // youtubeSearch searches YouTube for videos matching a query.
 func youtubeSearch(apiKey, query string, maxResults int) ([]YouTubeVideo, error) {
 	u := fmt.Sprintf("%s/search?part=snippet&q=%s&type=video&maxResults=%d&key=%s",
 		youtubeAPIBase, url.QueryEscape(query), maxResults, apiKey)
 
-	resp, err := http.Get(u)
+	resp, err := ytHTTPClient.Get(u)
 	if err != nil {
 		return nil, fmt.Errorf("youtube search request failed: %w", err)
 	}
@@ -100,7 +125,7 @@ func youtubeVideoDetails(apiKey string, videoIDs []string) ([]YouTubeVideo, erro
 		u := fmt.Sprintf("%s/videos?part=snippet,statistics,contentDetails&id=%s&key=%s",
 			youtubeAPIBase, url.QueryEscape(strings.Join(batch, ",")), apiKey)
 
-		resp, err := http.Get(u)
+		resp, err := ytHTTPClient.Get(u)
 		if err != nil {
 			return nil, fmt.Errorf("youtube video details request failed: %w", err)
 		}
@@ -166,7 +191,7 @@ func youtubeChannelInfo(apiKey, channelID string) (*YouTubeChannel, error) {
 	u := fmt.Sprintf("%s/channels?part=snippet,statistics&id=%s&key=%s",
 		youtubeAPIBase, url.QueryEscape(channelID), apiKey)
 
-	resp, err := http.Get(u)
+	resp, err := ytHTTPClient.Get(u)
 	if err != nil {
 		return nil, fmt.Errorf("youtube channel info request failed: %w", err)
 	}
@@ -217,7 +242,7 @@ func youtubeChannelVideos(apiKey, channelID string, maxResults int) ([]YouTubeVi
 	u := fmt.Sprintf("%s/search?part=snippet&channelId=%s&type=video&maxResults=%d&order=date&key=%s",
 		youtubeAPIBase, url.QueryEscape(channelID), maxResults, apiKey)
 
-	resp, err := http.Get(u)
+	resp, err := ytHTTPClient.Get(u)
 	if err != nil {
 		return nil, fmt.Errorf("youtube channel videos request failed: %w", err)
 	}
@@ -467,8 +492,11 @@ func fetchCaptionXML(captionURL, userAgent string, httpClient *http.Client) (str
 	if resp.StatusCode == 429 {
 		return "", fmt.Errorf("%w: timedtext rate limited (429)", errBlocked)
 	}
-	if resp.StatusCode != 200 || len(body) == 0 {
+	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("timedtext HTTP %d (%d bytes)", resp.StatusCode, len(body))
+	}
+	if len(body) == 0 {
+		return "", fmt.Errorf("%w: timedtext HTTP 200 but empty body", errBlocked)
 	}
 
 	return parseTimedTextXML(body)
@@ -956,7 +984,7 @@ func resolveChannelByHandle(apiKey, handle string) (string, error) {
 	u := fmt.Sprintf("%s/channels?part=id&forHandle=%s&key=%s",
 		youtubeAPIBase, url.QueryEscape(handle), apiKey)
 
-	resp, err := http.Get(u)
+	resp, err := ytHTTPClient.Get(u)
 	if err != nil {
 		return "", err
 	}
@@ -980,7 +1008,7 @@ func resolveChannelByUsername(apiKey, username string) (string, error) {
 	u := fmt.Sprintf("%s/channels?part=id&forUsername=%s&key=%s",
 		youtubeAPIBase, url.QueryEscape(username), apiKey)
 
-	resp, err := http.Get(u)
+	resp, err := ytHTTPClient.Get(u)
 	if err != nil {
 		return "", err
 	}
@@ -1004,7 +1032,7 @@ func resolveChannelByUsername(apiKey, username string) (string, error) {
 
 // discoverVideos runs the auto-discovery process: searches YouTube for
 // brand-related, competitor, and category content.
-func discoverVideos(mongoDB *MongoDB, apiKey string, brandName, channelURL string, searchTerms, competitors []string, progress func(string)) ([]YouTubeVideo, int, error) {
+func discoverVideos(mongoDB *MongoDB, apiKey string, brandName, channelURL string, searchTerms, competitors, categories, keyUseCases []string, progress func(string)) ([]YouTubeVideo, int, error) {
 	seen := make(map[string]bool)
 	var allVideos []YouTubeVideo
 	quotaUsed := 0
@@ -1081,6 +1109,31 @@ func discoverVideos(mongoDB *MongoDB, apiKey string, brandName, channelURL strin
 	for _, term := range searchTerms {
 		quotaUsed += 2
 		videos, err := cachedYouTubeSearch(mongoDB, apiKey, term, 10)
+		if err == nil {
+			addVideos(videos, "category_content")
+		}
+		searchCount++
+	}
+
+	// 5. Auto-generated category discovery searches (max 4 to limit quota)
+	var categorySearches []string
+	year := time.Now().Year()
+	for _, cat := range categories {
+		if len(categorySearches) >= 2 {
+			break
+		}
+		categorySearches = append(categorySearches, fmt.Sprintf("best %s tools %d", cat, year))
+	}
+	for _, uc := range keyUseCases {
+		if len(categorySearches) >= 4 {
+			break
+		}
+		categorySearches = append(categorySearches, fmt.Sprintf("how to %s", uc))
+	}
+	totalSearches += len(categorySearches)
+	for _, term := range categorySearches {
+		quotaUsed += 2
+		videos, err := cachedYouTubeSearch(mongoDB, apiKey, term, 5)
 		if err == nil {
 			addVideos(videos, "category_content")
 		}

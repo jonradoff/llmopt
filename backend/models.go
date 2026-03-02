@@ -107,6 +107,7 @@ type TodoItem struct {
 	CompletedAt     *time.Time          `json:"completed_at,omitempty" bson:"completedAt,omitempty"`
 	BackloggedAt    *time.Time          `json:"backlogged_at,omitempty" bson:"backloggedAt,omitempty"`
 	ArchivedAt      *time.Time          `json:"archived_at,omitempty" bson:"archivedAt,omitempty"`
+	Tags            []string            `json:"tags,omitempty" bson:"tags,omitempty"`
 }
 
 // OptimizationSummary is the lightweight shape returned by the optimizations list endpoint.
@@ -185,19 +186,21 @@ type BrandProfile struct {
 	PresenceComplete bool               `json:"presence_complete" bson:"presenceComplete"`
 	Public           bool               `json:"public" bson:"public"`
 	LastDiscoveryAt  *time.Time         `json:"last_discovery_at,omitempty" bson:"lastDiscoveryAt,omitempty"`
-	CreatedAt       time.Time          `json:"created_at" bson:"createdAt"`
-	UpdatedAt       time.Time          `json:"updated_at" bson:"updatedAt"`
+	CreatedAt             time.Time  `json:"created_at" bson:"createdAt"`
+	UpdatedAt             time.Time  `json:"updated_at" bson:"updatedAt"`
+	BrandContentUpdatedAt *time.Time `json:"brand_content_updated_at,omitempty" bson:"brandContentUpdatedAt,omitempty"`
 }
 
 type BrandProfileSummary struct {
-	ID              primitive.ObjectID `json:"id" bson:"_id"`
-	Domain          string             `json:"domain" bson:"domain"`
-	BrandName       string             `json:"brand_name" bson:"brandName"`
-	CompetitorCount int                `json:"competitor_count"`
-	QueryCount      int                `json:"query_count"`
-	Completeness    int                `json:"completeness"`
-	Public          bool               `json:"public" bson:"public"`
-	UpdatedAt       time.Time          `json:"updated_at" bson:"updatedAt"`
+	ID                    primitive.ObjectID `json:"id" bson:"_id"`
+	Domain                string             `json:"domain" bson:"domain"`
+	BrandName             string             `json:"brand_name" bson:"brandName"`
+	CompetitorCount       int                `json:"competitor_count"`
+	QueryCount            int                `json:"query_count"`
+	Completeness          int                `json:"completeness"`
+	Public                bool               `json:"public" bson:"public"`
+	UpdatedAt             time.Time          `json:"updated_at" bson:"updatedAt"`
+	BrandContentUpdatedAt *time.Time         `json:"brand_content_updated_at,omitempty" bson:"brandContentUpdatedAt,omitempty"`
 }
 
 // Health check persistence
@@ -474,6 +477,7 @@ type DomainShare struct {
 	Domain     string             `json:"domain" bson:"domain"`
 	ShareID    string             `json:"share_id" bson:"shareId"`
 	Visibility string             `json:"visibility" bson:"visibility"` // "private", "public", "popular"
+	ViewCount  int                `json:"view_count" bson:"viewCount"`
 	CreatedAt  time.Time          `json:"created_at" bson:"createdAt"`
 	UpdatedAt  time.Time          `json:"updated_at" bson:"updatedAt"`
 }
@@ -657,6 +661,7 @@ type SearchVisibilityResult struct {
 	CrawlAccess       CrawlAccessibilityPillar   `json:"crawl_accessibility" bson:"crawlAccessibility"`
 	BrandMomentum     BrandSearchMomentumPillar  `json:"brand_momentum" bson:"brandMomentum"`
 	ContentFreshness  ContentFreshnessPillar     `json:"content_freshness" bson:"contentFreshness"`
+	CategoryDiscovery *CategoryDiscoveryPillar   `json:"category_discovery,omitempty" bson:"categoryDiscovery,omitempty"`
 	ExecutiveSummary  string                     `json:"executive_summary" bson:"executiveSummary"`
 	ConfidenceNote    string                     `json:"confidence_note" bson:"confidenceNote"`
 	Recommendations   []SearchRecommendation     `json:"recommendations" bson:"recommendations"`
@@ -710,6 +715,15 @@ type SearchRecommendation struct {
 	Priority       string `json:"priority" bson:"priority"` // "high", "medium", "low"
 	ExpectedImpact string `json:"expected_impact" bson:"expectedImpact"`
 	Dimension      string `json:"dimension" bson:"dimension"` // which pillar
+}
+
+type CategoryDiscoveryPillar struct {
+	Score              int      `json:"score" bson:"score"`
+	Evidence           []string `json:"evidence" bson:"evidence"`
+	CategoryVisibility int      `json:"category_visibility" bson:"categoryVisibility"`
+	IntentCoverage     int      `json:"intent_coverage" bson:"intentCoverage"`
+	CompetitorGap      int      `json:"competitor_gap" bson:"competitorGap"`
+	DiscoveryPotential int      `json:"discovery_potential" bson:"discoveryPotential"`
 }
 
 type SearchAnalysis struct {

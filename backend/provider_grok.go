@@ -64,7 +64,7 @@ func (p *GrokProvider) Call(ctx context.Context, apiKey, model, prompt string, m
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := llmHTTPClient.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}
@@ -103,7 +103,7 @@ func (p *GrokProvider) Stream(ctx context.Context, apiKey string, body []byte, w
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := llmStreamClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -205,7 +205,7 @@ func (p *GrokProvider) VerifyKey(ctx context.Context, apiKey string) (string, er
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := llmHTTPClient.Do(httpReq)
 	if err != nil {
 		return "error", fmt.Errorf("request failed: %w", err)
 	}

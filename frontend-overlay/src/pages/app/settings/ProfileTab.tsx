@@ -5,6 +5,7 @@ import { useAuth } from '../../../contexts/AuthContext';
 import { useTenant } from '../../../contexts/TenantContext';
 import { authApi } from '../../../api/client';
 import { getErrorMessage } from '../../../utils/errors';
+import { trackEventImmediate, trackEvent } from '../../../telemetry';
 
 // --- Reusable from upstream ---
 
@@ -216,6 +217,24 @@ const PROVIDERS: ProviderDef[] = [
     billingUrl: 'https://aistudio.google.com',
     billingLabel: 'aistudio.google.com',
   },
+  {
+    id: 'youtube',
+    name: 'YouTube Data API',
+    description: 'Required for Video Authority analysis',
+    models: [],
+    placeholder: 'AIza...',
+    helpSteps: [
+      { text: 'Go to console.cloud.google.com and sign in.', link: { url: 'https://console.cloud.google.com', label: 'console.cloud.google.com' } },
+      { text: 'Create a new project or select an existing one.' },
+      { text: 'Navigate to APIs & Services \u2192 Library.' },
+      { text: 'Search for "YouTube Data API v3" and click Enable.' },
+      { text: 'Go to APIs & Services \u2192 Credentials.' },
+      { text: 'Click "Create Credentials" \u2192 "API Key".' },
+      { text: 'Copy the key and paste it here. Optionally restrict it to YouTube Data API v3 for security.' },
+    ],
+    billingUrl: 'https://console.cloud.google.com/billing',
+    billingLabel: 'console.cloud.google.com/billing',
+  },
 ];
 
 // --- Help Modal ---
@@ -307,7 +326,7 @@ function ProviderKeyCard({ provider, existingKey, isPrimary, onUpdate, onSetPrim
   onSetPrimary: () => void;
 }) {
   const [keyInput, setKeyInput] = useState('');
-  const [model, setModel] = useState(existingKey?.preferred_model || provider.models[0].id);
+  const [model, setModel] = useState(existingKey?.preferred_model || provider.models[0]?.id || '');
   const [saving, setSaving] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -325,6 +344,7 @@ function ProviderKeyCard({ provider, existingKey, isPrimary, onUpdate, onSetPrim
     try {
       await saveAPIKey(provider.id, keyInput.trim(), model);
       setKeyInput('');
+      trackEventImmediate('custom.funnel.api_key_added', { provider: provider.id });
       toast.success(`${provider.name} API key saved and verified`);
       onUpdate();
       window.dispatchEvent(new Event('apikey-updated'));
@@ -339,6 +359,7 @@ function ProviderKeyCard({ provider, existingKey, isPrimary, onUpdate, onSetPrim
     setVerifying(true);
     try {
       const result = await verifyAPIKey(provider.id);
+      trackEvent('custom.settings.api_key_verified', { provider: provider.id, status: result.status });
       toast.success(`${provider.name} key status: ${result.status}`);
       onUpdate();
       window.dispatchEvent(new Event('apikey-updated'));
@@ -353,6 +374,7 @@ function ProviderKeyCard({ provider, existingKey, isPrimary, onUpdate, onSetPrim
     setRemoving(true);
     try {
       await deleteAPIKey(provider.id);
+      trackEvent('custom.settings.api_key_removed', { provider: provider.id });
       toast.success(`${provider.name} API key removed`);
       onUpdate();
       window.dispatchEvent(new Event('apikey-updated'));
@@ -376,7 +398,7 @@ function ProviderKeyCard({ provider, existingKey, isPrimary, onUpdate, onSetPrim
           )}
         </div>
         <div className="flex items-center gap-2">
-          {existingKey && existingKey.status === 'active' && !isPrimary && (
+          {existingKey && existingKey.status === 'active' && !isPrimary && provider.id !== 'youtube' && (
             <button
               onClick={onSetPrimary}
               className="text-xs text-dark-400 hover:text-primary-400 transition-colors"
@@ -417,6 +439,7 @@ function ProviderKeyCard({ provider, existingKey, isPrimary, onUpdate, onSetPrim
 
           {existingKey.status === 'no_credits' && <CreditRefillHelper provider={provider} />}
 
+          {provider.models.length > 0 && (
           <div>
             <label className="block text-xs text-dark-400 mb-1">Preferred Model</label>
             <select
@@ -438,6 +461,7 @@ function ProviderKeyCard({ provider, existingKey, isPrimary, onUpdate, onSetPrim
               ))}
             </select>
           </div>
+          )}
 
           <div>
             <label className="block text-xs text-dark-400 mb-1">Replace Key</label>
@@ -462,6 +486,7 @@ function ProviderKeyCard({ provider, existingKey, isPrimary, onUpdate, onSetPrim
       ) : (
         <div className="space-y-3">
           <p className="text-xs text-dark-400">Enter your {provider.name} API key to use {provider.name} for analysis.</p>
+          {provider.models.length > 0 && (
           <div>
             <label className="block text-xs text-dark-400 mb-1">Preferred Model</label>
             <select
@@ -474,6 +499,7 @@ function ProviderKeyCard({ provider, existingKey, isPrimary, onUpdate, onSetPrim
               ))}
             </select>
           </div>
+          )}
           <div className="flex gap-2">
             <input
               type="password"
@@ -548,12 +574,14 @@ function ProviderKeyCardReadOnly({ provider, existingKey, isPrimary, ownerName }
             </div>
           )}
 
+          {provider.models.length > 0 && (
           <div>
             <label className="block text-xs text-dark-400 mb-1">Preferred Model</label>
             <div className="px-3 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-sm text-dark-300">
               {provider.models.find(m => m.id === existingKey.preferred_model)?.name || existingKey.preferred_model || 'Default'}
             </div>
           </div>
+          )}
         </div>
       ) : (
         <div className="text-xs text-dark-500">No key configured</div>

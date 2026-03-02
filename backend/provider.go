@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // ErrOverloaded is returned when an LLM API is overloaded (retryable).
@@ -48,6 +49,14 @@ type LLMProvider interface {
 	ProviderID() string
 }
 
+// llmHTTPClient is a shared HTTP client for non-streaming LLM provider API calls.
+var llmHTTPClient = &http.Client{Timeout: 120 * time.Second}
+
+// llmStreamClient is used for streaming LLM calls where the response is read
+// incrementally. No timeout — cancellation is handled by the request context
+// (e.g. client disconnect).
+var llmStreamClient = &http.Client{}
+
 // providers is the global registry of available LLM providers.
 var providers = map[string]LLMProvider{}
 
@@ -69,6 +78,7 @@ func getProvider(id string) LLMProvider {
 }
 
 // validProviderIDs returns the list of supported provider identifiers.
+// Includes "youtube" which is not an LLM provider but uses the same key storage.
 func validProviderIDs() []string {
-	return []string{"anthropic", "openai", "grok", "gemini"}
+	return []string{"anthropic", "openai", "grok", "gemini", "youtube"}
 }

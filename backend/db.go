@@ -22,7 +22,7 @@ func NewMongoDB(uri, database string) (*MongoDB, error) {
 
 	clientOptions := options.Client().
 		ApplyURI(uri).
-		SetMaxPoolSize(10).
+		SetMaxPoolSize(50).
 		SetMinPoolSize(1).
 		SetMaxConnIdleTime(5 * time.Minute)
 
@@ -82,10 +82,9 @@ func (m *MongoDB) ensureIndexes() {
 	}
 
 	brandIndexes := []mongo.IndexModel{
-		{Keys: bson.D{{Key: "domain", Value: 1}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}},
 			Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "updatedAt", Value: -1}}},
-		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
 	}
 	_, err = m.BrandProfiles().Indexes().CreateMany(ctx, brandIndexes)
 	if err != nil {
@@ -94,6 +93,8 @@ func (m *MongoDB) ensureIndexes() {
 
 	healthIndexes := []mongo.IndexModel{
 		{Keys: bson.D{{Key: "checkedAt", Value: -1}}},
+		{Keys: bson.D{{Key: "checkedAt", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(30 * 24 * 3600)},
 	}
 	_, err = m.HealthChecks().Indexes().CreateMany(ctx, healthIndexes)
 	if err != nil {
@@ -101,9 +102,8 @@ func (m *MongoDB) ensureIndexes() {
 	}
 
 	summaryIndexes := []mongo.IndexModel{
-		{Keys: bson.D{{Key: "domain", Value: 1}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}},
 			Options: options.Index().SetUnique(true)},
-		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
 	}
 	_, err = m.DomainSummaries().Indexes().CreateMany(ctx, summaryIndexes)
 	if err != nil {
@@ -111,10 +111,9 @@ func (m *MongoDB) ensureIndexes() {
 	}
 
 	videoIndexes := []mongo.IndexModel{
-		{Keys: bson.D{{Key: "domain", Value: 1}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}},
 			Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "generatedAt", Value: -1}}},
-		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
 	}
 	_, err = m.VideoAnalyses().Indexes().CreateMany(ctx, videoIndexes)
 	if err != nil {
@@ -145,10 +144,9 @@ func (m *MongoDB) ensureIndexes() {
 	}
 
 	redditIndexes := []mongo.IndexModel{
-		{Keys: bson.D{{Key: "domain", Value: 1}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}},
 			Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "generatedAt", Value: -1}}},
-		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
 	}
 	_, err = m.RedditAnalyses().Indexes().CreateMany(ctx, redditIndexes)
 	if err != nil {
@@ -167,9 +165,8 @@ func (m *MongoDB) ensureIndexes() {
 	}
 
 	reportPDFIdx := []mongo.IndexModel{
-		{Keys: bson.D{{Key: "domain", Value: 1}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}},
 			Options: options.Index().SetUnique(true)},
-		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
 	}
 	_, err = m.ReportPDFs().Indexes().CreateMany(ctx, reportPDFIdx)
 	if err != nil {
@@ -177,7 +174,7 @@ func (m *MongoDB) ensureIndexes() {
 	}
 
 	screenshotIdx := []mongo.IndexModel{
-		{Keys: bson.D{{Key: "domain", Value: 1}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}},
 			Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "capturedAt", Value: -1}}},
 	}
@@ -187,14 +184,23 @@ func (m *MongoDB) ensureIndexes() {
 	}
 
 	searchIdx := []mongo.IndexModel{
-		{Keys: bson.D{{Key: "domain", Value: 1}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}},
 			Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "generatedAt", Value: -1}}},
-		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}}},
 	}
 	_, err = m.SearchAnalyses().Indexes().CreateMany(ctx, searchIdx)
 	if err != nil {
 		log.Printf("Warning: failed to create indexes on search_analyses: %v", err)
+	}
+
+	// LLM Tests
+	llmTestIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}, {Key: "createdAt", Value: -1}}},
+		{Keys: bson.D{{Key: "domain", Value: 1}, {Key: "createdAt", Value: -1}}},
+	}
+	_, err = m.LLMTests().Indexes().CreateMany(ctx, llmTestIdx)
+	if err != nil {
+		log.Printf("Warning: failed to create indexes on llm_tests: %v", err)
 	}
 
 	apiKeyIdx := []mongo.IndexModel{
@@ -214,6 +220,29 @@ func (m *MongoDB) ensureIndexes() {
 	_, err = m.TenantSettings().Indexes().CreateMany(ctx, settingsIdx)
 	if err != nil {
 		log.Printf("Warning: failed to create indexes on tenant_settings: %v", err)
+	}
+}
+
+// migrateIndexes drops old {domain: 1} unique indexes that conflict in multi-tenant mode.
+// Safe to run multiple times — dropping a non-existent index just returns an error we ignore.
+func (m *MongoDB) migrateIndexes() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Collections that had {domain: 1} unique indexes and now use {tenantId: 1, domain: 1} unique
+	collections := []string{
+		"brand_profiles", "domain_summaries", "video_analyses",
+		"reddit_analyses", "report_pdfs", "brand_screenshots", "search_analyses",
+	}
+
+	for _, name := range collections {
+		coll := m.Database.Collection(name)
+		_, err := coll.Indexes().DropOne(ctx, "domain_1")
+		if err == nil {
+			log.Printf("migrateIndexes: dropped old domain_1 unique index on %s", name)
+		}
+		// Also drop the old non-unique {tenantId: 1, domain: 1} to avoid conflict with new unique version
+		_, _ = coll.Indexes().DropOne(ctx, "tenantId_1_domain_1")
 	}
 }
 
@@ -261,10 +290,12 @@ func (m *MongoDB) RedditCache() *mongo.Collection {
 	return m.Database.Collection("reddit_cache")
 }
 
+// TODO: migrate to object storage (S3/R2) when storage becomes a concern
 func (m *MongoDB) ReportPDFs() *mongo.Collection {
 	return m.Database.Collection("report_pdfs")
 }
 
+// TODO: migrate to object storage (S3/R2) when storage becomes a concern
 func (m *MongoDB) BrandScreenshots() *mongo.Collection {
 	return m.Database.Collection("brand_screenshots")
 }
@@ -283,6 +314,15 @@ func (m *MongoDB) LLMTests() *mongo.Collection {
 
 func (m *MongoDB) TenantSettings() *mongo.Collection {
 	return m.Database.Collection("tenant_settings")
+}
+
+// allTenantCollections returns all collections that store tenant-scoped domain data.
+func (m *MongoDB) allTenantCollections() []*mongo.Collection {
+	return []*mongo.Collection{
+		m.Analyses(), m.Optimizations(), m.BrandProfiles(),
+		m.VideoAnalyses(), m.RedditAnalyses(), m.SearchAnalyses(),
+		m.DomainSummaries(), m.LLMTests(),
+	}
 }
 
 func (m *MongoDB) Close(ctx context.Context) error {

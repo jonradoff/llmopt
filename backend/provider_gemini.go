@@ -82,7 +82,7 @@ func (p *GeminiProvider) Call(ctx context.Context, apiKey, model, prompt string,
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := llmHTTPClient.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}
@@ -139,7 +139,7 @@ func (p *GeminiProvider) Stream(ctx context.Context, apiKey string, body []byte,
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := llmStreamClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -242,7 +242,7 @@ func (p *GeminiProvider) VerifyKey(ctx context.Context, apiKey string) (string, 
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := llmHTTPClient.Do(httpReq)
 	if err != nil {
 		return "error", fmt.Errorf("request failed: %w", err)
 	}

@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { apiFetch } from './apiFetch'
 import { fetchCurrentUser, fetchUnreadCount, clearAuth, type UserInfo } from './auth'
+import { trackPageView, trackEvent, trackEventImmediate, setTelemetryContext } from './telemetry'
 
 interface CrawledPage {
   url: string
@@ -101,6 +102,7 @@ interface TodoItem {
   completed_at?: string
   backlogged_at?: string
   archived_at?: string
+  tags?: string[]
 }
 
 type TodoSubTab = 'todo' | 'completed' | 'backlogged' | 'archived'
@@ -242,6 +244,7 @@ interface BrandProfileSummary {
   completeness: number
   public: boolean
   updated_at: string
+  brand_content_updated_at?: string
 }
 
 interface DiscoveredCompetitor {
@@ -582,6 +585,7 @@ interface SearchVisibilityResult {
   crawl_accessibility: { score: number; evidence: string[]; robots_txt_policy: string; ai_bot_access: number; sitemap_quality: number; render_accessibility: number; crawler_details: { name: string; allowed: boolean; notes: string }[] }
   brand_momentum: { score: number; evidence: string[]; brand_search_trend: string; competitor_compare: string; web_mention_strength: number; entity_recognition: number }
   content_freshness: { score: number; evidence: string[]; average_content_age: string; update_frequency: string; freshness_signals: number; content_decay_risk: number }
+  category_discovery?: { score: number; evidence: string[]; category_visibility: number; intent_coverage: number; competitor_gap: number; discovery_potential: number }
   executive_summary: string
   confidence_note: string
   recommendations: { action: string; priority: string; expected_impact: string; dimension: string }[]
@@ -771,10 +775,18 @@ export default function App() {
 
   // Domain sharing state
   const [shareModalDomain, setShareModalDomain] = useState<string | null>(null)
-  const [domainShareState, setDomainShareState] = useState<{ visibility: string; share_id: string; share_url: string } | null>(null)
+  const [domainShareState, setDomainShareState] = useState<{ visibility: string; share_id: string; share_url: string; view_count?: number } | null>(null)
   const [shareLoading, setShareLoading] = useState(false)
   const [shareCopied, setShareCopied] = useState(false)
   const [popularDomains, setPopularDomains] = useState<{ domain: string; brand_name: string; share_id: string; avg_score: number; report_count: number; analysis_count?: number; has_video?: boolean; has_screenshot?: boolean }[]>([])
+
+  // Research page mode (/research URL)
+  const isResearchURL = window.location.pathname === '/research'
+  const [showResearch, setShowResearch] = useState(isResearchURL)
+
+  // API docs page mode (/docs URL)
+  const isDocsURL = window.location.pathname === '/docs'
+  const [showDocs, setShowDocs] = useState(isDocsURL)
 
   // Shared view mode (read-only /share/{shareId} URL)
   const isShareURL = /^\/share\/[A-Za-z0-9]+$/.test(window.location.pathname)
@@ -794,7 +806,6 @@ export default function App() {
   const [subscriptionModal, setSubscriptionModal] = useState(false)
   const [apiKeyModal, setApiKeyModal] = useState(false)
   const [loginModal, setLoginModal] = useState(false)
-  const [showResearch, setShowResearch] = useState(false)
 
   // Brand Intelligence state
   const [brandProfile, setBrandProfile] = useState<BrandProfile | null>(null)
@@ -888,6 +899,7 @@ export default function App() {
   const [redditSearchTermInput, setRedditSearchTermInput] = useState('')
   const [redditDiscovering, setRedditDiscovering] = useState(false)
   const [discoveredThreads, setDiscoveredThreads] = useState<RedditThreadSummary[]>([])
+  const [discoveredSubreddits, setDiscoveredSubreddits] = useState<string[]>([])
   const [selectedThreadIds, setSelectedThreadIds] = useState<Set<string>>(new Set())
   const [redditAnalyzing, setRedditAnalyzing] = useState(false)
   const redditAbortRef = useRef<AbortController | null>(null)
@@ -933,6 +945,7 @@ export default function App() {
   const [testExpandedCells, setTestExpandedCells] = useState<Set<string>>(new Set())
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
   const [visibilityScore, setVisibilityScore] = useState<{ score: number; components: { name: string; score: number; weight: number; available: boolean }[]; available: number } | null>(null)
+  const [visibilityScoreVersion, setVisibilityScoreVersion] = useState(0)
 
   // Auto-scroll refs for SSE message containers
   const videoMessagesEndRef = useRef<HTMLDivElement>(null)
@@ -951,7 +964,8 @@ export default function App() {
   const [showCredits, setShowCredits] = useState(false)
   const [tenantCredits, setTenantCredits] = useState(0)
   const [hasActivePlan, setHasActivePlan] = useState(false)
-  const [apiKeyStatus, setApiKeyStatus] = useState<'active' | 'invalid' | 'no_credits' | 'unconfigured'>('unconfigured')
+  const [apiKeyStatus, setApiKeyStatus] = useState<'loading' | 'active' | 'invalid' | 'no_credits' | 'unconfigured'>('loading')
+  const [hasYouTubeKey, setHasYouTubeKey] = useState(false)
   const [userTenantRole, setUserTenantRole] = useState<string>('')
   const [welcomeKeyModal, setWelcomeKeyModal] = useState(false)
 
@@ -973,6 +987,7 @@ export default function App() {
         // Fetch API key status
         apiFetch('/api/settings/api-keys/status').then(r => r.ok ? r.json() : null).then(data => {
           if (data?.status) setApiKeyStatus(data.status)
+          if (data?.has_youtube_key) setHasYouTubeKey(true)
           if (data?.role) setUserTenantRole(data.role)
           // Show welcome modal once per session for owners who haven't set up API keys yet
           if (data?.role === 'owner' && data?.status === 'unconfigured' && !sessionStorage.getItem('llmopt_welcome_key_shown')) {
@@ -983,6 +998,40 @@ export default function App() {
       }
     }).catch(() => {})
   }, [])
+
+  // Re-fetch API key status when keys are updated in settings
+  useEffect(() => {
+    const handler = () => {
+      apiFetch('/api/settings/api-keys/status').then(r => r.ok ? r.json() : null).then(data => {
+        if (data?.status) setApiKeyStatus(data.status)
+        setHasYouTubeKey(!!data?.has_youtube_key)
+      }).catch(() => {})
+    }
+    window.addEventListener('apikey-updated', handler)
+    return () => window.removeEventListener('apikey-updated', handler)
+  }, [])
+
+  // Telemetry: sync context + initial page view
+  useEffect(() => { trackPageView() }, [])
+  useEffect(() => { setTelemetryContext(activeTab, selectedDomain) }, [activeTab, selectedDomain])
+
+  // Telemetry: tab switch tracking
+  const prevTabRef = useRef(activeTab)
+  useEffect(() => {
+    if (prevTabRef.current !== activeTab) {
+      trackEvent('custom.tab.switch', { from: prevTabRef.current, to: activeTab })
+      prevTabRef.current = activeTab
+    }
+  }, [activeTab])
+
+  // Telemetry: domain switch tracking
+  const prevDomainRef = useRef(selectedDomain)
+  useEffect(() => {
+    if (prevDomainRef.current !== selectedDomain && selectedDomain) {
+      trackEvent('custom.domain.switch', { from: prevDomainRef.current, to: selectedDomain })
+      prevDomainRef.current = selectedDomain
+    }
+  }, [selectedDomain])
 
   // Brand dirty tracking — flag-based, set only on user/AI changes after load
   const brandDirtyRef = useRef(false)
@@ -1250,6 +1299,7 @@ export default function App() {
   }, [])
 
   const setDomainVisibility = useCallback(async (domain: string, visibility: string) => {
+    trackEventImmediate('custom.share.visibility_change', { domain, visibility })
     setShareLoading(true)
     try {
       const response = await apiFetch(`/api/domains/${encodeURIComponent(domain)}/share`, {
@@ -1383,6 +1433,7 @@ export default function App() {
       if (response.ok) {
         const saved = await response.json() as BrandProfile
         setBrandProfile(saved)
+        trackEvent('custom.brand.save', { domain: brandDomain })
         fetchBrandList()
         brandDirtyRef.current = false
       }
@@ -1462,6 +1513,7 @@ export default function App() {
 
   const generateSummary = useCallback(async (domain: string) => {
     setGeneratingSummary(true)
+    trackEventImmediate('custom.report.summary.start', { domain })
     setSummaryMessages([])
 
     await brandSSE(
@@ -1471,6 +1523,7 @@ export default function App() {
       async (resultStr: string) => {
         try {
           const parsed = JSON.parse(resultStr) as DomainSummaryResult
+          trackEvent('custom.report.summary.complete', { domain })
           const res = await apiFetch(`/api/domains/${encodeURIComponent(domain)}/summary`)
           if (res.ok) {
             const data = await res.json()
@@ -1624,6 +1677,7 @@ export default function App() {
   const videoDiscover = useCallback(async () => {
     if (!videoDomain.trim()) return
     setVideoDiscovering(true)
+    trackEventImmediate('custom.report.video_discover.start', { domain: videoDomain })
     setVideoMessages([])
     setDiscoveredVideos([])
     setSelectedVideoIds(new Set())
@@ -1700,6 +1754,7 @@ export default function App() {
                 setDiscoveredVideos(videos)
                 setSelectedVideoIds(new Set(videos.map((v: YouTubeVideo) => v.video_id)))
                 setVideoQuotaEstimate(data.quota_estimate || 0)
+                trackEvent('custom.report.video_discover.complete', { domain: videoDomain, videoCount: videos.length })
                 setVideoView('review')
               } else if (currentEvent === 'error') {
                 setVideoMessages(prev => [...prev, data.message || 'Discovery failed'])
@@ -1727,6 +1782,7 @@ export default function App() {
     const controller = new AbortController()
     videoAbortRef.current = controller
     setVideoAnalyzing(true)
+    trackEventImmediate('custom.report.video.start', { domain: videoDomain, videoCount: selectedVideoIds.size })
     setVideoMessages([])
     setVideoView('running')
 
@@ -1808,6 +1864,7 @@ export default function App() {
                   generated_at: result.generated_at || new Date().toISOString(),
                 }
                 setVideoAnalysis(analysis)
+                trackEvent('custom.report.video.complete', { domain: videoDomain })
                 setVideoView('results')
               } catch {
                 setVideoMessages(prev => [...prev, 'Failed to parse analysis results'])
@@ -1815,6 +1872,7 @@ export default function App() {
               setVideoAnalyzing(false)
               fetchVideoAnalysisList()
               fetchTodos()
+              setVisibilityScoreVersion(v => v + 1)
               return
             } else if (eventType === 'error') {
               setVideoMessages(prev => [...prev, 'Error: ' + parsed.message])
@@ -2076,6 +2134,7 @@ export default function App() {
               } else if (currentEvent === 'done') {
                 const threads = (data.threads || []) as RedditThreadSummary[]
                 setDiscoveredThreads(threads)
+                setDiscoveredSubreddits((data.discovered_subreddits || []) as string[])
                 setSelectedThreadIds(new Set(threads.map(t => t.id)))
                 setRedditView('review')
               } else if (currentEvent === 'error') {
@@ -2104,6 +2163,7 @@ export default function App() {
     const controller = new AbortController()
     redditAbortRef.current = controller
     setRedditAnalyzing(true)
+    trackEventImmediate('custom.report.reddit.start', { domain: redditDomain })
     setRedditMessages([])
     setRedditView('running')
 
@@ -2183,6 +2243,7 @@ export default function App() {
                   generated_at: result.generated_at || new Date().toISOString(),
                 }
                 setRedditAnalysis(analysis)
+                trackEvent('custom.report.reddit.complete', { domain: redditDomain })
                 setRedditView('results')
               } catch {
                 setRedditMessages(prev => [...prev, 'Failed to parse analysis results'])
@@ -2190,6 +2251,7 @@ export default function App() {
               setRedditAnalyzing(false)
               fetchRedditAnalysisList()
               fetchTodos()
+              setVisibilityScoreVersion(v => v + 1)
               return
             } else if (eventType === 'error') {
               setRedditMessages(prev => [...prev, 'Error: ' + parsed.message])
@@ -2263,6 +2325,7 @@ export default function App() {
     const controller = new AbortController()
     searchAbortRef.current = controller
     setSearchAnalyzing(true)
+    trackEventImmediate('custom.report.search.start', { domain: selectedDomain })
     setSearchMessages([])
 
     if (searchAutoArchive) {
@@ -2317,8 +2380,10 @@ export default function App() {
             } else if (eventType === 'done') {
               const analysis = JSON.parse(parsed.result) as SearchAnalysis
               setSearchAnalysis(analysis)
+              trackEvent('custom.report.search.complete', { domain: selectedDomain })
               setSearchAnalyzing(false)
               fetchSearchAnalysisList()
+              setVisibilityScoreVersion(v => v + 1)
               return
             } else if (eventType === 'error') {
               setSearchMessages(prev => [...prev, `Error: ${parsed.message}`])
@@ -2366,6 +2431,7 @@ export default function App() {
     const controller = new AbortController()
     testAbortRef.current = controller
     setTestAnalyzing(true)
+    trackEventImmediate('custom.report.test.start', { domain: selectedDomain, providers: testSelectedProviders.length, queries: testQueries.length })
     setTestMessages([])
     setTestError('')
 
@@ -2418,8 +2484,10 @@ export default function App() {
             } else if (eventType === 'done') {
               const result = JSON.parse(parsed.result) as LLMTestResult
               setTestResults(result)
+              trackEvent('custom.report.test.complete', { domain: selectedDomain })
               setTestView('results')
               setTestAnalyzing(false)
+              setVisibilityScoreVersion(v => v + 1)
               return
             } else if (eventType === 'error') {
               setTestError(parsed.message)
@@ -2727,7 +2795,7 @@ export default function App() {
       setActiveSummaryStale(false)
       setVisibilityScore(null)
     }
-  }, [selectedDomain, loadSummaryForDomain])
+  }, [selectedDomain, loadSummaryForDomain, visibilityScoreVersion])
 
   const discoverCompetitors = useCallback(async () => {
     if (!brandDomain.trim()) return
@@ -3008,6 +3076,7 @@ export default function App() {
   })()
 
   const updateTodoStatus = useCallback(async (id: string, status: 'todo' | 'completed' | 'backlogged' | 'archived') => {
+    trackEvent('custom.todo.status_change', { status })
     try {
       const response = await apiFetch(`/api/todos/${id}`, {
         method: 'PATCH',
@@ -3115,6 +3184,7 @@ export default function App() {
     setSharedMode(true)
     sharedModeRef.current = true
     setSharedLoading(true)
+    trackPageView(window.location.href, 'Shared Domain')
     fetch(`/api/share/${shareId}`)
       .then(r => {
         if (!r.ok) { setSharedNotFound(true); setSharedLoading(false); return null }
@@ -3322,6 +3392,7 @@ export default function App() {
       return
     }
     if (saasEnabled && user && !hasActivePlan) {
+      trackEventImmediate('custom.funnel.subscription_gate', { domain: targetUrl })
       setSubscriptionModal(true)
       return
     }
@@ -3333,6 +3404,7 @@ export default function App() {
     const shouldForce = force ?? forceAnalyze
 
     setState('analyzing')
+    trackEventImmediate('custom.report.analyze.start', { domain: targetUrl, force: shouldForce })
     setStatusMessages([])
     setResult(null)
     setResultMeta(null)
@@ -3404,6 +3476,7 @@ export default function App() {
                     brandProfileUpdatedAt: parsed.brand_profile_updated_at || undefined,
                   })
                   setState('done')
+                  trackEvent('custom.report.analyze.complete', { domain: targetUrl, cached: parsed.cached })
                   setSelectedDomain(targetUrl)
                   fetchHistory()
                   // Load the best report for this domain (may be a better one with brand intel)
@@ -3452,6 +3525,7 @@ export default function App() {
     }
 
     setOptimizing(true)
+    trackEventImmediate('custom.report.optimize.start', { domain: url, questionIdx })
     setOptimizeMessages([])
     setOptimization(null)
     setOptimizationMeta(null)
@@ -3541,8 +3615,10 @@ export default function App() {
                     brandProfileUpdatedAt: parsed.brand_profile_updated_at || undefined,
                   })
                   setOptScores(prev => ({ ...prev, [questionIdx]: optResult.overall_score }))
+                  trackEvent('custom.report.optimize.complete', { domain: url, score: optResult.overall_score, cached: parsed.cached })
                   setOptimizing(false)
                   setOptimizeView('detail')
+                  setVisibilityScoreVersion(v => v + 1)
                   // Fetch todos after a short delay (they're created async)
                   if (parsed.id) {
                     setTimeout(async () => {
@@ -3679,6 +3755,7 @@ export default function App() {
     }
 
     setBatchOptimizing(false)
+    setVisibilityScoreVersion(v => v + 1)
     // Reload optimizations list
     apiFetch(`/api/optimizations?domain=${encodeURIComponent(selectedDomain)}`).then(r => r.ok ? r.json() : []).then(data => {
       if (Array.isArray(data)) setOptList(data)
@@ -3718,6 +3795,213 @@ export default function App() {
     )
   }
 
+  if (showDocs) {
+    return (
+      <div className="min-h-screen flex flex-col bg-dark-950">
+        {/* Header */}
+        <header className="sticky top-0 z-50 bg-dark-900/80 backdrop-blur-xl border-b border-dark-800">
+          <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <a href="/" className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-accent-purple flex items-center justify-center">
+                  <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
+                  </svg>
+                </div>
+                <span className="text-lg font-bold text-white">LLM Optimizer</span>
+              </a>
+            </div>
+            <button onClick={() => { if (isDocsURL) { window.location.href = '/' } else { setShowDocs(false) } }} className="text-sm text-dark-400 hover:text-white transition-colors flex items-center gap-1">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
+              Back to App
+            </button>
+          </div>
+        </header>
+
+        {/* Docs Content */}
+        <main className="flex-1 max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12 w-full">
+          <h1 className="text-3xl font-bold text-white mb-2">API Documentation</h1>
+          <p className="text-dark-400 mb-8">Programmatic access to your LLM Optimizer data. <a href="/api/v1/docs" target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:text-primary-300">View raw markdown reference</a></p>
+
+          {/* Authentication */}
+          <section className="mb-12">
+            <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
+              <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" /></svg>
+              Authentication
+            </h2>
+            <div className="bg-dark-900 border border-dark-700 rounded-xl p-6 space-y-4">
+              <p className="text-dark-300">All API requests require a Bearer token in the <code className="text-primary-400 bg-dark-800 px-1.5 py-0.5 rounded text-sm">Authorization</code> header.</p>
+              <div className="bg-dark-800 rounded-lg p-4">
+                <p className="text-xs text-dark-500 mb-2">API Key (recommended for integrations)</p>
+                <code className="text-sm text-green-400 font-mono">Authorization: Bearer lsk_your_api_key_here</code>
+              </div>
+              <p className="text-dark-400 text-sm"><strong className="text-dark-200">Admin keys</strong> auto-resolve to the root tenant. <strong className="text-dark-200">User keys</strong> require the <code className="text-primary-400 bg-dark-800 px-1 py-0.5 rounded text-xs">X-Tenant-ID</code> header.</p>
+              <p className="text-dark-400 text-sm">Generate API keys from the admin panel under Settings &gt; API Keys.</p>
+            </div>
+          </section>
+
+          {/* Rate Limits */}
+          <section className="mb-12">
+            <h2 className="text-xl font-semibold text-white mb-4">Rate Limits</h2>
+            <div className="bg-dark-900 border border-dark-700 rounded-xl p-6">
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div className="bg-dark-800 rounded-lg p-4 text-center">
+                  <p className="text-2xl font-bold text-white">60</p>
+                  <p className="text-dark-400">reads / minute</p>
+                </div>
+                <div className="bg-dark-800 rounded-lg p-4 text-center">
+                  <p className="text-2xl font-bold text-white">30</p>
+                  <p className="text-dark-400">writes / minute</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* Endpoints */}
+          <section className="mb-12">
+            <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
+              <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" /></svg>
+              Endpoints
+            </h2>
+
+            {/* Domain Data */}
+            <h3 className="text-lg font-medium text-dark-200 mt-8 mb-4">Domain Data (Read-only)</h3>
+            <div className="space-y-3">
+              {[
+                { method: 'GET', path: '/api/v1/domains', desc: 'List all domains with data for your tenant' },
+                { method: 'GET', path: '/api/v1/domains/{domain}/analysis', desc: 'Latest site analysis report' },
+                { method: 'GET', path: '/api/v1/domains/{domain}/optimizations', desc: 'All answer optimization reports' },
+                { method: 'GET', path: '/api/v1/domains/{domain}/video', desc: 'Video authority analysis (4-pillar)' },
+                { method: 'GET', path: '/api/v1/domains/{domain}/reddit', desc: 'Reddit authority analysis (4-pillar)' },
+                { method: 'GET', path: '/api/v1/domains/{domain}/search', desc: 'Search visibility analysis (5-pillar)' },
+                { method: 'GET', path: '/api/v1/domains/{domain}/summary', desc: 'Cross-report executive summary' },
+                { method: 'GET', path: '/api/v1/domains/{domain}/tests', desc: 'LLM knowledge test results (up to 10)' },
+                { method: 'GET', path: '/api/v1/domains/{domain}/score', desc: 'Aggregate visibility score' },
+                { method: 'GET', path: '/api/v1/domains/{domain}/brand', desc: 'Brand profile' },
+              ].map((ep) => (
+                <div key={ep.path} className="bg-dark-900 border border-dark-700 rounded-lg p-4 flex items-start gap-3">
+                  <span className="bg-green-900/50 text-green-400 text-xs font-mono font-bold px-2 py-1 rounded shrink-0">{ep.method}</span>
+                  <div>
+                    <code className="text-sm text-white font-mono">{ep.path}</code>
+                    <p className="text-dark-400 text-sm mt-1">{ep.desc}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Todos */}
+            <h3 className="text-lg font-medium text-dark-200 mt-8 mb-4">Todos</h3>
+            <div className="space-y-3">
+              {[
+                { method: 'GET', path: '/api/v1/todos', desc: 'List action items. Filter: ?status=todo&domain=example.com', color: 'green' },
+                { method: 'GET', path: '/api/v1/todos/{id}', desc: 'Get a single todo by ID', color: 'green' },
+                { method: 'PATCH', path: '/api/v1/todos/{id}', desc: 'Update todo status (admin/owner only). Body: {"status": "completed"}', color: 'yellow' },
+                { method: 'POST', path: '/api/v1/todos/bulk-update', desc: 'Bulk update todo statuses (admin/owner, max 100). Body: {"ids": [...], "status": "archived"}', color: 'blue' },
+              ].map((ep) => (
+                <div key={ep.method + ep.path} className="bg-dark-900 border border-dark-700 rounded-lg p-4 flex items-start gap-3">
+                  <span className={`${ep.color === 'green' ? 'bg-green-900/50 text-green-400' : ep.color === 'yellow' ? 'bg-yellow-900/50 text-yellow-400' : 'bg-blue-900/50 text-blue-400'} text-xs font-mono font-bold px-2 py-1 rounded shrink-0`}>{ep.method}</span>
+                  <div>
+                    <code className="text-sm text-white font-mono">{ep.path}</code>
+                    <p className="text-dark-400 text-sm mt-1">{ep.desc}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Status values */}
+            <div className="mt-6 bg-dark-900 border border-dark-700 rounded-xl p-6">
+              <h4 className="text-sm font-medium text-dark-200 mb-3">Valid Todo Statuses</h4>
+              <div className="flex flex-wrap gap-2">
+                {['todo', 'completed', 'backlogged', 'archived'].map((s) => (
+                  <code key={s} className="bg-dark-800 text-dark-300 px-2 py-1 rounded text-sm font-mono">{s}</code>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          {/* Example */}
+          <section className="mb-12">
+            <h2 className="text-xl font-semibold text-white mb-4">Quick Start</h2>
+            <div className="bg-dark-900 border border-dark-700 rounded-xl overflow-hidden">
+              <div className="bg-dark-800 px-4 py-2 text-xs text-dark-400 font-mono border-b border-dark-700">curl</div>
+              <pre className="p-4 text-sm text-dark-300 font-mono overflow-x-auto whitespace-pre-wrap">
+{`# List all domains
+curl -H "Authorization: Bearer lsk_your_key" \\
+  https://llmopt.fly.dev/api/v1/domains
+
+# Get analysis for a domain
+curl -H "Authorization: Bearer lsk_your_key" \\
+  https://llmopt.fly.dev/api/v1/domains/example.com/analysis
+
+# Get visibility score
+curl -H "Authorization: Bearer lsk_your_key" \\
+  https://llmopt.fly.dev/api/v1/domains/example.com/score
+
+# Mark a todo as completed (admin/owner)
+curl -X PATCH \\
+  -H "Authorization: Bearer lsk_your_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{"status": "completed"}' \\
+  https://llmopt.fly.dev/api/v1/todos/TODOID`}
+              </pre>
+            </div>
+          </section>
+
+          {/* Error Codes */}
+          <section className="mb-12">
+            <h2 className="text-xl font-semibold text-white mb-4">Error Codes</h2>
+            <div className="bg-dark-900 border border-dark-700 rounded-xl overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-dark-700 text-dark-400">
+                    <th className="text-left px-4 py-3">Status</th>
+                    <th className="text-left px-4 py-3">Code</th>
+                    <th className="text-left px-4 py-3">Description</th>
+                  </tr>
+                </thead>
+                <tbody className="text-dark-300">
+                  {[
+                    { status: '400', code: 'BAD_REQUEST', desc: 'Invalid input or missing fields' },
+                    { status: '401', code: 'UNAUTHORIZED', desc: 'Missing or invalid authentication' },
+                    { status: '403', code: 'FORBIDDEN', desc: 'Insufficient permissions' },
+                    { status: '404', code: 'NOT_FOUND', desc: 'Resource not found' },
+                    { status: '429', code: 'RATE_LIMITED', desc: 'Rate limit exceeded' },
+                  ].map((e) => (
+                    <tr key={e.code} className="border-b border-dark-800">
+                      <td className="px-4 py-2 font-mono text-yellow-400">{e.status}</td>
+                      <td className="px-4 py-2 font-mono">{e.code}</td>
+                      <td className="px-4 py-2">{e.desc}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </main>
+
+        {/* Footer */}
+        <footer className="border-t border-dark-700 bg-dark-900/80 py-8 mt-12">
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex flex-col items-center gap-4 text-xs">
+              <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-dark-400">
+                <a href="https://github.com/jonradoff/llmopt" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">GitHub (MIT License)</a>
+                <span className="text-dark-700">·</span>
+                <a href="https://www.metavert.io/privacy-policy" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">Privacy Policy</a>
+                <span className="text-dark-700">·</span>
+                <a href="https://www.metavert.io/terms-of-service" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">Terms of Service</a>
+                <span className="text-dark-700">·</span>
+                <a href="/research" className="hover:text-white transition-colors">Research Citations</a>
+                <span className="text-dark-700">·</span>
+                <a href="/api/v1/docs" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">API Reference (MD)</a>
+              </div>
+              <p className="text-dark-500">&copy; 2026 Metavert LLC. All content licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer" className="text-dark-400 hover:text-white transition-colors">Creative Commons Attribution 4.0</a>.</p>
+            </div>
+          </div>
+        </footer>
+      </div>
+    )
+  }
+
   if (showResearch) {
     return (
       <div className="min-h-screen flex flex-col">
@@ -3725,16 +4009,16 @@ export default function App() {
         <header className="sticky top-0 z-50 bg-dark-900/80 backdrop-blur-xl border-b border-dark-800">
           <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <button onClick={() => setShowResearch(false)} className="flex items-center gap-3 cursor-pointer">
+              <a href="/" className="flex items-center gap-3">
                 <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-accent-purple flex items-center justify-center">
                   <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
                   </svg>
                 </div>
                 <h1 className="text-xl font-semibold tracking-tight text-white">LLM Optimizer</h1>
-              </button>
+              </a>
             </div>
-            <button onClick={() => setShowResearch(false)} className="text-dark-400 hover:text-white text-sm transition-colors cursor-pointer flex items-center gap-1.5">
+            <button onClick={() => { if (isResearchURL) { window.location.href = '/' } else { setShowResearch(false) } }} className="text-dark-400 hover:text-white text-sm transition-colors cursor-pointer flex items-center gap-1.5">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /></svg>
               Back to App
             </button>
@@ -3753,6 +4037,7 @@ export default function App() {
               Research Digest
             </h3>
             <div className="space-y-4 text-dark-300 text-sm leading-relaxed">
+              <p><strong className="text-white">Brand Recognition vs. Discovery.</strong> A key framework throughout LLM Optimizer is the distinction between <em>brand recognition</em> — how well AI represents your brand when people search for it by name — and <em>inbound discovery</em> — how often AI surfaces your brand when people search your category without prior knowledge of you. Both matter, but they require different strategies. Brand recognition improves through authority signals, earned media, and training data presence. Discovery requires appearing in category-level content, answering the questions your audience asks before they know you exist, and being present in the YouTube videos, Reddit threads, and web pages that LLMs cite for category queries.</p>
               <p>The emerging science of LLM visibility reveals a fundamental shift in how information gains authority online. The most significant recent finding comes from <a href="#nanoknow" className="text-primary-400 hover:text-primary-300 transition-colors">NanoKnow (2026)</a>, which demonstrates that content appearing frequently in training data more than doubles a model's accuracy on related questions — and that the advantage compounds when content is both memorized during training and retrievable at inference time. This means the traditional SEO playbook of optimizing for a single ranking algorithm is being replaced by a dual imperative: getting into training corpora through widespread, high-quality publication, while simultaneously remaining citable through structured, authoritative web presence.</p>
               <p>Across the research, a consistent pattern emerges: AI search engines overwhelmingly favor earned media over brand-owned content, citing third-party sources <a href="#geo-toronto" className="text-primary-400 hover:text-primary-300 transition-colors">72-92% of the time</a>. Content that includes quotations from authoritative sources gains <a href="#geo-princeton" className="text-primary-400 hover:text-primary-300 transition-colors">+41% visibility</a> — the single most effective optimization technique identified. Meanwhile, YouTube has rapidly become the dominant social citation source for LLMs, with its <a href="#youtube-citations" className="text-primary-400 hover:text-primary-300 transition-colors">share doubling to 39%</a> between August and December 2024. Critically, <a href="#livecc" className="text-primary-400 hover:text-primary-300 transition-colors">video LLMs process content through transcripts</a>, not visual analysis — a 7B model trained on YouTube transcripts outperformed 72B models, proving that transcript quality matters far more than production value.</p>
               <p>Reddit has emerged as the <a href="#youtube-citations" className="text-primary-400 hover:text-primary-300 transition-colors">#2 social citation source for LLMs</a>, with unique authority dynamics. Reddit was foundational in LLM training through datasets like <a href="#reddit-webtext" className="text-primary-400 hover:text-primary-300 transition-colors">WebText</a> and the <a href="#reddit-common-crawl" className="text-primary-400 hover:text-primary-300 transition-colors">Common Crawl</a>, and continues through <a href="#reddit-data-deals" className="text-primary-400 hover:text-primary-300 transition-colors">$60M (Google) and $70M (OpenAI) annual licensing deals</a>. Unlike YouTube's channel-centric authority, Reddit's influence comes from <a href="#reddit-community-consensus" className="text-primary-400 hover:text-primary-300 transition-colors">multi-user validation</a> — upvoted comment consensus, especially in "best X for Y" recommendation threads, creates credibility signals that LLMs weight heavily. The <a href="#geo-toronto" className="text-primary-400 hover:text-primary-300 transition-colors">Toronto GEO paper</a> classifies Reddit as "Social" — a category AI search engines suppress in direct citations — yet Reddit's pervasive presence in training data means it heavily shapes baseline model knowledge even when not explicitly cited.</p>
@@ -3939,7 +4224,7 @@ export default function App() {
               <svg className="w-5 h-5 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>
               Search Visibility Scoring Framework
             </h3>
-            <p className="text-dark-400 text-sm mb-6">Search visibility analysis evaluates how search-related signals affect whether AI systems will discover, index, and cite your content — bridging traditional SEO signals with AI citation dynamics.</p>
+            <p className="text-dark-400 text-sm mb-6">Search visibility analysis evaluates how search-related signals affect whether AI systems will discover, index, and cite your content — bridging traditional SEO signals with AI citation dynamics. When Brand Intelligence provides category data, a fifth pillar (Category Discovery) measures whether people searching your category — without knowing your brand — can find you.</p>
 
             <div className="space-y-4">
               {[
@@ -3962,6 +4247,11 @@ export default function App() {
                   name: 'Content Freshness', weight: '25%',
                   source: 'Ahrefs 17M Citations Study (2025) + Seer Interactive (2025) + arXiv Recency Bias (2025)',
                   desc: 'AI assistants cite content 25.7% newer than traditional search. 65% of AI bot hits target content <1 year old. Freshness signals can move items up to 95 ranking positions in LLM reranking. Evaluates content age, update frequency, freshness signals (dates, last-modified), and content decay risk. Note: Google AIOs counter-trend, preferring older authoritative content.',
+                },
+                {
+                  name: 'Category Discovery', weight: '20% (when categories available)',
+                  source: 'Brand Intelligence categories + target queries',
+                  desc: 'When Brand Intelligence provides category keywords and intent queries, a fifth pillar evaluates how visible the brand is in category-level searches — queries where users search the category without knowing the brand. This measures discovery potential: does the brand appear when someone searches "best [category] tools" or "[use case] solutions"? Sub-metrics include category visibility, intent coverage, competitor gap, and discovery potential. Weights rebalance to 25/15/20/20/20 across all five pillars.',
                 },
               ].map((pillar, i) => (
                 <div key={i} className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
@@ -4009,6 +4299,25 @@ export default function App() {
           </section>
         </main>
 
+        {/* CTA */}
+        <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+          <div className="bg-gradient-to-r from-primary-600/20 to-accent-purple/20 border border-primary-500/30 rounded-2xl p-8 text-center">
+            <h3 className="text-xl font-bold text-white mb-2">Put this research to work</h3>
+            <p className="text-dark-300 text-sm mb-6 max-w-lg mx-auto">LLM Optimizer applies these research findings automatically to analyze and optimize your brand's visibility across AI search engines.</p>
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+              <a href="/signup" className="inline-flex items-center gap-2 px-6 py-3 bg-primary-600 text-white rounded-xl hover:bg-primary-500 transition-colors font-semibold">
+                Get Started
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
+              </a>
+              <a href="https://github.com/jonradoff/llmopt" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 px-6 py-3 border border-dark-600 text-dark-300 rounded-xl hover:border-dark-500 hover:text-white transition-colors font-semibold">
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+                Self-Host Free
+              </a>
+            </div>
+            <p className="text-dark-500 text-xs mt-4">LLM Optimizer is open-source (MIT). Our hosted version supports ongoing development.</p>
+          </div>
+        </section>
+
         {/* Footer */}
         <footer className="border-t border-dark-700 bg-dark-900/80 py-8 mt-12">
           <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -4020,7 +4329,9 @@ export default function App() {
                 <span className="text-dark-700">·</span>
                 <a href="https://www.metavert.io/terms-of-service" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">Terms of Service</a>
                 <span className="text-dark-700">·</span>
-                <button onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} className="hover:text-white transition-colors cursor-pointer">Research Citations</button>
+                <a href="/docs" className="hover:text-white transition-colors">API Docs</a>
+                <span className="text-dark-700">·</span>
+                <a href="/api/v1/docs" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">API Reference (MD)</a>
               </div>
               <p className="text-dark-500">&copy; 2026 Metavert LLC. All content licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer" className="text-dark-400 hover:text-white transition-colors">Creative Commons Attribution 4.0</a>.</p>
             </div>
@@ -4103,6 +4414,15 @@ export default function App() {
               </>
             )}
             {(!saasEnabled || user) && (() => {
+              // Loading placeholder while API key status is being fetched
+              if (saasEnabled && user && apiKeyStatus === 'loading') {
+                return (
+                  <div className="flex items-center gap-1.5 px-3 py-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full bg-dark-700 animate-pulse" />
+                    <span className="w-12 h-3.5 rounded bg-dark-700 animate-pulse hidden sm:inline-block" />
+                  </div>
+                )
+              }
               // Key status overrides for SaaS users
               if (saasEnabled && user && (apiKeyStatus === 'unconfigured')) {
                 return (
@@ -4317,6 +4637,20 @@ export default function App() {
                   {tab === 'search' && searchAnalyzing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
                   {tab === 'optimize' && optimizing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
                   {tab === 'test' && testAnalyzing && <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse" />}
+                  {/* Not-yet-run indicator dot */}
+                  {!readOnly && selectedDomain && visibilityScore && (() => {
+                    const tabComponentMap: Record<string, string> = {
+                      optimize: 'Optimization', video: 'Video Authority',
+                      reddit: 'Reddit Authority', search: 'Search Visibility', test: 'LLM Test'
+                    }
+                    const componentName = tabComponentMap[tab]
+                    if (!componentName) return null
+                    const component = visibilityScore.components.find(c => c.name === componentName)
+                    if (component && !component.available) {
+                      return <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-amber-500 rounded-full" />
+                    }
+                    return null
+                  })()}
                 </button>
               )
             })}
@@ -4352,7 +4686,7 @@ export default function App() {
             onChange={e => setUrl(e.target.value)}
             onKeyDown={e => {
               if (e.key === 'Enter' && state !== 'analyzing') {
-                if (saasEnabled && !user) { setLoginModal(true) }
+                if (saasEnabled && !user) { trackPageView(window.location.href, 'Login Modal'); setLoginModal(true) }
                 else if (sharedMode) { window.location.href = '/' }
                 else { analyze() }
               }
@@ -4371,7 +4705,7 @@ export default function App() {
           ) : (
             <button
               onClick={() => {
-                if (saasEnabled && !user) { setLoginModal(true) }
+                if (saasEnabled && !user) { trackPageView(window.location.href, 'Login Modal'); setLoginModal(true) }
                 else if (sharedMode) { window.location.href = '/' }
                 else { analyze() }
               }}
@@ -4382,6 +4716,17 @@ export default function App() {
             </button>
           )}
         </div>}
+
+        {/* Quick-start hint for new users with no domains */}
+        {!readOnly && activeTab === 'analyze' && !selectedDomain && allDomains.length === 0 && state === 'idle' && popularDomains.length > 0 && (
+          <p className="text-center text-dark-500 text-xs -mt-4 mb-6">
+            Enter your domain above, or explore a{' '}
+            <a href={`/share/${popularDomains[0]?.share_id}`} className="text-primary-400 hover:text-primary-300 transition-colors">
+              sample report
+            </a>{' '}
+            to see what you'll get
+          </p>
+        )}
 
         {/* Alert Banner — shown on all tabs when models are degraded */}
         {healthHistory.length > 0 && healthHistory[0].models.some(m => m.status !== 'available') && (
@@ -4534,18 +4879,26 @@ export default function App() {
                         return (
                           <button
                             key={c.name}
-                            onClick={() => { if (c.available && tabMap[c.name]) setActiveTab(tabMap[c.name] as typeof activeTab) }}
-                            className={`rounded-xl p-3 text-center transition-all ${
+                            onClick={() => { if (tabMap[c.name]) setActiveTab(tabMap[c.name] as typeof activeTab) }}
+                            className={`rounded-xl p-3 text-center transition-all cursor-pointer group ${
                               c.available
-                                ? 'bg-dark-800/50 border border-dark-700 hover:border-primary-500/30 cursor-pointer'
-                                : 'bg-dark-900/30 border border-dark-800/50 opacity-50'
+                                ? 'bg-dark-800/50 border border-dark-700 hover:border-primary-500/30'
+                                : 'bg-dark-900/30 border border-dashed border-dark-600 hover:border-primary-500/30'
                             }`}
                           >
-                            <div className={`text-xl font-bold ${c.available ? scoreTextColor(c.score) : 'text-dark-600'}`}>
-                              {c.available ? c.score : '--'}
-                            </div>
-                            <div className="text-dark-400 text-[10px] mt-0.5">{c.name}</div>
-                            <div className="text-dark-600 text-[9px]">{Math.round(c.weight * 100)}% weight</div>
+                            {c.available ? (
+                              <>
+                                <div className={`text-xl font-bold ${scoreTextColor(c.score)}`}>{c.score}</div>
+                                <div className="text-dark-400 text-[10px] mt-0.5">{c.name}</div>
+                                <div className="text-dark-600 text-[9px]">{Math.round(c.weight * 100)}% weight</div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="text-dark-500 text-xs font-medium">Not yet</div>
+                                <div className="text-dark-400 text-[10px] mt-0.5">{c.name}</div>
+                                <div className="text-primary-400/70 text-[9px] mt-0.5 group-hover:text-primary-400 transition-colors">Run analysis</div>
+                              </>
+                            )}
                           </button>
                         )
                       })}
@@ -4605,7 +4958,8 @@ export default function App() {
                 {resultMeta && (() => {
                   const domain = url.trim()
                   const brandEntry = brandList.find(b => b.domain === domain)
-                  const brandNewer = brandEntry && resultMeta.brandProfileUpdatedAt && new Date(brandEntry.updated_at) > new Date(resultMeta.brandProfileUpdatedAt)
+                  const brandContentTs = brandEntry?.brand_content_updated_at || brandEntry?.updated_at
+                  const brandNewer = brandEntry && resultMeta.brandProfileUpdatedAt && brandContentTs && new Date(brandContentTs) > new Date(resultMeta.brandProfileUpdatedAt)
                   const noBrandUsed = !resultMeta.brandContextUsed
                   if (resultMeta.brandContextUsed && !brandNewer) {
                     return (
@@ -4853,6 +5207,16 @@ export default function App() {
                     </div>
                   )}
 
+                  {/* Discovery questions callout */}
+                  {result.questions.some((q: any) => q.brand_status === 'discovery') && (
+                    <div className="bg-teal-500/5 border border-teal-500/20 rounded-xl px-5 py-3 mb-4">
+                      <p className="text-dark-400 text-xs leading-relaxed">
+                        <span className="text-teal-400 font-medium">Discovery Questions:</span>{' '}
+                        Questions marked "Discovery" represent what your target audience searches for without knowing your brand — category-level queries like "best tools for X" or "how to do Y." Optimizing for these helps new customers find you for the first time.
+                      </p>
+                    </div>
+                  )}
+
                   <div className="grid gap-3">
                     {result.questions.map((q, i) => (
                       <div
@@ -4877,6 +5241,11 @@ export default function App() {
                             {q.brand_status === 'missing' && (
                               <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider bg-rose-500/20 text-rose-400 border border-rose-500/30">
                                 Missing?
+                              </span>
+                            )}
+                            {q.brand_status === 'discovery' && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider bg-teal-500/20 text-teal-400 border border-teal-500/30">
+                                Discovery
                               </span>
                             )}
                             <span
@@ -5040,9 +5409,9 @@ export default function App() {
                   return filtered.length === 0 ? (
                     <div className="text-center py-16 max-w-md mx-auto">
                       <svg className="w-12 h-12 mx-auto text-dark-600 mb-4" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5M9 11.25v1.5M12 9v3.75m3-6v6" /></svg>
-                      <h3 className="text-white font-semibold text-lg mb-2">No Optimization Reports Yet</h3>
-                      <p className="text-dark-400 text-sm mb-4">Optimization reports analyze how well your content performs across key LLM visibility dimensions and provide actionable recommendations.</p>
-                      <button onClick={() => setActiveTab('analyze')} className="text-sm px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-500 transition-colors cursor-pointer">Go to Analyze Tab</button>
+                      <h3 className="text-white font-semibold text-lg mb-2">Get Your First Optimization Report</h3>
+                      <p className="text-dark-400 text-sm mb-4">See exactly what to fix so AI search engines recommend your brand. Each report scores your content across 4 research-backed dimensions and gives you a prioritized action plan.</p>
+                      <button onClick={() => setActiveTab('analyze')} className="text-sm px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-500 transition-colors cursor-pointer">Discover Questions First</button>
                     </div>
                   ) : (
                     <div className="space-y-4">
@@ -5155,6 +5524,9 @@ export default function App() {
                     {optimizationMeta.brandStatus === 'missing' && (
                       <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider bg-rose-500/20 text-rose-400 border border-rose-500/30 align-middle">Missing?</span>
                     )}
+                    {optimizationMeta.brandStatus === 'discovery' && (
+                      <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider bg-teal-500/20 text-teal-400 border border-teal-500/30 align-middle">Discovery</span>
+                    )}
                   </p>
                   <div className="flex items-center gap-3 text-sm text-dark-400 flex-wrap">
                     <span>{selectedOpt?.domain || url}</span>
@@ -5185,7 +5557,8 @@ export default function App() {
                 {(() => {
                   const domain = selectedOpt?.domain || url
                   const brandEntry = brandList.find(b => b.domain === domain)
-                  const brandNewer = brandEntry && optimizationMeta.brandProfileUpdatedAt && new Date(brandEntry.updated_at) > new Date(optimizationMeta.brandProfileUpdatedAt)
+                  const brandContentTs = brandEntry?.brand_content_updated_at || brandEntry?.updated_at
+                  const brandNewer = brandEntry && optimizationMeta.brandProfileUpdatedAt && brandContentTs && new Date(brandContentTs) > new Date(optimizationMeta.brandProfileUpdatedAt)
                   if (optimizationMeta.brandContextUsed && !brandNewer) {
                     return (
                       <div className="flex items-center gap-2 px-4 py-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
@@ -5651,6 +6024,9 @@ export default function App() {
                                   >
                                     {todo.source_type === 'video' ? 'YouTube' : todo.source_type === 'reddit' ? 'Reddit' : todo.source_type === 'search' ? 'Search' : 'Optimize'}
                                   </button>
+                                  {todo.tags?.includes('discovery') && (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-teal-500/20 text-teal-300 border border-teal-500/30">Discovery</span>
+                                  )}
                                   <span className="text-dark-500 text-xs capitalize hidden sm:inline">{todo.dimension.replace(/_/g, ' ')}</span>
                                   <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                                     {!readOnly && todo.status !== 'backlogged' && todo.status !== 'archived' && (
@@ -5783,6 +6159,9 @@ export default function App() {
                                   >
                                     {todo.source_type === 'video' ? 'YouTube' : todo.source_type === 'reddit' ? 'Reddit' : todo.source_type === 'search' ? 'Search' : 'Optimize'}
                                   </button>
+                                  {todo.tags?.includes('discovery') && (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-teal-500/20 text-teal-300 border border-teal-500/30">Discovery</span>
+                                  )}
                                   <span className={`text-[9px] px-1 py-0.5 rounded font-semibold uppercase tracking-wider ${
                                     todo.priority === 'high' ? 'bg-red-500/20 text-red-400 border border-red-500/30' :
                                     todo.priority === 'medium' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
@@ -5917,6 +6296,9 @@ export default function App() {
                                   >
                                     {todo.source_type === 'video' ? 'YouTube' : todo.source_type === 'reddit' ? 'Reddit' : todo.source_type === 'search' ? 'Search' : 'Optimize'}
                                   </button>
+                                  {todo.tags?.includes('discovery') && (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-teal-500/20 text-teal-300 border border-teal-500/30">Discovery</span>
+                                  )}
                                   <span className={`text-[9px] px-1 py-0.5 rounded font-semibold uppercase tracking-wider ${
                                     todo.priority === 'high' ? 'bg-red-500/20 text-red-400 border border-red-500/30' :
                                     todo.priority === 'medium' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
@@ -5972,6 +6354,16 @@ export default function App() {
         {activeTab === 'status' && (
           <div className="max-w-2xl mx-auto animate-fade-in space-y-6">
             {/* API Key Status Banner */}
+            {saasEnabled && user && apiKeyStatus === 'loading' && (
+              <div className="flex items-center gap-3 p-4 bg-dark-800/50 border border-dark-800 rounded-xl animate-pulse">
+                <span className="w-5 h-5 rounded bg-dark-700 shrink-0" />
+                <div className="flex-1 space-y-1.5">
+                  <span className="block w-48 h-3.5 rounded bg-dark-700" />
+                  <span className="block w-64 h-2.5 rounded bg-dark-700" />
+                </div>
+                <span className="w-20 h-7 rounded-lg bg-dark-700" />
+              </div>
+            )}
             {saasEnabled && user && apiKeyStatus === 'unconfigured' && (
               <div className="flex items-center gap-3 p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl">
                 <svg className="w-5 h-5 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
@@ -7155,12 +7547,25 @@ export default function App() {
               </div>
             ))}
 
+            {/* YouTube API key required notice */}
+            {saasEnabled && user && !hasYouTubeKey && videoView === 'input' && (
+              <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl px-5 py-4 mb-4">
+                <div className="flex items-start gap-3">
+                  <svg className="w-5 h-5 text-amber-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+                  <div>
+                    <p className="text-sm font-medium text-amber-300">YouTube API key required</p>
+                    <p className="text-xs text-amber-400/80 mt-1">Add your YouTube Data API v3 key in <button onClick={() => window.location.hash = '#/settings'} className="underline hover:text-amber-300 cursor-pointer">Settings &rarr; API Keys</button> to enable Video Authority analysis.</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Input View */}
             {videoView === 'input' && readOnly && (
               <div className="text-center py-16 max-w-md mx-auto">
                 <svg className="w-12 h-12 mx-auto text-dark-600 mb-4" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" /></svg>
-                <h3 className="text-white font-semibold text-lg mb-2">No Video Analysis Yet</h3>
-                <p className="text-dark-400 text-sm">YouTube Authority analysis evaluates how your video content contributes to LLM training data and brand visibility.</p>
+                <h3 className="text-white font-semibold text-lg mb-2">Discover Your YouTube Authority</h3>
+                <p className="text-dark-400 text-sm">YouTube is cited in 16% of all LLM answers. See how your videos contribute to your brand's AI visibility and what to do to improve.</p>
               </div>
             )}
             {videoView === 'input' && !readOnly && (
@@ -7794,6 +8199,25 @@ export default function App() {
                   </div>
                 )}
 
+                {/* Stale: YouTube channel changed since this analysis */}
+                {!readOnly && brandProfile?.presence?.youtube_url && videoAnalysis.config.channel_url &&
+                  brandProfile.presence.youtube_url.replace(/\/$/, '').toLowerCase() !== videoAnalysis.config.channel_url.replace(/\/$/, '').toLowerCase() && (
+                  <div className="flex items-center justify-between gap-3 bg-amber-500/10 border border-amber-500/20 rounded-xl p-4">
+                    <div className="flex items-center gap-2">
+                      <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                      </svg>
+                      <span className="text-amber-400 text-sm font-medium">YouTube channel has changed since this analysis</span>
+                    </div>
+                    <button
+                      onClick={() => { setVideoView('input'); setVideoAnalysis(null) }}
+                      className="text-xs px-3 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded-lg hover:bg-amber-500/20 transition-all cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      Re-run Analysis
+                    </button>
+                  </div>
+                )}
+
                 {/* Unified 4-Pillar Report */}
                 {videoAnalysis.result && (() => {
                   const r = videoAnalysis.result
@@ -7872,6 +8296,16 @@ export default function App() {
                           <p className={`text-dark-300 text-sm leading-relaxed whitespace-pre-wrap ${!expandedSections.has('video-summary') ? 'line-clamp-3' : ''}`}>{r.executive_summary}</p>
                         </div>
                       )}
+
+                      {/* Brand Recognition vs Discovery callout */}
+                      <div className="bg-purple-500/5 border border-purple-500/20 rounded-xl px-5 py-3">
+                        <p className="text-dark-400 text-xs leading-relaxed">
+                          <span className="text-purple-400 font-medium">Brand Recognition vs. Discovery:</span>{' '}
+                          This analysis covers both brand-specific content (reviews, tutorials) and category-level content where your audience
+                          searches without knowing your brand. Videos tagged "category_content" represent discovery opportunities — roundups and
+                          how-tos where your brand should appear.
+                        </p>
+                      </div>
 
                       {/* Narrative: What LLMs Believe */}
                       {bn?.narrative_summary && (
@@ -8268,8 +8702,8 @@ export default function App() {
             {redditView === 'input' && readOnly && (
               <div className="text-center py-16 max-w-md mx-auto">
                 <svg className="w-12 h-12 mx-auto text-dark-600 mb-4" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" /></svg>
-                <h3 className="text-white font-semibold text-lg mb-2">No Reddit Analysis Yet</h3>
-                <p className="text-dark-400 text-sm">Reddit Authority analysis evaluates your brand's presence, sentiment, and training signal strength across Reddit communities.</p>
+                <h3 className="text-white font-semibold text-lg mb-2">Discover Your Reddit Authority</h3>
+                <p className="text-dark-400 text-sm">Reddit is a top training data source for every major LLM. See what people say about your brand and how it shapes what AI recommends.</p>
               </div>
             )}
 
@@ -8482,6 +8916,40 @@ export default function App() {
                   </div>
                 </div>
 
+                {discoveredSubreddits.length > 0 && (
+                  <div className="flex items-start gap-3 p-3 mb-4 bg-orange-500/5 border border-orange-500/20 rounded-xl">
+                    <svg className="w-4 h-4 text-orange-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-orange-300 font-medium mb-1">Discovered new subreddits</p>
+                      <div className="flex flex-wrap gap-1.5 mb-2">
+                        {discoveredSubreddits.map(sub => (
+                          <span key={sub} className="text-xs px-2 py-0.5 bg-orange-500/15 text-orange-300 border border-orange-500/20 rounded-full">r/{sub}</span>
+                        ))}
+                      </div>
+                      <button
+                        onClick={async () => {
+                          const newSubs = [...redditSubreddits]
+                          for (const sub of discoveredSubreddits) {
+                            if (!newSubs.some(s => s.toLowerCase() === sub.toLowerCase())) newSubs.push(sub)
+                          }
+                          setRedditSubreddits(newSubs)
+                          try {
+                            await apiFetch(`/api/brands/${encodeURIComponent(redditDomain.trim())}/subreddits`, {
+                              method: 'PATCH',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ subreddits: newSubs }),
+                            })
+                          } catch { /* ignore */ }
+                          setDiscoveredSubreddits([])
+                        }}
+                        className="text-xs text-orange-400 hover:text-orange-300 underline underline-offset-2 cursor-pointer"
+                      >
+                        Add to brand profile
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <div className="space-y-2 max-h-[60vh] overflow-y-auto mb-6">
                   {discoveredThreads.map(t => {
                     const selected = selectedThreadIds.has(t.id)
@@ -8683,6 +9151,12 @@ export default function App() {
                       <div className={`text-dark-300 text-sm leading-relaxed whitespace-pre-wrap ${!expandedSections.has('reddit-summary') ? 'line-clamp-3' : ''}`}>{r.executive_summary}</div>
                     </div>
                   )}
+
+                  {/* Brand Recognition vs. Discovery callout */}
+                  <div className="bg-orange-500/5 border border-orange-500/20 rounded-xl p-4 flex gap-3">
+                    <svg className="w-4 h-4 text-orange-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 18v-5.25m0 0a6.01 6.01 0 001.5-.189m-1.5.189a6.01 6.01 0 01-1.5-.189m3.75 7.478a12.06 12.06 0 01-4.5 0m3.75 2.383a14.406 14.406 0 01-3 0M14.25 18v-.192c0-.983.658-1.823 1.508-2.316a7.5 7.5 0 10-7.517 0c.85.493 1.509 1.333 1.509 2.316V18" /></svg>
+                    <p className="text-dark-400 text-xs leading-relaxed"><span className="text-orange-300 font-medium">Brand Recognition vs. Discovery:</span> Reddit naturally captures both. Direct brand mentions and sentiment reflect <span className="text-dark-300">recognition</span> — people who already know you are talking about you. Meanwhile, "best X for Y" recommendation threads are where people <span className="text-dark-300">discover</span> new solutions without prior brand awareness. Strong Reddit presence drives both brand authority and category discovery in LLM training data.</p>
+                  </div>
 
                   {/* Sentiment breakdown */}
                   {r.sentiment?.sentiment && (
@@ -9032,13 +9506,25 @@ export default function App() {
                     <div className={`text-dark-300 text-sm leading-relaxed whitespace-pre-line ${!expandedSections.has('search-summary') ? 'line-clamp-3' : ''}`}>{r.executive_summary}</div>
                   </div>
 
-                  {/* 4-Pillar Scores */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {/* Brand Recognition vs Discovery callout */}
+                  {r.category_discovery && (
+                    <div className="bg-cyan-500/5 border border-cyan-500/20 rounded-xl px-5 py-3">
+                      <p className="text-dark-400 text-xs leading-relaxed">
+                        <span className="text-cyan-400 font-medium">Brand Recognition vs. Discovery:</span>{' '}
+                        This analysis measures both how visible you are when people search for your brand by name (Brand Momentum)
+                        and how discoverable you are when people search your category without knowing you exist (Category Discovery).
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Pillar Scores */}
+                  <div className={`grid grid-cols-2 ${r.category_discovery ? 'sm:grid-cols-5' : 'sm:grid-cols-4'} gap-3`}>
                     {[
-                      { label: 'AI Overview Readiness', score: r.aio_readiness.score, weight: '30%' },
-                      { label: 'Crawl Accessibility', score: r.crawl_accessibility.score, weight: '20%' },
-                      { label: 'Brand Momentum', score: r.brand_momentum.score, weight: '25%' },
-                      { label: 'Content Freshness', score: r.content_freshness.score, weight: '25%' },
+                      { label: 'AI Overview Readiness', score: r.aio_readiness.score, weight: r.category_discovery ? '25%' : '30%' },
+                      { label: 'Crawl Accessibility', score: r.crawl_accessibility.score, weight: r.category_discovery ? '15%' : '20%' },
+                      { label: 'Brand Momentum', score: r.brand_momentum.score, weight: r.category_discovery ? '20%' : '25%' },
+                      { label: 'Content Freshness', score: r.content_freshness.score, weight: r.category_discovery ? '20%' : '25%' },
+                      ...(r.category_discovery ? [{ label: 'Category Discovery', score: r.category_discovery.score, weight: '20%' }] : []),
                     ].map((p, i) => (
                       <div key={i} className={`border rounded-xl p-4 text-center ${scoreBg(p.score)}`}>
                         <div className={`text-2xl font-bold ${scoreColor(p.score)}`}>{p.score}</div>
@@ -9216,6 +9702,42 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* Category Discovery Detail */}
+                  {r.category_discovery && (
+                    <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-white font-medium text-sm flex items-center gap-2">
+                          <svg className="w-4 h-4 text-teal-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" /></svg>
+                          Category Discovery
+                        </h3>
+                        <span className={`text-lg font-bold ${scoreColor(r.category_discovery.score)}`}>{r.category_discovery.score}/100</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 mb-4">
+                        {[
+                          { label: 'Category Visibility', value: r.category_discovery.category_visibility },
+                          { label: 'Intent Coverage', value: r.category_discovery.intent_coverage },
+                          { label: 'Competitor Gap', value: r.category_discovery.competitor_gap },
+                          { label: 'Discovery Potential', value: r.category_discovery.discovery_potential },
+                        ].map((m, i) => (
+                          <div key={i}>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-dark-400 text-xs">{m.label}</span>
+                              <span className={`text-xs font-medium ${scoreColor(m.value)}`}>{m.value}</span>
+                            </div>
+                            <div className="h-1.5 bg-dark-800 rounded-full overflow-hidden">
+                              <div className={`h-full rounded-full ${barColor(m.value)}`} style={{ width: `${m.value}%` }} />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="space-y-1">
+                        {r.category_discovery.evidence.map((e, i) => (
+                          <p key={i} className="text-dark-400 text-xs flex items-start gap-2"><span className="text-teal-400 mt-0.5">•</span>{e}</p>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Recommendations */}
                   {r.recommendations?.length > 0 && (
                     <div className="bg-dark-900/50 border border-dark-800 rounded-xl p-5">
@@ -9371,7 +9893,7 @@ export default function App() {
 
                   {/* Competitor overlay toggle */}
                   {competitorTests.length > 0 && (
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 flex-wrap">
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input type="checkbox" checked={showCompetitorOverlay} onChange={e => setShowCompetitorOverlay(e.target.checked)}
                           className="w-3.5 h-3.5 rounded border-dark-600 bg-dark-800 text-amber-500 focus:ring-amber-500/30 cursor-pointer" />
@@ -9382,8 +9904,34 @@ export default function App() {
                           <span key={ct.domain} className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">{ct.brand_name || ct.domain}</span>
                         ))}
                       </div>
+                      {showCompetitorOverlay && (
+                        <button
+                          onClick={() => {
+                            const lines = [`AI Brand Comparison — ${r.brand_name}`, '']
+                            r.provider_summaries.forEach(ps => {
+                              const myLine = `${ps.provider_name}: ${r.brand_name} ${ps.overall_score}/100`
+                              const compLines = competitorTests.map(ct => {
+                                const cps = ct.provider_summaries.find(s => s.provider_id === ps.provider_id)
+                                return cps ? `  vs ${ct.brand_name || ct.domain}: ${cps.overall_score}/100 (${ps.overall_score - cps.overall_score > 0 ? '+' : ''}${ps.overall_score - cps.overall_score})` : ''
+                              }).filter(Boolean)
+                              lines.push(myLine, ...compLines, '')
+                            })
+                            lines.push('Powered by LLM Optimizer — llmopt.metavert.io')
+                            navigator.clipboard.writeText(lines.join('\n'))
+                          }}
+                          className="text-[10px] px-2.5 py-1 bg-dark-800 border border-dark-700 text-dark-400 rounded-lg hover:text-white hover:border-dark-600 transition-all cursor-pointer"
+                        >
+                          Copy Comparison
+                        </button>
+                      )}
                     </div>
                   )}
+
+                  {/* Brand Recognition vs. Discovery callout */}
+                  <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 flex gap-3">
+                    <svg className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 18v-5.25m0 0a6.01 6.01 0 001.5-.189m-1.5.189a6.01 6.01 0 01-1.5-.189m3.75 7.478a12.06 12.06 0 01-4.5 0m3.75 2.383a14.406 14.406 0 01-3 0M14.25 18v-.192c0-.983.658-1.823 1.508-2.316a7.5 7.5 0 10-7.517 0c.85.493 1.509 1.333 1.509 2.316V18" /></svg>
+                    <p className="text-dark-400 text-xs leading-relaxed"><span className="text-amber-300 font-medium">Brand Recognition vs. Discovery:</span> This test directly measures both. <span className="text-dark-300">Brand</span> queries test recognition — do LLMs know who you are and represent you accurately? <span className="text-dark-300">Category</span> and <span className="text-dark-300">discovery</span> queries test whether LLMs recommend you to people who don't yet know your brand, searching only by category or use case.</p>
+                  </div>
 
                   {/* Provider summary cards */}
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -9522,7 +10070,7 @@ export default function App() {
               <div className="space-y-6">
                 <div>
                   <h2 className="text-xl font-bold text-white mb-1">LLM Brand Test</h2>
-                  <p className="text-dark-400 text-sm">Test what AI models know about your brand by querying them with real-world questions. Compare results across providers.</p>
+                  <p className="text-dark-400 text-sm">Ask ChatGPT, Claude, Gemini, and Grok about your brand and see their actual answers. Find out if AI recommends you — or your competitors.</p>
                 </div>
 
                 {testError && (
@@ -9990,6 +10538,7 @@ export default function App() {
                 {/* Share URL display */}
                 {domainShareState?.share_url && (domainShareState.visibility === 'public' || domainShareState.visibility === 'popular') && (() => {
                   const shareFullUrl = `${window.location.origin}${domainShareState.share_url}?tab=${activeTab}`
+                  const shareText = `Check out this LLM visibility report for ${shareModalDomain}`
                   return (
                   <div className="mt-4 p-3 bg-dark-800 rounded-xl border border-dark-700">
                     <label className="text-dark-500 text-xs font-medium block mb-2">Share Link</label>
@@ -10003,6 +10552,7 @@ export default function App() {
                       <button
                         onClick={() => {
                           navigator.clipboard.writeText(shareFullUrl)
+                          trackEvent('custom.share.link_copied', { domain: shareModalDomain })
                           setShareCopied(true)
                           setTimeout(() => setShareCopied(false), 2000)
                         }}
@@ -10011,6 +10561,36 @@ export default function App() {
                         {shareCopied ? 'Copied!' : 'Copy'}
                       </button>
                     </div>
+                    {/* Social share buttons */}
+                    <div className="flex items-center gap-2 mt-3">
+                      <span className="text-dark-500 text-xs">Share on:</span>
+                      <a
+                        href={`https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(shareFullUrl)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-2.5 py-1 text-xs bg-[#0A66C2]/20 text-[#0A66C2] rounded-lg hover:bg-[#0A66C2]/30 transition-colors font-medium"
+                      >
+                        LinkedIn
+                      </a>
+                      <a
+                        href={`https://twitter.com/intent/tweet?url=${encodeURIComponent(shareFullUrl)}&text=${encodeURIComponent(shareText)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-2.5 py-1 text-xs bg-dark-700 text-dark-300 rounded-lg hover:bg-dark-600 transition-colors font-medium"
+                      >
+                        X / Twitter
+                      </a>
+                    </div>
+                    {/* View count */}
+                    {(domainShareState.view_count ?? 0) > 0 && (
+                      <div className="mt-3 text-dark-500 text-xs flex items-center gap-1.5">
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                        Viewed {domainShareState.view_count?.toLocaleString()} {domainShareState.view_count === 1 ? 'time' : 'times'}
+                      </div>
+                    )}
                   </div>
                   )
                 })()}
@@ -10189,6 +10769,23 @@ export default function App() {
         </div>
       )}
 
+      {/* Powered by banner — shared/read-only views */}
+      {readOnly && (
+        <div className="sticky bottom-0 z-40 bg-gradient-to-r from-primary-600/95 to-accent-purple/95 backdrop-blur-sm border-t border-primary-500/30">
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-white/90 text-sm">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+              </svg>
+              <span>Powered by <strong>LLM Optimizer</strong> &middot; <a href="https://github.com/jonradoff/llmopt" target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-white">Open Source</a></span>
+            </div>
+            <a href="/signup" className="px-4 py-1.5 bg-white text-primary-700 text-sm font-semibold rounded-lg hover:bg-white/90 transition-colors">
+              Analyze Your Brand
+            </a>
+          </div>
+        </div>
+      )}
+
       {/* Site Footer */}
       <footer className="border-t border-dark-700 bg-dark-900/80 py-8 mt-12">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -10200,7 +10797,11 @@ export default function App() {
               <span className="text-dark-700">·</span>
               <a href="https://www.metavert.io/terms-of-service" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">Terms of Service</a>
               <span className="text-dark-700">·</span>
-              <button onClick={() => { setShowResearch(true); window.scrollTo({ top: 0 }) }} className="hover:text-white transition-colors cursor-pointer">Research Citations</button>
+              <a href="/research" className="hover:text-white transition-colors">Research Citations</a>
+              <span className="text-dark-700">·</span>
+              <a href="/docs" className="hover:text-white transition-colors">API Docs</a>
+              <span className="text-dark-700">·</span>
+              <a href="/api/v1/docs" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">API Reference (MD)</a>
             </div>
             <p className="text-dark-500">&copy; 2026 Metavert LLC. All content licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer" className="text-dark-400 hover:text-white transition-colors">Creative Commons Attribution 4.0</a>.</p>
           </div>

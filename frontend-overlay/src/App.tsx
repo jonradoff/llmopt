@@ -13,6 +13,7 @@ import BrandingThemeInjector from './components/BrandingThemeInjector';
 import LoadingSpinner from './components/LoadingSpinner';
 import ErrorBoundary from './components/ErrorBoundary';
 import { bootstrapApi } from './api/client';
+import { trackPageView } from './telemetry';
 
 // Auth pages (lazy — not needed until user navigates to them)
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
@@ -55,6 +56,7 @@ const AdminBrandingPage = lazy(() => import('./pages/admin/BrandingPage'));
 const AdminPromotionsPage = lazy(() => import('./pages/admin/PromotionsPage'));
 const AdminAnnouncementsPage = lazy(() => import('./pages/admin/AnnouncementsPage'));
 const AdminRootMembersPage = lazy(() => import('./pages/admin/RootMembersPage'));
+const AdminPMPage = lazy(() => import('./pages/admin/PMPage'));
 
 // Full-page redirect — navigates away from the SaaS SPA so the browser
 // loads the main llmopt frontend from the server.
@@ -86,6 +88,14 @@ function ScrollToTop() {
   const { pathname } = useLocation();
   useEffect(() => {
     window.scrollTo(0, 0);
+  }, [pathname]);
+  return null;
+}
+
+function RouteTracker() {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    trackPageView();
   }, [pathname]);
   return null;
 }
@@ -131,6 +141,7 @@ export default function App() {
               <TenantProvider>
                 <BrowserRouter>
                   <ScrollToTop />
+                  <RouteTracker />
                   <BrandingThemeInjector />
                   <ErrorBoundary>
                   <Routes>
@@ -180,6 +191,7 @@ export default function App() {
                         <Route path="config" element={<Suspense fallback={<LazyFallback />}><AdminConfigPage /></Suspense>} />
                         <Route path="api" element={<Suspense fallback={<LazyFallback />}><AdminAPIPage /></Suspense>} />
                         <Route path="branding" element={<Suspense fallback={<LazyFallback />}><AdminBrandingPage /></Suspense>} />
+                        <Route path="pm" element={<Suspense fallback={<LazyFallback />}><AdminPMPage /></Suspense>} />
                         <Route path="about" element={<Suspense fallback={<LazyFallback />}><AdminAboutPage /></Suspense>} />
                       </Route>
                     </Route>

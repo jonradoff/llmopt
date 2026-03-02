@@ -14,7 +14,7 @@
 
 :8080 {
 	# LastSaaS API routes — use path_regexp to match both /api/X and /api/X/*
-	@lastsaas path_regexp ^/api/(auth|users|tenants|tenant|billing|plans|messages|admin|branding|bundles|stripe|webhooks|bootstrap|credit-bundles|announcements|usage|docs)(/.*)?$
+	@lastsaas path_regexp ^/api/(auth|users|tenants|tenant|billing|plans|messages|admin|branding|bundles|stripe|webhooks|bootstrap|credit-bundles|announcements|usage|docs|telemetry)(/.*)?$
 	handle @lastsaas {
 		reverse_proxy localhost:8091
 	}

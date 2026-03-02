@@ -73,6 +73,22 @@ const (
 	PricingModelPerSeat PricingModel = "per_seat"
 )
 
+// APIKey mirrors the LastSaaS api_keys collection (read-only).
+type APIKey struct {
+	ID        primitive.ObjectID `bson:"_id"`
+	KeyHash   string             `bson:"keyHash"`
+	Authority string             `bson:"authority"` // "admin" or "user"
+	CreatedBy primitive.ObjectID `bson:"createdBy"`
+	IsActive  bool               `bson:"isActive"`
+}
+
+// User mirrors the LastSaaS users collection (read-only).
+type User struct {
+	ID       primitive.ObjectID `bson:"_id"`
+	Email    string             `bson:"email"`
+	IsActive bool               `bson:"isActive"`
+}
+
 // Plan mirrors the LastSaaS plans collection.
 type Plan struct {
 	ID                   primitive.ObjectID          `bson:"_id"`

@@ -20,6 +20,8 @@ import (
 // redditCacheTTL controls how long Reddit search/thread data is cached.
 const redditCacheTTL = 7 * 24 * time.Hour // 7 days
 
+var redditClient = &http.Client{Timeout: 15 * time.Second}
+
 // ── Reddit JSON API fetcher ─────────────────────────────────────────
 
 var browserUAs = []string{
@@ -52,9 +54,7 @@ func redditHTTPGet(rawURL string) ([]byte, error) {
 		return body, resp.StatusCode, nil
 	}
 
-	directClient := &http.Client{Timeout: 15 * time.Second}
-
-	body, status, err := do(directClient, "direct")
+	body, status, err := do(redditClient, "direct")
 	if err != nil {
 		return nil, err
 	}

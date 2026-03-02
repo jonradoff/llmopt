@@ -212,6 +212,7 @@ type tocEntry struct {
 
 func buildReportPDF(
 	domain string,
+	brandProfile *BrandProfile,
 	analysis *Analysis,
 	optimizations []Optimization,
 	videoAnalysis *VideoAnalysis,
@@ -225,17 +226,27 @@ func buildReportPDF(
 	displayDomain := strings.TrimPrefix(domain, "https://")
 	displayDomain = strings.TrimPrefix(displayDomain, "http://")
 
+	// Brand name for cover page
+	brandName := displayDomain
+	if brandProfile != nil && brandProfile.BrandName != "" {
+		brandName = brandProfile.BrandName
+	}
+
 	// --- Cover Page ---
 	pdf.AddPage()
 	pdf.Ln(40)
 	pdf.SetFont("Helvetica", "B", 28)
 	pdf.SetTextColor(30, 30, 30)
-	pdf.CellFormat(0, 14, "LLM Optimization Report", "", 1, "C", false, 0, "")
-	pdf.Ln(8)
+	pdf.CellFormat(0, 14, "AI Visibility Report", "", 1, "C", false, 0, "")
+	pdf.Ln(4)
+	pdf.SetFont("Helvetica", "", 12)
+	pdf.SetTextColor(100, 100, 100)
+	pdf.CellFormat(0, 7, "How AI Search Engines See Your Brand", "", 1, "C", false, 0, "")
+	pdf.Ln(10)
 
-	pdf.SetFont("Helvetica", "", 16)
-	pdf.SetTextColor(80, 80, 80)
-	pdf.CellFormat(0, 10, displayDomain, "", 1, "C", false, 0, "")
+	pdf.SetFont("Helvetica", "B", 18)
+	pdf.SetTextColor(50, 50, 50)
+	pdf.CellFormat(0, 10, brandName, "", 1, "C", false, 0, "")
 	pdf.Ln(4)
 
 	pdf.SetFont("Helvetica", "", 11)
@@ -278,6 +289,13 @@ func buildReportPDF(
 	pdf.SetFont("Helvetica", "", 9)
 	pdf.SetTextColor(100, 130, 200)
 	pdf.CellFormat(0, 5, "llmopt.metavert.io", "", 1, "C", false, 0, "")
+	pdf.Ln(6)
+	pdf.SetFont("Helvetica", "", 8)
+	pdf.SetTextColor(140, 140, 140)
+	pdf.CellFormat(0, 5, "Open-source (MIT) \u2014 install and run it yourself:", "", 1, "C", false, 0, "")
+	pdf.SetFont("Helvetica", "", 8)
+	pdf.SetTextColor(100, 130, 200)
+	pdf.CellFormat(0, 5, "github.com/jonradoff/llmopt", "", 1, "C", false, 0, "")
 
 	// --- Table of Contents Page ---
 	pdf.AddPage()
@@ -936,9 +954,17 @@ func handleGeneratePDF(mongoDB *MongoDB) http.HandlerFunc {
 			_ = todoCursor.All(ctx, &todos)
 		}
 
+		// Brand profile (for cover page brand name)
+		var brandProfile *BrandProfile
+		var bpDoc BrandProfile
+		bpFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
+		if err := mongoDB.BrandProfiles().FindOne(ctx, bpFilter).Decode(&bpDoc); err == nil {
+			brandProfile = &bpDoc
+		}
+
 		// Build PDF
 		sendSSE(w, flusher, "status", map[string]string{"message": "Generating PDF report..."})
-		pdfBytes, err := buildReportPDF(domain, analysis, optimizations, videoAnalysis, redditAnalysis, summary, todos)
+		pdfBytes, err := buildReportPDF(domain, brandProfile, analysis, optimizations, videoAnalysis, redditAnalysis, summary, todos)
 		if err != nil {
 			sendSSE(w, flusher, "error", map[string]string{"message": "Failed to generate PDF: " + err.Error()})
 			return
