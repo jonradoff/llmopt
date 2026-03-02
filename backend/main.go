@@ -640,11 +640,15 @@ Return ONLY valid JSON: {"keyword_alignment":N,"quotability":N,"info_density":N,
 		domain,
 	)
 
-	const maxRetries = 2
+	const maxRetries = 3
 	backoff := 2 * time.Second
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
+			// Check if the parent context (handler-level) is done before retrying
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
@@ -654,13 +658,13 @@ Return ONLY valid JSON: {"keyword_alignment":N,"quotability":N,"info_density":N,
 		}
 
 		text, err := provider.Call(ctx, apiKey, provider.SmallModel(), prompt, 1024)
-		if err == errOverloaded {
-			if attempt < maxRetries {
+		if err != nil {
+			// Retry on overloaded or per-call timeout (but not parent context cancellation)
+			retryable := errors.Is(err, ErrOverloaded) || (strings.Contains(err.Error(), "context deadline exceeded") && ctx.Err() == nil)
+			if retryable && attempt < maxRetries {
+				log.Printf("Assessment retry %d/%d for %s: %v", attempt+1, maxRetries, video.VideoID, err)
 				continue
 			}
-			return nil, fmt.Errorf("Haiku overloaded after %d retries", maxRetries)
-		}
-		if err != nil {
 			return nil, err
 		}
 

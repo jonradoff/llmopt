@@ -59,7 +59,11 @@ func (p *AnthropicProvider) Call(ctx context.Context, apiKey, model, prompt stri
 		},
 	})
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	// Use a per-call timeout of 60s so a hung request doesn't block indefinitely
+	callCtx, callCancel := context.WithTimeout(ctx, 60*time.Second)
+	defer callCancel()
+
+	httpReq, err := http.NewRequestWithContext(callCtx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -73,7 +77,7 @@ func (p *AnthropicProvider) Call(ctx context.Context, apiKey, model, prompt stri
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 529 {
+	if resp.StatusCode == 529 || resp.StatusCode == 429 {
 		return "", ErrOverloaded
 	}
 
