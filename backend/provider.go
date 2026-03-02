@@ -54,7 +54,7 @@ type LLMProvider interface {
 }
 
 // llmHTTPClient is a shared HTTP client for non-streaming LLM provider API calls.
-var llmHTTPClient = &http.Client{Timeout: 120 * time.Second}
+var llmHTTPClient = &http.Client{Timeout: 3 * time.Minute}
 
 // llmStreamClient is used for streaming LLM calls where the response is read
 // incrementally. No overall timeout — cancellation is handled by the request context

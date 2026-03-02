@@ -59,8 +59,8 @@ func (p *AnthropicProvider) Call(ctx context.Context, apiKey, model, prompt stri
 		},
 	})
 
-	// Use a per-call timeout of 90s so a hung request doesn't block indefinitely
-	callCtx, callCancel := context.WithTimeout(ctx, 90*time.Second)
+	// Per-call timeout: 3 minutes for Sonnet-level calls (non-streaming waits for full response)
+	callCtx, callCancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer callCancel()
 
 	httpReq, err := http.NewRequestWithContext(callCtx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
@@ -81,7 +81,10 @@ func (p *AnthropicProvider) Call(ctx context.Context, apiKey, model, prompt stri
 		return "", ErrOverloaded
 	}
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return "", fmt.Errorf("request failed: %w", readErr)
+	}
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("Claude API error (%d): %s", resp.StatusCode, string(respBody))
 	}
