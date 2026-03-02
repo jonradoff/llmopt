@@ -4777,7 +4777,171 @@ func handleVideoDiscover(mongoDB *MongoDB, encKey []byte, systemYTKey string, sa
 	}
 }
 
-func buildVideoAuthorityPrompt(domain string, ownVideos, thirdPartyVideos []YouTubeVideo, competitors, searchTerms []string, brandInfo BrandContextInfo, assessments map[string]*VideoAssessment) string {
+// BatchDigest is a compact summary of a batch of third-party video assessments,
+// produced by the small model (Haiku) in Phase 2a. Fed into Sonnet for final synthesis.
+type BatchDigest struct {
+	BatchIndex     int            `json:"batch_index"`
+	VideoCount     int            `json:"video_count"`
+	TopCreators    []string       `json:"top_creators"`
+	TopicsCovered  []string       `json:"topics_covered"`
+	SentimentTally map[string]int `json:"sentiment_tally"`
+	NotableQuotes  []string       `json:"notable_quotes"`
+	ContentGaps    []string       `json:"content_gaps"`
+	Summary        string         `json:"summary"`
+}
+
+// digestVideoBatch takes a batch of third-party video assessments and asks the small model
+// to produce a compact digest summarizing brand mentions, sentiment, creators, and gaps.
+func digestVideoBatch(ctx context.Context, provider LLMProvider, apiKey string, videos []YouTubeVideo, assessments map[string]*VideoAssessment, domain string, searchTerms []string, batchIdx int) (*BatchDigest, error) {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Summarize this batch of %d third-party YouTube video assessments for brand authority analysis.\n\n", len(videos)))
+	sb.WriteString(fmt.Sprintf("Brand/Domain: %s\nTarget Search Terms: %s\n\n", domain, strings.Join(searchTerms, ", ")))
+
+	for i, v := range videos {
+		sb.WriteString(fmt.Sprintf("--- Video %d ---\n", i+1))
+		sb.WriteString(fmt.Sprintf("Title: %s\nChannel: %s\nViews: %d | Published: %s\n", v.Title, v.ChannelTitle, v.ViewCount, v.PublishedAt.Format("2006-01-02")))
+		a := assessments[v.VideoID]
+		if a != nil && a.HasTranscript {
+			sb.WriteString(fmt.Sprintf("Scores: keyword=%d, quotability=%d, density=%d\n", a.KeywordAlignment, a.Quotability, a.InfoDensity))
+			if len(a.KeyQuotes) > 0 {
+				sb.WriteString(fmt.Sprintf("Quotes: \"%s\"\n", strings.Join(a.KeyQuotes, "\" | \"")))
+			}
+			if len(a.Topics) > 0 {
+				sb.WriteString(fmt.Sprintf("Topics: %s\n", strings.Join(a.Topics, ", ")))
+			}
+			sb.WriteString(fmt.Sprintf("Sentiment: %s\n", a.BrandSentiment))
+			sb.WriteString(fmt.Sprintf("Summary: %s\n", a.Summary))
+		} else {
+			sb.WriteString("Transcript: [NOT AVAILABLE]\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(fmt.Sprintf(`Produce a compact digest of these %d videos. Return ONLY valid JSON:
+{
+  "top_creators": ["channel names of the most authoritative/relevant creators in this batch"],
+  "topics_covered": ["main topics across this batch"],
+  "sentiment_tally": {"positive": N, "neutral": N, "negative": N, "none": N},
+  "notable_quotes": ["2-4 most citable quotes mentioning %s from any video"],
+  "content_gaps": ["topics where %s is absent but competitors are discussed"],
+  "summary": "2-3 sentence overview of what this batch reveals about %s's video landscape"
+}`, len(videos), domain, domain, domain))
+
+	const maxRetries = 2
+	backoff := 2 * time.Second
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			backoff *= 2
+		}
+
+		text, err := provider.Call(ctx, apiKey, provider.SmallModel(), sb.String(), 2048)
+		if err == errOverloaded {
+			if attempt < maxRetries {
+				continue
+			}
+			return nil, fmt.Errorf("small model overloaded after %d retries", maxRetries)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		text = strings.TrimSpace(text)
+		if idx := strings.Index(text, "{"); idx >= 0 {
+			if end := strings.LastIndex(text, "}"); end > idx {
+				text = text[idx : end+1]
+			}
+		}
+
+		var d BatchDigest
+		if err := json.Unmarshal([]byte(text), &d); err != nil {
+			return nil, fmt.Errorf("failed to parse batch digest: %w", err)
+		}
+		d.BatchIndex = batchIdx
+		d.VideoCount = len(videos)
+		return &d, nil
+	}
+	return nil, fmt.Errorf("exhausted retries for batch digest")
+}
+
+// digestThirdPartyVideos splits third-party videos into batches and produces compact digests concurrently.
+func digestThirdPartyVideos(ctx context.Context, provider LLMProvider, apiKey string, videos []YouTubeVideo, assessments map[string]*VideoAssessment, domain string, searchTerms []string, w http.ResponseWriter, flusher http.Flusher) ([]BatchDigest, error) {
+	const batchSize = 40
+	const workers = 4
+
+	numBatches := (len(videos) + batchSize - 1) / batchSize
+	batches := make([][]YouTubeVideo, 0, numBatches)
+	for i := 0; i < len(videos); i += batchSize {
+		end := i + batchSize
+		if end > len(videos) {
+			end = len(videos)
+		}
+		batches = append(batches, videos[i:end])
+	}
+
+	type digestResult struct {
+		idx    int
+		digest *BatchDigest
+		err    error
+	}
+
+	resultsCh := make(chan digestResult, len(batches))
+	sem := make(chan struct{}, workers)
+
+	for i, batch := range batches {
+		go func(idx int, vids []YouTubeVideo) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			d, err := digestVideoBatch(ctx, provider, apiKey, vids, assessments, domain, searchTerms, idx)
+			resultsCh <- digestResult{idx: idx, digest: d, err: err}
+		}(i, batch)
+	}
+
+	digests := make([]BatchDigest, len(batches))
+	var firstErr error
+	for i := 0; i < len(batches); i++ {
+		r := <-resultsCh
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("batch %d: %w", r.idx, r.err)
+			}
+			log.Printf("Warning: batch digest %d failed: %v", r.idx, r.err)
+		} else if r.digest != nil {
+			digests[r.idx] = *r.digest
+		}
+		sendSSE(w, flusher, "progress", map[string]string{
+			"message": fmt.Sprintf("Digesting third-party videos (%d/%d batches)...", i+1, len(batches)),
+		})
+	}
+
+	// Allow partial success — if at least half completed, proceed
+	completedCount := 0
+	for _, d := range digests {
+		if d.VideoCount > 0 {
+			completedCount++
+		}
+	}
+	if completedCount == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+
+	// Filter out empty digests
+	var result []BatchDigest
+	for _, d := range digests {
+		if d.VideoCount > 0 {
+			result = append(result, d)
+		}
+	}
+	return result, nil
+}
+
+func buildVideoAuthorityPrompt(domain string, ownVideos []YouTubeVideo, thirdPartyCount int, digests []BatchDigest, competitors, searchTerms []string, brandInfo BrandContextInfo, assessments map[string]*VideoAssessment) string {
 	var sb strings.Builder
 	brandName := domain
 	if brandInfo.Used {
@@ -4871,15 +5035,29 @@ Known Competitors: %s
 		}
 	}
 
-	// Third-party videos — all included (compact assessments fit comfortably)
-	if len(thirdPartyVideos) > 0 {
-		sb.WriteString(fmt.Sprintf("\n\n=== THIRD-PARTY / LANDSCAPE VIDEOS (%d) ===\n\n", len(thirdPartyVideos)))
-		for i, v := range thirdPartyVideos {
-			sb.WriteString(fmt.Sprintf("--- Third-Party Video %d [%s] ---\n", i+1, v.RelevanceTag))
-			sb.WriteString(fmt.Sprintf("Title: %s\nVideo ID: %s\nChannel: %s\n", v.Title, v.VideoID, v.ChannelTitle))
-			sb.WriteString(fmt.Sprintf("Views: %d | Likes: %d\n", v.ViewCount, v.LikeCount))
-			sb.WriteString(fmt.Sprintf("Published: %s\n", v.PublishedAt.Format("2006-01-02")))
-			writeVideoAssessment(v)
+	// Third-party videos — compact batch digests (map-reduce output)
+	if len(digests) > 0 {
+		sb.WriteString(fmt.Sprintf("\n\n=== THIRD-PARTY VIDEO DIGESTS (%d videos across %d batches) ===\n\n", thirdPartyCount, len(digests)))
+		sb.WriteString("NOTE: These are pre-computed batch summaries. Each digest condenses ~40 third-party video assessments into key signals.\n\n")
+		for _, d := range digests {
+			sb.WriteString(fmt.Sprintf("--- Batch %d (%d videos) ---\n", d.BatchIndex+1, d.VideoCount))
+			sb.WriteString(fmt.Sprintf("Summary: %s\n", d.Summary))
+			if len(d.TopCreators) > 0 {
+				sb.WriteString(fmt.Sprintf("Top Creators: %s\n", strings.Join(d.TopCreators, ", ")))
+			}
+			if len(d.TopicsCovered) > 0 {
+				sb.WriteString(fmt.Sprintf("Topics: %s\n", strings.Join(d.TopicsCovered, ", ")))
+			}
+			if d.SentimentTally != nil {
+				sb.WriteString(fmt.Sprintf("Sentiment: positive=%d, neutral=%d, negative=%d, none=%d\n",
+					d.SentimentTally["positive"], d.SentimentTally["neutral"], d.SentimentTally["negative"], d.SentimentTally["none"]))
+			}
+			if len(d.NotableQuotes) > 0 {
+				sb.WriteString(fmt.Sprintf("Notable Quotes: \"%s\"\n", strings.Join(d.NotableQuotes, "\" | \"")))
+			}
+			if len(d.ContentGaps) > 0 {
+				sb.WriteString(fmt.Sprintf("Content Gaps: %s\n", strings.Join(d.ContentGaps, "; ")))
+			}
 			sb.WriteString("\n")
 		}
 	}
@@ -4978,7 +5156,7 @@ Return ONLY valid JSON matching this structure exactly:
   },
   "video_scorecards": [
     {"video_id": "...", "title": "...", "overall_score": 70, "transcript_power": 60, "structural_extractability": 75, "discovery_surface": 80, "has_transcript": true, "key_findings": ["...", "..."]}
-  ] // IMPORTANT: Include scorecards for ALL own-channel videos plus the top 20 and bottom 10 third-party videos by overall_score. Do NOT include all 300+ videos.,
+  ] // IMPORTANT: Include scorecards for ALL own-channel videos. Third-party videos are summarized in batch digests above — do not generate individual scorecards for them.,
   "executive_summary": "...",
   "confidence_note": "...",
   "recommendations": [
@@ -4991,7 +5169,7 @@ Return ONLY valid JSON matching this structure exactly:
 
 func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool, systemYTKey string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 		defer cancel()
 		r = r.WithContext(ctx)
 		startTime := time.Now()
@@ -5264,13 +5442,39 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 			"message": fmt.Sprintf("Phase 1 complete: %d/%d videos assessed. Starting final analysis...", assessedCount, transcriptCount),
 		})
 
-		// Phase 2: Unified analysis with compact assessments
+		// Phase 2a: Batch-digest third-party videos into compact summaries
+		var digests []BatchDigest
+		if len(thirdPartyVideos) > 40 {
+			sendSSE(w, flusher, "status", map[string]string{
+				"message": fmt.Sprintf("Phase 2a: Digesting %d third-party videos in batches...", len(thirdPartyVideos)),
+			})
+			digests, err = digestThirdPartyVideos(r.Context(), provider, apiKey, thirdPartyVideos, assessments, req.Domain, req.Config.SearchTerms, w, flusher)
+			if err != nil {
+				sendSSE(w, flusher, "error", map[string]string{"message": "Batch digest failed: " + err.Error()})
+				return
+			}
+			sendSSE(w, flusher, "status", map[string]string{
+				"message": fmt.Sprintf("Phase 2a complete: %d batches digested. Starting synthesis...", len(digests)),
+			})
+		} else {
+			// Small enough to include directly — build single digest from all third-party
+			if len(thirdPartyVideos) > 0 {
+				d, dErr := digestVideoBatch(r.Context(), provider, apiKey, thirdPartyVideos, assessments, req.Domain, req.Config.SearchTerms, 0)
+				if dErr != nil {
+					log.Printf("Warning: single-batch digest failed, proceeding without: %v", dErr)
+				} else {
+					digests = []BatchDigest{*d}
+				}
+			}
+		}
+
+		// Phase 2b: Final synthesis with compact digests
 		sendSSE(w, flusher, "status", map[string]string{
-			"message": fmt.Sprintf("Phase 2: Analyzing %d videos (%d own channel, %d third-party) for LLM authority...",
-				len(videos), len(ownVideos), len(thirdPartyVideos)),
+			"message": fmt.Sprintf("Phase 2b: Synthesizing %d own-channel + %d third-party videos into 4-pillar analysis...",
+				len(ownVideos), len(thirdPartyVideos)),
 		})
 
-		prompt := buildVideoAuthorityPrompt(req.Domain, ownVideos, thirdPartyVideos, competitorNames, req.Config.SearchTerms, brandInfo, assessments)
+		prompt := buildVideoAuthorityPrompt(req.Domain, ownVideos, len(thirdPartyVideos), digests, competitorNames, req.Config.SearchTerms, brandInfo, assessments)
 		resultJSON, modelName, err := runAnalysis(prompt, "Video Authority")
 		if err != nil {
 			sendSSE(w, flusher, "error", map[string]string{"message": "Analysis failed: " + err.Error()})
