@@ -2845,7 +2845,9 @@ export default function App() {
   useEffect(() => { testMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [testMessages])
 
   // Auto-load domain summary and visibility score when selectedDomain changes
+  // In shared mode, these are pre-loaded from the share endpoint — skip authenticated fetches.
   useEffect(() => {
+    if (sharedModeRef.current) return
     if (selectedDomain) {
       loadSummaryForDomain(selectedDomain)
       apiFetch(`/api/visibility-score/${encodeURIComponent(selectedDomain)}`).then(r => r.ok ? r.json() : null).then(data => {
@@ -3333,6 +3335,10 @@ export default function App() {
         // Map domain summary
         if (data.domain_summary) {
           setActiveSummary(data.domain_summary)
+        }
+        // Map visibility score
+        if (data.visibility_score) {
+          setVisibilityScore(data.visibility_score)
         }
         setSharedLoading(false)
       })

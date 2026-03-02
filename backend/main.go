@@ -2742,12 +2742,13 @@ func handleGetSharedDomain(mongoDB *MongoDB) http.HandlerFunc {
 
 		// Fetch all data concurrently using errgroup
 		var (
-			analyses      []Analysis
-			optimizations []Optimization
-			brandProfile  *BrandProfile
-			videoAnalysis *VideoAnalysis
-			todos         []TodoItem
-			domainSummary *DomainSummary
+			analyses        []Analysis
+			optimizations   []Optimization
+			brandProfile    *BrandProfile
+			videoAnalysis   *VideoAnalysis
+			todos           []TodoItem
+			domainSummary   *DomainSummary
+			visibilityScore map[string]any
 		)
 
 		g, gctx := errgroup.WithContext(ctx)
@@ -2818,18 +2819,133 @@ func handleGetSharedDomain(mongoDB *MongoDB) http.HandlerFunc {
 			return nil
 		})
 
+		// Compute visibility score for the shared view
+		g.Go(func() error {
+			type vsComponent struct {
+				Name      string  `json:"name"`
+				Score     int     `json:"score"`
+				Weight    float64 `json:"weight"`
+				Available bool    `json:"available"`
+			}
+			components := []vsComponent{
+				{Name: "Optimization", Weight: 0.30},
+				{Name: "Video Authority", Weight: 0.20},
+				{Name: "Reddit Authority", Weight: 0.20},
+				{Name: "Search Visibility", Weight: 0.15},
+				{Name: "LLM Test", Weight: 0.15},
+			}
+			td := bson.D{{Key: "tenantId", Value: ds.TenantID}, {Key: "domain", Value: ds.Domain}}
+
+			// Optimization average
+			cur, err := mongoDB.Optimizations().Find(gctx, td,
+				options.Find().SetProjection(bson.D{{Key: "result.overallScore", Value: 1}}))
+			if err == nil {
+				var opts []struct {
+					Result struct {
+						OverallScore int `bson:"overallScore"`
+					} `bson:"result"`
+				}
+				if cur.All(gctx, &opts) == nil && len(opts) > 0 {
+					total := 0
+					for _, o := range opts {
+						total += o.Result.OverallScore
+					}
+					components[0].Score = total / len(opts)
+					components[0].Available = true
+				}
+			}
+
+			// Video authority
+			var vaScore struct {
+				Result *struct {
+					OverallScore int `bson:"overallScore"`
+				} `bson:"result"`
+			}
+			if mongoDB.VideoAnalyses().FindOne(gctx, td,
+				options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}).SetProjection(bson.D{{Key: "result.overallScore", Value: 1}}),
+			).Decode(&vaScore) == nil && vaScore.Result != nil {
+				components[1].Score = vaScore.Result.OverallScore
+				components[1].Available = true
+			}
+
+			// Reddit authority
+			var raScore struct {
+				Result *struct {
+					OverallScore int `bson:"overallScore"`
+				} `bson:"result"`
+			}
+			if mongoDB.RedditAnalyses().FindOne(gctx, td,
+				options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}).SetProjection(bson.D{{Key: "result.overallScore", Value: 1}}),
+			).Decode(&raScore) == nil && raScore.Result != nil {
+				components[2].Score = raScore.Result.OverallScore
+				components[2].Available = true
+			}
+
+			// Search visibility
+			var saScore struct {
+				Result *struct {
+					OverallScore int `bson:"overallScore"`
+				} `bson:"result"`
+			}
+			if mongoDB.SearchAnalyses().FindOne(gctx, td,
+				options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}).SetProjection(bson.D{{Key: "result.overallScore", Value: 1}}),
+			).Decode(&saScore) == nil && saScore.Result != nil {
+				components[3].Score = saScore.Result.OverallScore
+				components[3].Available = true
+			}
+
+			// LLM Test
+			var ltScore struct {
+				OverallScore int `bson:"overallScore"`
+			}
+			if mongoDB.LLMTests().FindOne(gctx,
+				bson.D{
+					{Key: "domain", Value: ds.Domain},
+					{Key: "tenantId", Value: ds.TenantID},
+					{Key: "competitorOf", Value: bson.D{{Key: "$in", Value: bson.A{"", nil}}}},
+				},
+				options.FindOne().SetSort(bson.D{{Key: "generatedAt", Value: -1}}).SetProjection(bson.D{{Key: "overallScore", Value: 1}}),
+			).Decode(&ltScore) == nil {
+				components[4].Score = ltScore.OverallScore
+				components[4].Available = true
+			}
+
+			totalWeight := 0.0
+			weightedSum := 0.0
+			availableCount := 0
+			for _, c := range components {
+				if c.Available {
+					totalWeight += c.Weight
+					weightedSum += float64(c.Score) * c.Weight
+					availableCount++
+				}
+			}
+			score := 0
+			if totalWeight > 0 {
+				score = int(weightedSum / totalWeight)
+			}
+			visibilityScore = map[string]any{
+				"score":      score,
+				"components": components,
+				"available":  availableCount,
+				"total":      len(components),
+			}
+			return nil
+		})
+
 		_ = g.Wait()
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"domain":         ds.Domain,
-			"visibility":     ds.Visibility,
-			"analyses":       analyses,
-			"optimizations":  optimizations,
-			"brand_profile":  brandProfile,
-			"video_analysis": videoAnalysis,
-			"todos":          todos,
-			"domain_summary": domainSummary,
+			"domain":           ds.Domain,
+			"visibility":       ds.Visibility,
+			"analyses":         analyses,
+			"optimizations":    optimizations,
+			"brand_profile":    brandProfile,
+			"video_analysis":   videoAnalysis,
+			"todos":            todos,
+			"domain_summary":   domainSummary,
+			"visibility_score": visibilityScore,
 		})
 	}
 }
