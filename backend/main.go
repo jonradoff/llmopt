@@ -330,6 +330,7 @@ func main() {
 	mux.HandleFunc("GET /api/share/popular", withRL(ratelimit.APIReadLimit, handleGetPopularDomains(mongoDB)))
 	mux.HandleFunc("GET /api/share/popular/{domain}/screenshot", withRL(ratelimit.APIReadLimit, handleServeBrandScreenshot(mongoDB)))
 	mux.HandleFunc("GET /api/share/{shareId}", withRL(ratelimit.APIReadLimit, handleGetSharedDomain(mongoDB)))
+	mux.HandleFunc("GET /api/share/{shareId}/pdf", withRL(ratelimit.APIReadLimit, handleServeSharedPDF(mongoDB)))
 
 	// OPTIONS handlers (CORS preflight — no auth)
 	// Note: OPTIONS /api/config already registered above with the GET handler
@@ -346,6 +347,7 @@ func main() {
 	mux.HandleFunc("OPTIONS /api/share/popular", handleOptions)
 	mux.HandleFunc("OPTIONS /api/share/popular/{domain}/screenshot", handleOptions)
 	mux.HandleFunc("OPTIONS /api/share/{shareId}", handleOptions)
+	mux.HandleFunc("OPTIONS /api/share/{shareId}/pdf", handleOptions)
 	mux.HandleFunc("OPTIONS /api/todos", handleOptions)
 	mux.HandleFunc("OPTIONS /api/todos/{id}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/health/history", handleOptions)

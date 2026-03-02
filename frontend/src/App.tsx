@@ -818,6 +818,7 @@ export default function App() {
   const [sharedLoading, setSharedLoading] = useState(false)
   const [sharedNotFound, setSharedNotFound] = useState(false)
   const sharedModeRef = useRef(isShareURL)
+  const [sharedShareId, setSharedShareId] = useState('')
   const [sharedOptimizations, setSharedOptimizations] = useState<FullOptimization[]>([])
 
   // Batch optimize
@@ -3248,6 +3249,7 @@ export default function App() {
     }
     setSharedMode(true)
     sharedModeRef.current = true
+    setSharedShareId(shareId)
     setSharedLoading(true)
     trackPageView(window.location.href, 'Shared Domain')
     fetch(`/api/share/${shareId}`)
@@ -4759,6 +4761,17 @@ curl -X PATCH \\
                   </svg>
                 )}
               </button>
+            )}
+            {readOnly && sharedShareId && (
+              <a
+                href={`/api/share/${sharedShareId}/pdf`}
+                className="px-2 py-2 rounded-md text-dark-400 hover:text-white transition-all cursor-pointer ml-1 border-l border-dark-700 pl-2"
+                title="Download PDF Report"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                </svg>
+              </a>
             )}
           </div>
         </div>

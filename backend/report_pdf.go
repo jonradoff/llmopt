@@ -1274,5 +1274,52 @@ func handleServePDF(mongoDB *MongoDB) http.HandlerFunc {
 	}
 }
 
+func handleServeSharedPDF(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		shareID := r.PathValue("shareId")
+
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+
+		// Look up the share record
+		var ds DomainShare
+		err := mongoDB.DomainShares().FindOne(ctx, bson.M{
+			"shareId":    shareID,
+			"visibility": bson.M{"$in": []string{"public", "popular"}},
+		}).Decode(&ds)
+		if err == mongo.ErrNoDocuments {
+			http.Error(w, `{"error":"share not found"}`, http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// Find the cached PDF for this tenant+domain
+		var pdf ReportPDF
+		if err := mongoDB.ReportPDFs().FindOne(ctx, bson.M{
+			"tenantId": ds.TenantID,
+			"domain":   ds.Domain,
+		}).Decode(&pdf); err != nil {
+			if err == mongo.ErrNoDocuments {
+				http.Error(w, `{"error":"no PDF report available"}`, http.StatusNotFound)
+			} else {
+				http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			}
+			return
+		}
+
+		displayDomain := strings.TrimPrefix(ds.Domain, "https://")
+		displayDomain = strings.TrimPrefix(displayDomain, "http://")
+		filename := displayDomain + "-llm-report.pdf"
+
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+		w.Header().Set("Content-Length", strconv.Itoa(len(pdf.PDFData)))
+		w.Write(pdf.PDFData)
+	}
+}
+
 // Ensure imports are used
 var _ = json.Marshal
