@@ -221,6 +221,16 @@ func (m *MongoDB) ensureIndexes() {
 	if err != nil {
 		log.Printf("Warning: failed to create indexes on tenant_settings: %v", err)
 	}
+
+	failedIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}, {Key: "feedType", Value: 1}, {Key: "failedAt", Value: -1}}},
+		{Keys: bson.D{{Key: "failedAt", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(7 * 24 * 3600)},
+	}
+	_, err = m.FailedAnalyses().Indexes().CreateMany(ctx, failedIdx)
+	if err != nil {
+		log.Printf("Warning: failed to create indexes on failed_analyses: %v", err)
+	}
 }
 
 // migrateIndexes drops old {domain: 1} unique indexes that conflict in multi-tenant mode.
@@ -314,6 +324,10 @@ func (m *MongoDB) LLMTests() *mongo.Collection {
 
 func (m *MongoDB) TenantSettings() *mongo.Collection {
 	return m.Database.Collection("tenant_settings")
+}
+
+func (m *MongoDB) FailedAnalyses() *mongo.Collection {
+	return m.Database.Collection("failed_analyses")
 }
 
 // allTenantCollections returns all collections that store tenant-scoped domain data.

@@ -748,6 +748,19 @@ type SearchAnalysisSummary struct {
 	GeneratedAt  time.Time          `json:"generated_at" bson:"generatedAt"`
 }
 
+// FailedAnalysis records a failed analysis attempt for user visibility.
+// Stored in a separate collection with 7-day TTL auto-expiry.
+type FailedAnalysis struct {
+	ID           primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	TenantID     string             `json:"tenant_id,omitempty" bson:"tenantId,omitempty"`
+	Domain       string             `json:"domain" bson:"domain"`
+	FeedType     string             `json:"feed_type" bson:"feedType"`       // "site","video","reddit","search","summary"
+	ErrorCode    string             `json:"error_code" bson:"errorCode"`     // e.g. "api_overloaded", "api_error"
+	ErrorMessage string             `json:"error_message" bson:"errorMessage"`
+	Model        string             `json:"model,omitempty" bson:"model,omitempty"`
+	FailedAt     time.Time          `json:"failed_at" bson:"failedAt"`
+}
+
 // ReportPDF stores a cached aggregate PDF report for a domain.
 type ReportPDF struct {
 	ID          primitive.ObjectID `json:"id" bson:"_id,omitempty"`

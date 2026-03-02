@@ -237,6 +237,10 @@ func main() {
 	mux.HandleFunc("GET /api/search/analyses", withAuth(handleListSearchAnalyses(mongoDB)))
 	mux.HandleFunc("DELETE /api/search/analyses/{domain}", withAuth(handleDeleteSearchAnalysis(mongoDB)))
 
+	// Failed Analyses
+	mux.HandleFunc("GET /api/failed-analyses", withAuth(handleListFailedAnalyses(mongoDB)))
+	mux.HandleFunc("DELETE /api/failed-analyses/{id}", withAuth(handleDeleteFailedAnalysis(mongoDB)))
+
 	// Visibility Score
 	mux.HandleFunc("GET /api/visibility-score/{domain}", withAuth(handleVisibilityScore(mongoDB)))
 
@@ -370,6 +374,8 @@ func main() {
 	mux.HandleFunc("OPTIONS /api/search/analyze", handleOptions)
 	mux.HandleFunc("OPTIONS /api/search/analyses/{domain}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/search/analyses", handleOptions)
+	mux.HandleFunc("OPTIONS /api/failed-analyses", handleOptions)
+	mux.HandleFunc("OPTIONS /api/failed-analyses/{id}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/domains/{domain}/report/pdf", handleOptions)
 	mux.HandleFunc("OPTIONS /api/domains/{domain}/report/pdf/{id}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/visibility-score/{domain}", handleOptions)
@@ -584,6 +590,87 @@ func saveAndSendDone(w http.ResponseWriter, flusher http.Flusher, ctx context.Co
 
 // errOverloaded is kept as an alias for backward compatibility within this file.
 var errOverloaded = ErrOverloaded
+
+// Error code constants for classifying analysis failures.
+const (
+	ErrCodeAPIOverloaded = "api_overloaded"
+	ErrCodeAPIError      = "api_error"
+	ErrCodeAPIKeyInvalid = "api_key_invalid"
+	ErrCodeParseError    = "parse_error"
+	ErrCodeCancelled     = "cancelled"
+	ErrCodeStreamStalled = "stream_stalled"
+)
+
+// classifyError maps an error to one of the error code constants.
+func classifyError(err error) string {
+	if err == nil {
+		return ErrCodeAPIError
+	}
+	if errors.Is(err, ErrOverloaded) {
+		return ErrCodeAPIOverloaded
+	}
+	if errors.Is(err, ErrStreamStalled) {
+		return ErrCodeStreamStalled
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "context canceled") || strings.Contains(msg, "request cancelled") {
+		return ErrCodeCancelled
+	}
+	if strings.Contains(msg, "Claude API error (401)") || strings.Contains(msg, "Claude API error (403)") {
+		return ErrCodeAPIKeyInvalid
+	}
+	return ErrCodeAPIError
+}
+
+// userFriendlyError returns a user-facing message for an error code.
+func userFriendlyError(code string) string {
+	switch code {
+	case ErrCodeAPIOverloaded:
+		return "The AI service is temporarily overloaded. This is an upstream provider issue. Please try again in a few minutes."
+	case ErrCodeAPIError:
+		return "The AI service returned an error. This is an upstream provider issue, not a problem with your account."
+	case ErrCodeAPIKeyInvalid:
+		return "Your API key was rejected by the provider. Please check your key in Settings."
+	case ErrCodeCancelled:
+		return "Analysis was cancelled."
+	case ErrCodeStreamStalled:
+		return "The AI service stopped responding mid-analysis. This is an upstream provider issue. Please try again."
+	case ErrCodeParseError:
+		return "The AI returned a response we couldn't parse. Please try again."
+	default:
+		return "An unexpected error occurred. Please try again."
+	}
+}
+
+// sendSSEError sends an SSE error event with structured fields including
+// an error code and upstream flag so the frontend can display appropriate messaging.
+func sendSSEError(w http.ResponseWriter, f http.Flusher, code string) {
+	upstream := code == ErrCodeAPIOverloaded || code == ErrCodeAPIError || code == ErrCodeStreamStalled
+	sendSSE(w, f, "error", map[string]any{
+		"message":  userFriendlyError(code),
+		"code":     code,
+		"upstream": upstream,
+	})
+}
+
+// saveFailedAnalysis records a failed analysis attempt to the failed_analyses collection.
+func saveFailedAnalysis(mongoDB *MongoDB, reqCtx context.Context, domain, feedType, errorCode, model string) {
+	record := FailedAnalysis{
+		TenantID:     saas.TenantIDFromContext(reqCtx),
+		Domain:       domain,
+		FeedType:     feedType,
+		ErrorCode:    errorCode,
+		ErrorMessage: userFriendlyError(errorCode),
+		Model:        model,
+		FailedAt:     time.Now(),
+	}
+	// Use Background context since the request context may already be cancelled.
+	saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := mongoDB.FailedAnalyses().InsertOne(saveCtx, record); err != nil {
+		log.Printf("Failed to save error record for %s/%s: %v", feedType, domain, err)
+	}
+}
 
 // stripJSONFencing removes markdown code fences (```json ... ```) that Claude
 // sometimes wraps around JSON responses.
@@ -945,7 +1032,9 @@ Generate %s diverse questions across different categories. Include questions at 
 					break // exhausted retries, try next model
 				}
 				if err != nil {
-					sendSSE(w, flusher, "error", map[string]string{"message": err.Error()})
+					code := classifyError(err)
+					sendSSEError(w, flusher, code)
+					saveFailedAnalysis(mongoDB, r.Context(), req.URL, "site", code, model.Name)
 					return
 				}
 
@@ -957,9 +1046,8 @@ Generate %s diverse questions across different categories. Include questions at 
 			log.Printf("%s API (%s) exhausted retries: %v", provider.Name(), model.ID, lastErr)
 		}
 
-		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All models are currently overloaded. Please try again later.",
-		})
+		sendSSEError(w, flusher, ErrCodeAPIOverloaded)
+		saveFailedAnalysis(mongoDB, r.Context(), req.URL, "site", ErrCodeAPIOverloaded, "")
 	}
 }
 
@@ -1860,7 +1948,9 @@ Be specific and evidence-based in your scoring. Reference actual content you fou
 					break
 				}
 				if err != nil {
-					sendSSE(w, flusher, "error", map[string]string{"message": err.Error()})
+					code := classifyError(err)
+					sendSSEError(w, flusher, code)
+					saveFailedAnalysis(mongoDB, r.Context(), analysis.Domain, "optimization", code, model.Name)
 					return
 				}
 
@@ -1914,9 +2004,8 @@ Be specific and evidence-based in your scoring. Reference actual content you fou
 			log.Printf("%s API (%s) exhausted retries for optimization: %v", provider.Name(), model.ID, lastErr)
 		}
 
-		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All models are currently overloaded. Please try again later.",
-		})
+		sendSSEError(w, flusher, ErrCodeAPIOverloaded)
+		saveFailedAnalysis(mongoDB, r.Context(), analysis.Domain, "optimization", ErrCodeAPIOverloaded, "")
 	}
 }
 
@@ -3871,7 +3960,9 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 					break
 				}
 				if err != nil {
-					sendSSE(w, flusher, "error", map[string]string{"message": err.Error()})
+					code := classifyError(err)
+					sendSSEError(w, flusher, code)
+					saveFailedAnalysis(mongoDB, r.Context(), domain, "summary", code, model.Name)
 					return
 				}
 
@@ -3879,7 +3970,8 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 				cleanJSON := stripJSONFencing(result.ResultJSON)
 				var summaryResult DomainSummaryResult
 				if err := json.Unmarshal([]byte(cleanJSON), &summaryResult); err != nil {
-					sendSSE(w, flusher, "error", map[string]string{"message": "Failed to parse summary results"})
+					sendSSEError(w, flusher, ErrCodeParseError)
+					saveFailedAnalysis(mongoDB, r.Context(), domain, "summary", ErrCodeParseError, model.Name)
 					return
 				}
 
@@ -3930,9 +4022,8 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 			log.Printf("%s API (%s) exhausted retries for domain summary: %v", provider.Name(), model.ID, lastErr)
 		}
 
-		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All models are currently overloaded. Please try again later.",
-		})
+		sendSSEError(w, flusher, ErrCodeAPIOverloaded)
+		saveFailedAnalysis(mongoDB, r.Context(), domain, "summary", ErrCodeAPIOverloaded, "")
 	}
 }
 
@@ -4049,7 +4140,7 @@ Return your findings as JSON (no markdown code fences, just raw JSON):
 					break
 				}
 				if err != nil {
-					sendSSE(w, flusher, "error", map[string]string{"message": err.Error()})
+					sendSSEError(w, flusher, classifyError(err))
 					return
 				}
 
@@ -4064,9 +4155,7 @@ Return your findings as JSON (no markdown code fences, just raw JSON):
 			log.Printf("%s API (%s) exhausted retries for competitor discovery: %v", provider.Name(), model.ID, lastErr)
 		}
 
-		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All models are currently overloaded. Please try again later.",
-		})
+		sendSSEError(w, flusher, ErrCodeAPIOverloaded)
 	}
 }
 
@@ -4190,7 +4279,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 					break
 				}
 				if err != nil {
-					sendSSE(w, flusher, "error", map[string]string{"message": err.Error()})
+					sendSSEError(w, flusher, classifyError(err))
 					return
 				}
 
@@ -4204,9 +4293,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 			log.Printf("%s API (%s) exhausted retries for query suggestion: %v", provider.Name(), model.ID, lastErr)
 		}
 
-		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All models are currently overloaded. Please try again later.",
-		})
+		sendSSEError(w, flusher, ErrCodeAPIOverloaded)
 	}
 }
 
@@ -4286,7 +4373,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 					break
 				}
 				if err != nil {
-					sendSSE(w, flusher, "error", map[string]string{"message": err.Error()})
+					sendSSEError(w, flusher, classifyError(err))
 					return
 				}
 
@@ -4300,9 +4387,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 			log.Printf("%s API (%s) exhausted retries for description generation: %v", provider.Name(), model.ID, lastErr)
 		}
 
-		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All models are currently overloaded. Please try again later.",
-		})
+		sendSSEError(w, flusher, ErrCodeAPIOverloaded)
 	}
 }
 
@@ -4404,7 +4489,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 					break
 				}
 				if err != nil {
-					sendSSE(w, flusher, "error", map[string]string{"message": err.Error()})
+					sendSSEError(w, flusher, classifyError(err))
 					return
 				}
 
@@ -4418,9 +4503,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 			log.Printf("%s API (%s) exhausted retries for audience prediction: %v", provider.Name(), model.ID, lastErr)
 		}
 
-		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All models are currently overloaded. Please try again later.",
-		})
+		sendSSEError(w, flusher, ErrCodeAPIOverloaded)
 	}
 }
 
@@ -4529,7 +4612,7 @@ Include 5-15 claims, prioritizing the most prominent and verifiable ones.`, doma
 					break
 				}
 				if err != nil {
-					sendSSE(w, flusher, "error", map[string]string{"message": err.Error()})
+					sendSSEError(w, flusher, classifyError(err))
 					return
 				}
 
@@ -4543,9 +4626,7 @@ Include 5-15 claims, prioritizing the most prominent and verifiable ones.`, doma
 			log.Printf("%s API (%s) exhausted retries for claim suggestion: %v", provider.Name(), model.ID, lastErr)
 		}
 
-		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All models are currently overloaded. Please try again later.",
-		})
+		sendSSEError(w, flusher, ErrCodeAPIOverloaded)
 	}
 }
 
@@ -4664,7 +4745,7 @@ Include 5-12 differentiators, ordered by distinctiveness.`, domain, brandContext
 					break
 				}
 				if err != nil {
-					sendSSE(w, flusher, "error", map[string]string{"message": err.Error()})
+					sendSSEError(w, flusher, classifyError(err))
 					return
 				}
 
@@ -4678,9 +4759,7 @@ Include 5-12 differentiators, ordered by distinctiveness.`, domain, brandContext
 			log.Printf("%s API (%s) exhausted retries for differentiator prediction: %v", provider.Name(), model.ID, lastErr)
 		}
 
-		sendSSE(w, flusher, "error", map[string]string{
-			"message": "All models are currently overloaded. Please try again later.",
-		})
+		sendSSEError(w, flusher, ErrCodeAPIOverloaded)
 	}
 }
 
@@ -5515,7 +5594,9 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 			})
 			digests, err = digestThirdPartyVideos(r.Context(), provider, apiKey, thirdPartyVideos, assessments, req.Domain, req.Config.SearchTerms, w, flusher)
 			if err != nil {
-				sendSSE(w, flusher, "error", map[string]string{"message": "Batch digest failed: " + err.Error()})
+				code := classifyError(err)
+				sendSSEError(w, flusher, code)
+				saveFailedAnalysis(mongoDB, r.Context(), req.Domain, "video", code, "")
 				return
 			}
 			sendSSE(w, flusher, "status", map[string]string{
@@ -5627,7 +5708,9 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 		}
 
 		if len(pillarJSONs) < 4 {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Analysis failed: " + pillarErr.Error()})
+			code := classifyError(pillarErr)
+			sendSSEError(w, flusher, code)
+			saveFailedAnalysis(mongoDB, r.Context(), req.Domain, "video", code, "")
 			return
 		}
 
@@ -6324,7 +6407,9 @@ func handleRedditAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 
 		resultJSON, modelName, err := runAnalysis(prompt, "Reddit Authority")
 		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Analysis failed: " + err.Error()})
+			code := classifyError(err)
+			sendSSEError(w, flusher, code)
+			saveFailedAnalysis(mongoDB, r.Context(), req.Domain, "reddit", code, "")
 			return
 		}
 		usedModel = modelName
@@ -6333,7 +6418,8 @@ func handleRedditAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 		var result RedditAuthorityResult
 		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 			log.Printf("Warning: failed to parse reddit authority result: %v", err)
-			sendSSE(w, flusher, "error", map[string]string{"message": "Failed to parse analysis result"})
+			sendSSEError(w, flusher, ErrCodeParseError)
+			saveFailedAnalysis(mongoDB, r.Context(), req.Domain, "reddit", ErrCodeParseError, usedModel)
 			return
 		}
 
@@ -7015,7 +7101,9 @@ func handleSearchAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 					break
 				}
 				if err != nil {
-					sendSSE(w, flusher, "error", map[string]string{"message": "Analysis failed: " + err.Error()})
+					code := classifyError(err)
+					sendSSEError(w, flusher, code)
+					saveFailedAnalysis(mongoDB, r.Context(), req.Domain, "search", code, model.Name)
 					return
 				}
 
@@ -7028,7 +7116,8 @@ func handleSearchAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 		}
 
 		if usedModel == "" {
-			sendSSE(w, flusher, "error", map[string]string{"message": "All models overloaded"})
+			sendSSEError(w, flusher, ErrCodeAPIOverloaded)
+			saveFailedAnalysis(mongoDB, r.Context(), req.Domain, "search", ErrCodeAPIOverloaded, "")
 			return
 		}
 
@@ -7037,7 +7126,8 @@ func handleSearchAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 		var result SearchVisibilityResult
 		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
 			log.Printf("Warning: failed to parse search visibility result: %v", err)
-			sendSSE(w, flusher, "error", map[string]string{"message": "Failed to parse analysis result"})
+			sendSSEError(w, flusher, ErrCodeParseError)
+			saveFailedAnalysis(mongoDB, r.Context(), req.Domain, "search", ErrCodeParseError, usedModel)
 			return
 		}
 
@@ -7208,6 +7298,67 @@ func handleDeleteSearchAnalysis(mongoDB *MongoDB) http.HandlerFunc {
 
 		delFilter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: domain}})
 		result, err := mongoDB.SearchAnalyses().DeleteOne(ctx, delFilter)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"deleted": result.DeletedCount > 0,
+		})
+	}
+}
+
+func handleListFailedAnalyses(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		filter := tenantFilter(r.Context(), bson.D{})
+		if domain := r.URL.Query().Get("domain"); domain != "" {
+			filter = append(filter, bson.E{Key: "domain", Value: normalizeDomain(domain)})
+		}
+
+		opts := options.Find().
+			SetSort(bson.D{{Key: "failedAt", Value: -1}}).
+			SetLimit(20)
+
+		cursor, err := mongoDB.FailedAnalyses().Find(ctx, filter, opts)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+		defer cursor.Close(ctx)
+
+		var results []FailedAnalysis
+		if err := cursor.All(ctx, &results); err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+		if results == nil {
+			results = []FailedAnalysis{}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(results)
+	}
+}
+
+func handleDeleteFailedAnalysis(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := r.PathValue("id")
+		oid, err := primitive.ObjectIDFromHex(idStr)
+		if err != nil {
+			http.Error(w, `{"error":"invalid id"}`, http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		filter := tenantFilter(r.Context(), bson.D{{Key: "_id", Value: oid}})
+		result, err := mongoDB.FailedAnalyses().DeleteOne(ctx, filter)
 		if err != nil {
 			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
 			return

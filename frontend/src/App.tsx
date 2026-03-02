@@ -610,6 +610,16 @@ interface SearchAnalysisSummary {
   generated_at: string
 }
 
+interface FailedAnalysis {
+  id: string
+  domain: string
+  feed_type: string
+  error_code: string
+  error_message: string
+  model?: string
+  failed_at: string
+}
+
 // LLM Test types
 interface TestQuery {
   query: string
@@ -685,6 +695,18 @@ function safePathname(urlStr: string): string {
 /** Format a date string as "Mon DD, h:mm AM" */
 function fmtDate(d: string) {
   return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+/** Human-readable label for error codes */
+function errorCodeLabel(code: string): string {
+  switch (code) {
+    case 'api_overloaded': return 'API overloaded'
+    case 'api_error': return 'Upstream API error'
+    case 'stream_stalled': return 'API timed out'
+    case 'parse_error': return 'Parse error'
+    case 'cancelled': return 'Cancelled'
+    default: return 'Error'
+  }
 }
 
 /** Score color helpers (80/60/40 thresholds) */
@@ -922,6 +944,9 @@ export default function App() {
   const [searchAnalysisList, setSearchAnalysisList] = useState<SearchAnalysisSummary[]>([])
   const [confirmDeleteSearchAnalysis, setConfirmDeleteSearchAnalysis] = useState(false)
   const [searchAutoArchive, setSearchAutoArchive] = useState(true)
+
+  // Failed Analyses
+  const [failedAnalyses, setFailedAnalyses] = useState<FailedAnalysis[]>([])
 
   // LLM Test state
   const [testView, setTestView] = useState<'input' | 'results'>('input')
@@ -1502,7 +1527,7 @@ export default function App() {
             const parsed = JSON.parse(data)
             if (eventType === 'status') setMessages(prev => [...prev, parsed.message])
             else if (eventType === 'done') { onDone(parsed.result); setRunning(false); return }
-            else if (eventType === 'error') { setMessages(prev => [...prev, 'Error: ' + parsed.message]); setRunning(false); return }
+            else if (eventType === 'error') { const prefix = parsed.upstream ? 'Upstream API issue' : 'Error'; setMessages(prev => [...prev, `${prefix}: ${parsed.message}`]); setRunning(false); fetchFailedAnalyses(); return }
           } catch { /* skip malformed */ }
         }
       }
@@ -1885,8 +1910,10 @@ export default function App() {
               setVisibilityScoreVersion(v => v + 1)
               return
             } else if (eventType === 'error') {
-              setVideoMessages(prev => [...prev, 'Error: ' + parsed.message])
+              const prefix = parsed.upstream ? 'Upstream API issue' : 'Error'
+              setVideoMessages(prev => [...prev, `${prefix}: ${parsed.message}`])
               setVideoAnalyzing(false)
+              fetchFailedAnalyses()
               return
             }
           } catch { /* skip malformed */ }
@@ -2264,8 +2291,10 @@ export default function App() {
               setVisibilityScoreVersion(v => v + 1)
               return
             } else if (eventType === 'error') {
-              setRedditMessages(prev => [...prev, 'Error: ' + parsed.message])
+              const prefix = parsed.upstream ? 'Upstream API issue' : 'Error'
+              setRedditMessages(prev => [...prev, `${prefix}: ${parsed.message}`])
               setRedditAnalyzing(false)
+              fetchFailedAnalyses()
               return
             }
           } catch { /* skip malformed */ }
@@ -2311,6 +2340,27 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to fetch search analyses:', err)
+    }
+  }, [])
+
+  const fetchFailedAnalyses = useCallback(async (domain?: string) => {
+    try {
+      const url = domain ? `/api/failed-analyses?domain=${encodeURIComponent(domain)}` : '/api/failed-analyses'
+      const res = await apiFetch(url)
+      if (res.ok) {
+        setFailedAnalyses(await res.json())
+      }
+    } catch (err) {
+      console.error('Failed to fetch failed analyses:', err)
+    }
+  }, [])
+
+  const dismissFailedAnalysis = useCallback(async (id: string) => {
+    try {
+      await apiFetch(`/api/failed-analyses/${id}`, { method: 'DELETE' })
+      setFailedAnalyses(prev => prev.filter(f => f.id !== id))
+    } catch (err) {
+      console.error('Failed to dismiss failed analysis:', err)
     }
   }, [])
 
@@ -2396,8 +2446,10 @@ export default function App() {
               setVisibilityScoreVersion(v => v + 1)
               return
             } else if (eventType === 'error') {
-              setSearchMessages(prev => [...prev, `Error: ${parsed.message}`])
+              const prefix = parsed.upstream ? 'Upstream API issue' : 'Error'
+              setSearchMessages(prev => [...prev, `${prefix}: ${parsed.message}`])
               setSearchAnalyzing(false)
+              fetchFailedAnalyses()
               return
             }
           } catch { /* skip malformed */ }
@@ -3178,7 +3230,8 @@ export default function App() {
     fetchOptList()
     fetchTodos()
     fetchVideoAnalysisList()
-  }, [fetchPopularDomains, fetchBrandList, fetchHistory, fetchOptList, fetchTodos, fetchVideoAnalysisList])
+    fetchFailedAnalyses()
+  }, [fetchPopularDomains, fetchBrandList, fetchHistory, fetchOptList, fetchTodos, fetchVideoAnalysisList, fetchFailedAnalyses])
 
   // Detect /share/{shareId} URL and load shared data
   useEffect(() => {
@@ -3649,8 +3702,9 @@ export default function App() {
                 }
                 break
               case 'error':
-                setOptimizeError(parsed.message)
+                setOptimizeError(parsed.upstream ? `Upstream API issue: ${parsed.message}` : parsed.message)
                 setOptimizing(false)
+                fetchFailedAnalyses()
                 finished = true
                 break
             }
@@ -7766,10 +7820,21 @@ curl -X PATCH \\
                 )}
 
                 {/* Previous Analyses */}
-                {videoAnalysisList.filter(a => domainKey(a.domain) === domainKey(selectedDomain)).length > 0 && (
+                {(videoAnalysisList.filter(a => domainKey(a.domain) === domainKey(selectedDomain)).length > 0 || failedAnalyses.filter(f => f.feed_type === 'video' && domainKey(f.domain) === domainKey(selectedDomain)).length > 0) && (
                   <div className="bg-dark-900/50 border border-dark-800 rounded-2xl p-6">
                     <h3 className="text-white font-semibold mb-3">Previous Analyses</h3>
                     <div className="space-y-2">
+                      {failedAnalyses.filter(f => f.feed_type === 'video' && domainKey(f.domain) === domainKey(selectedDomain)).map(f => (
+                        <div key={f.id} className="px-4 py-3 bg-dark-800/50 border border-amber-500/30 rounded-xl flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                            <span className="text-amber-400 text-xs">
+                              Failed ({errorCodeLabel(f.error_code)}) &middot; {fmtDate(f.failed_at)}
+                            </span>
+                          </div>
+                          <button onClick={() => dismissFailedAnalysis(f.id)} className="text-dark-500 hover:text-dark-300 text-xs cursor-pointer">Dismiss</button>
+                        </div>
+                      ))}
                       {videoAnalysisList.filter(a => domainKey(a.domain) === domainKey(selectedDomain)).map(a => (
                         <button
                           key={a.id}
@@ -7807,12 +7872,14 @@ curl -X PATCH \\
                   <div className="space-y-3 max-h-64 overflow-y-auto">
                     {videoMessages.map((msg, i) => (
                       <div key={i} className="flex items-center gap-3 text-sm">
-                        {i < videoMessages.length - 1 ? (
+                        {msg.startsWith('Upstream API issue') || msg.startsWith('Error') ? (
+                          <svg className="w-4 h-4 text-red-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" /></svg>
+                        ) : i < videoMessages.length - 1 ? (
                           <svg className="w-4 h-4 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
                         ) : (
                           <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse ml-1 mr-1 shrink-0" />
                         )}
-                        <span className={i < videoMessages.length - 1 ? 'text-dark-500' : 'text-dark-300'}>{msg}</span>
+                        <span className={msg.startsWith('Upstream API issue') ? 'text-amber-400' : msg.startsWith('Error') ? 'text-red-400' : i < videoMessages.length - 1 ? 'text-dark-500' : 'text-dark-300'}>{msg}</span>
                       </div>
                     ))}
                     {videoDiscovering && videoMessages.length === 0 && (
@@ -8084,12 +8151,14 @@ curl -X PATCH \\
                   <div className="space-y-3 max-h-64 overflow-y-auto">
                     {videoMessages.map((msg, i) => (
                       <div key={i} className="flex items-center gap-3 text-sm">
-                        {i < videoMessages.length - 1 ? (
+                        {msg.startsWith('Upstream API issue') || msg.startsWith('Error') ? (
+                          <svg className="w-4 h-4 text-red-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" /></svg>
+                        ) : i < videoMessages.length - 1 ? (
                           <svg className="w-4 h-4 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
                         ) : (
                           <div className="w-2 h-2 rounded-full bg-primary-400 animate-pulse ml-1 mr-1 shrink-0" />
                         )}
-                        <span className={i < videoMessages.length - 1 ? 'text-dark-500' : 'text-dark-300'}>{msg}</span>
+                        <span className={msg.startsWith('Upstream API issue') ? 'text-amber-400' : msg.startsWith('Error') ? 'text-red-400' : i < videoMessages.length - 1 ? 'text-dark-500' : 'text-dark-300'}>{msg}</span>
                       </div>
                     ))}
                     {videoAnalyzing && videoMessages.length === 0 && (
@@ -8872,10 +8941,21 @@ curl -X PATCH \\
                 </button>
 
                 {/* Previous analyses */}
-                {redditAnalysisList.length > 0 && (
+                {(redditAnalysisList.length > 0 || failedAnalyses.filter(f => f.feed_type === 'reddit').length > 0) && (
                   <div className="mt-8">
                     <h3 className="text-sm font-medium text-dark-400 mb-3">Previous Analyses</h3>
                     <div className="space-y-2">
+                      {failedAnalyses.filter(f => f.feed_type === 'reddit').map(f => (
+                        <div key={f.id} className="px-4 py-3 bg-dark-900/50 border border-amber-500/30 rounded-xl flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                            <span className="text-amber-400 text-xs">
+                              {f.domain} &middot; Failed ({errorCodeLabel(f.error_code)}) &middot; {fmtDate(f.failed_at)}
+                            </span>
+                          </div>
+                          <button onClick={() => dismissFailedAnalysis(f.id)} className="text-dark-500 hover:text-dark-300 text-xs cursor-pointer">Dismiss</button>
+                        </div>
+                      ))}
                       {redditAnalysisList.map(a => (
                         <button
                           key={a.id}
@@ -8913,7 +8993,7 @@ curl -X PATCH \\
                 </div>
                 <div className="space-y-1.5 max-h-64 overflow-y-auto">
                   {redditMessages.map((msg, i) => (
-                    <p key={i} className="text-dark-400 text-sm">{msg}</p>
+                    <p key={i} className={`text-sm ${msg.startsWith('Upstream API issue') ? 'text-amber-400' : msg.startsWith('Error') ? 'text-red-400' : 'text-dark-400'}`}>{msg}</p>
                   ))}
                   <div ref={redditMessagesEndRef} />
                 </div>
@@ -9045,7 +9125,7 @@ curl -X PATCH \\
                 </div>
                 <div className="space-y-1.5 max-h-64 overflow-y-auto">
                   {redditMessages.map((msg, i) => (
-                    <p key={i} className={`text-sm ${i === redditMessages.length - 1 ? 'text-white' : 'text-dark-500'}`}>{msg}</p>
+                    <p key={i} className={`text-sm ${msg.startsWith('Upstream API issue') ? 'text-amber-400' : msg.startsWith('Error') ? 'text-red-400' : i === redditMessages.length - 1 ? 'text-white' : 'text-dark-500'}`}>{msg}</p>
                   ))}
                   <div ref={redditMessagesEndRef} />
                 </div>
@@ -9448,6 +9528,23 @@ curl -X PATCH \\
                 >
                   Analyze Search Visibility
                 </button>
+
+                {/* Failed analyses */}
+                {failedAnalyses.filter(f => f.feed_type === 'search' && (!selectedDomain || domainKey(f.domain) === domainKey(selectedDomain))).length > 0 && (
+                  <div className="mt-4 space-y-2">
+                    {failedAnalyses.filter(f => f.feed_type === 'search' && (!selectedDomain || domainKey(f.domain) === domainKey(selectedDomain))).map(f => (
+                      <div key={f.id} className="px-4 py-3 bg-dark-900/50 border border-amber-500/30 rounded-xl flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                          <span className="text-amber-400 text-xs">
+                            Failed ({errorCodeLabel(f.error_code)}) &middot; {fmtDate(f.failed_at)}
+                          </span>
+                        </div>
+                        <button onClick={() => dismissFailedAnalysis(f.id)} className="text-dark-500 hover:text-dark-300 text-xs cursor-pointer">Dismiss</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </>
             )}
 
@@ -9463,7 +9560,7 @@ curl -X PATCH \\
                 </div>
                 <div className="space-y-1 max-h-60 overflow-y-auto text-xs font-mono">
                   {searchMessages.map((msg, i) => (
-                    <p key={i} className={`${msg.startsWith('Error') ? 'text-red-400' : 'text-dark-400'}`}>{msg}</p>
+                    <p key={i} className={`${msg.startsWith('Upstream API issue') ? 'text-amber-400' : msg.startsWith('Error') ? 'text-red-400' : 'text-dark-400'}`}>{msg}</p>
                   ))}
                   <div ref={searchMessagesEndRef} />
                 </div>
