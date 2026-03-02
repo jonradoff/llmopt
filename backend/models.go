@@ -189,6 +189,9 @@ type BrandProfile struct {
 	CreatedAt             time.Time  `json:"created_at" bson:"createdAt"`
 	UpdatedAt             time.Time  `json:"updated_at" bson:"updatedAt"`
 	BrandContentUpdatedAt *time.Time `json:"brand_content_updated_at,omitempty" bson:"brandContentUpdatedAt,omitempty"`
+
+	VideoSearchAdditions []string `json:"video_search_additions,omitempty" bson:"videoSearchAdditions,omitempty"`
+	VideoSearchRemovals  []string `json:"video_search_removals,omitempty" bson:"videoSearchRemovals,omitempty"`
 }
 
 type BrandProfileSummary struct {

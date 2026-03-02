@@ -222,6 +222,7 @@ func main() {
 	mux.HandleFunc("GET /api/video/analyses/{domain}", withAuth(handleGetVideoAnalysis(mongoDB)))
 	mux.HandleFunc("GET /api/video/analyses", withAuth(handleListVideoAnalyses(mongoDB)))
 	mux.HandleFunc("DELETE /api/video/analyses/{domain}", withAuth(handleDeleteVideoAnalysis(mongoDB)))
+	mux.HandleFunc("POST /api/video/search-terms", withAuth(handleVideoSearchTerms(mongoDB)))
 
 	// Reddit Authority Analyzer
 	mux.HandleFunc("POST /api/reddit/discover", withAuth(withRL(ratelimit.RedditDiscoverLimit, handleRedditDiscover(mongoDB))))
@@ -5912,6 +5913,63 @@ func handleDeleteVideoAnalysis(mongoDB *MongoDB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"deleted": result.DeletedCount > 0,
+		})
+	}
+}
+
+func handleVideoSearchTerms(mongoDB *MongoDB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Domain string `json:"domain"`
+			Action string `json:"action"`
+			Term   string `json:"term"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		req.Domain = normalizeDomain(req.Domain)
+		req.Term = strings.TrimSpace(req.Term)
+		if req.Domain == "" || req.Term == "" || (req.Action != "add" && req.Action != "remove") {
+			http.Error(w, `{"error":"domain, term, and action (add|remove) are required"}`, http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		filter := tenantFilter(r.Context(), bson.D{{Key: "domain", Value: req.Domain}})
+
+		var update bson.D
+		if req.Action == "add" {
+			update = bson.D{
+				{Key: "$addToSet", Value: bson.D{{Key: "videoSearchAdditions", Value: req.Term}}},
+				{Key: "$pull", Value: bson.D{{Key: "videoSearchRemovals", Value: req.Term}}},
+			}
+		} else {
+			update = bson.D{
+				{Key: "$addToSet", Value: bson.D{{Key: "videoSearchRemovals", Value: req.Term}}},
+				{Key: "$pull", Value: bson.D{{Key: "videoSearchAdditions", Value: req.Term}}},
+			}
+		}
+
+		_, err := mongoDB.BrandProfiles().UpdateOne(ctx, filter, update)
+		if err != nil {
+			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// Return updated profile's search customizations
+		var profile BrandProfile
+		if err := mongoDB.BrandProfiles().FindOne(ctx, filter).Decode(&profile); err != nil {
+			http.Error(w, `{"error":"profile not found"}`, http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"video_search_additions": profile.VideoSearchAdditions,
+			"video_search_removals":  profile.VideoSearchRemovals,
 		})
 	}
 }

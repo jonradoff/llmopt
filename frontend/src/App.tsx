@@ -233,6 +233,8 @@ interface BrandProfile {
   last_discovery_at?: string
   created_at: string
   updated_at: string
+  video_search_additions?: string[]
+  video_search_removals?: string[]
 }
 
 interface BrandProfileSummary {
@@ -866,7 +868,7 @@ export default function App() {
   const [videoURLs, setVideoURLs] = useState<string[]>([''])
   const [videoBrandURL, setVideoBrandURL] = useState('')
   const [videoSearchTerms, setVideoSearchTerms] = useState<string[]>([])
-  const [videoSearchTermSources, setVideoSearchTermSources] = useState<Map<string, 'brand' | 'optimization'>>(new Map())
+  const [videoSearchTermSources, setVideoSearchTermSources] = useState<Map<string, 'brand' | 'optimization' | 'user'>>(new Map())
   const [videoSearchTermInput, setVideoSearchTermInput] = useState('')
   const [videoDiscovering, setVideoDiscovering] = useState(false)
   const [discoveredVideos, setDiscoveredVideos] = useState<YouTubeVideo[]>([])
@@ -1589,10 +1591,18 @@ export default function App() {
             // Add optimization questions, deduplicating case-insensitively
             const brandLower = new Set(brandTerms.map(t => t.toLowerCase()))
             const uniqueOptQuestions = optQuestions.filter(q => !brandLower.has(q.toLowerCase()))
-            setVideoSearchTerms([...brandTerms, ...uniqueOptQuestions])
+            // Apply user customizations: add saved additions, remove saved removals
+            const additions = profile.video_search_additions || []
+            const removals = new Set((profile.video_search_removals || []).map(t => t.toLowerCase()))
+            const baseLower = new Set([...brandTerms, ...uniqueOptQuestions].map(t => t.toLowerCase()))
+            const uniqueAdditions = additions.filter(t => !baseLower.has(t.toLowerCase()))
+            const allTerms = [...brandTerms, ...uniqueOptQuestions, ...uniqueAdditions]
+              .filter(t => !removals.has(t.toLowerCase()))
+            setVideoSearchTerms(allTerms)
             setVideoSearchTermSources(new Map([
-              ...brandTerms.map(t => [t, 'brand'] as [string, 'brand' | 'optimization']),
-              ...uniqueOptQuestions.map(q => [q, 'optimization'] as [string, 'brand' | 'optimization']),
+              ...brandTerms.filter(t => !removals.has(t.toLowerCase())).map(t => [t, 'brand'] as [string, 'brand' | 'optimization']),
+              ...uniqueOptQuestions.filter(q => !removals.has(q.toLowerCase())).map(q => [q, 'optimization'] as [string, 'brand' | 'optimization']),
+              ...uniqueAdditions.filter(t => !removals.has(t.toLowerCase())).map(t => [t, 'user'] as [string, 'brand' | 'optimization' | 'user']),
             ]))
             // Collapse settings since they're now populated
             setVideoSettingsOpen(false)
@@ -7681,7 +7691,16 @@ curl -X PATCH \\
                             {isOpt && <span className="text-[10px] opacity-60 mr-0.5">Q</span>}
                             {term}
                             <button
-                              onClick={() => setVideoSearchTerms(prev => prev.filter((_, j) => j !== i))}
+                              onClick={() => {
+                                setVideoSearchTerms(prev => prev.filter((_, j) => j !== i))
+                                if (videoDomain) {
+                                  apiFetch('/api/video/search-terms', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ domain: videoDomain, action: 'remove', term }),
+                                  }).catch(() => {})
+                                }
+                              }}
                               className="hover:text-white transition-colors cursor-pointer"
                             >
                               <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -7696,8 +7715,16 @@ curl -X PATCH \\
                       onChange={e => setVideoSearchTermInput(e.target.value)}
                       onKeyDown={e => {
                         if (e.key === 'Enter' && videoSearchTermInput.trim()) {
-                          setVideoSearchTerms(prev => [...prev, videoSearchTermInput.trim()])
+                          const term = videoSearchTermInput.trim()
+                          setVideoSearchTerms(prev => [...prev, term])
                           setVideoSearchTermInput('')
+                          if (videoDomain) {
+                            apiFetch('/api/video/search-terms', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ domain: videoDomain, action: 'add', term }),
+                            }).catch(() => {})
+                          }
                         }
                       }}
                       placeholder="Type a search term and press Enter..."
