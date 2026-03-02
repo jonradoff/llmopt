@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
 
 // ErrOverloaded is returned when an LLM API is overloaded (retryable).
 var ErrOverloaded = fmt.Errorf("LLM API overloaded")
+
+// ErrStreamStalled is returned when a streaming response stops sending data.
+var ErrStreamStalled = fmt.Errorf("LLM stream stalled")
 
 // StreamResult holds the text and extracted JSON from a streaming LLM call.
 type StreamResult struct {
@@ -53,9 +57,43 @@ type LLMProvider interface {
 var llmHTTPClient = &http.Client{Timeout: 120 * time.Second}
 
 // llmStreamClient is used for streaming LLM calls where the response is read
-// incrementally. No timeout — cancellation is handled by the request context
-// (e.g. client disconnect).
+// incrementally. No overall timeout — cancellation is handled by the request context
+// (e.g. client disconnect). Wrap resp.Body with idleTimeoutReader for per-read deadlines.
 var llmStreamClient = &http.Client{}
+
+// streamIdleTimeout is how long we wait for the next chunk of data from an LLM
+// streaming response before considering the stream stalled.
+const streamIdleTimeout = 60 * time.Second
+
+// wrapWithIdleTimeout wraps an http.Response body so that each Read call
+// fails if no data arrives within the timeout. Returns ErrStreamStalled on timeout.
+func wrapWithIdleTimeout(resp *http.Response, timeout time.Duration) io.Reader {
+	return &idleTimeoutReader{body: resp.Body, timeout: timeout}
+}
+
+// idleTimeoutReader implements idle timeout via a goroutine that monitors read activity.
+type idleTimeoutReader struct {
+	body    io.ReadCloser
+	timeout time.Duration
+}
+
+func (r *idleTimeoutReader) Read(p []byte) (int, error) {
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		n, err := r.body.Read(p)
+		ch <- result{n, err}
+	}()
+	select {
+	case res := <-ch:
+		return res.n, res.err
+	case <-time.After(r.timeout):
+		return 0, fmt.Errorf("%w: no data for %s", ErrStreamStalled, r.timeout)
+	}
+}
 
 // providers is the global registry of available LLM providers.
 var providers = map[string]LLMProvider{}

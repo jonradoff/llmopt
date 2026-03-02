@@ -920,7 +920,7 @@ Generate %s diverse questions across different categories. Include questions at 
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -1835,7 +1835,7 @@ Be specific and evidence-based in your scoring. Reference actual content you fou
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -3847,7 +3847,7 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -4025,7 +4025,7 @@ Return your findings as JSON (no markdown code fences, just raw JSON):
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -4166,7 +4166,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -4262,7 +4262,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -4380,7 +4380,7 @@ Return as JSON (no markdown code fences, just raw JSON):
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -4505,7 +4505,7 @@ Include 5-15 claims, prioritizing the most prominent and verifiable ones.`, doma
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -4640,7 +4640,7 @@ Include 5-12 differentiators, ordered by distinctiveness.`, domain, brandContext
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):
@@ -5383,7 +5383,7 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 				for attempt := 0; attempt <= maxRetries; attempt++ {
 					if attempt > 0 {
 						sendSSE(w, flusher, "status", map[string]string{
-							"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+							"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 						})
 						select {
 						case <-time.After(backoff):
@@ -5394,8 +5394,9 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 					}
 
 					result, err := provider.Stream(r.Context(), apiKey, claudeBody, w, flusher)
-					if err == errOverloaded {
+					if err == errOverloaded || errors.Is(err, ErrStreamStalled) {
 						lastErr = err
+						log.Printf("%s API (%s) retryable error for %s (attempt %d/%d): %v", provider.Name(), model.ID, phaseName, attempt+1, maxRetries, err)
 						if attempt < maxRetries {
 							continue
 						}
@@ -6005,7 +6006,7 @@ func handleRedditAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 				for attempt := 0; attempt <= maxRetries; attempt++ {
 					if attempt > 0 {
 						sendSSE(w, flusher, "status", map[string]string{
-							"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+							"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 						})
 						select {
 						case <-time.After(backoff):
@@ -6708,7 +6709,7 @@ func handleSearchAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 			for attempt := 0; attempt <= maxRetries; attempt++ {
 				if attempt > 0 {
 					sendSSE(w, flusher, "status", map[string]string{
-						"message": fmt.Sprintf("%s overloaded, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
+						"message": fmt.Sprintf("%s issue, retrying in %ds (attempt %d/%d)...", model.Name, int(backoff.Seconds()), attempt, maxRetries),
 					})
 					select {
 					case <-time.After(backoff):

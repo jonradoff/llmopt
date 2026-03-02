@@ -125,7 +125,7 @@ func (p *GrokProvider) Stream(ctx context.Context, apiKey string, body []byte, w
 	var fullText strings.Builder
 	lastProgressAt := time.Now()
 
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(wrapWithIdleTimeout(resp, streamIdleTimeout))
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	for scanner.Scan() {
