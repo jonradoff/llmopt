@@ -987,6 +987,7 @@ export default function App() {
   const pdfAbortRef = useRef<AbortController | null>(null)
 
   // SaaS auth state
+  const [configLoaded, setConfigLoaded] = useState(false)
   const [saasEnabled, setSaasEnabled] = useState(false)
   const [user, setUser] = useState<UserInfo | null>(null)
   const [unreadCount, setUnreadCount] = useState(0)
@@ -1023,9 +1024,11 @@ export default function App() {
             sessionStorage.setItem('llmopt_welcome_key_shown', '1')
             setWelcomeKeyModal(true)
           }
-        }).catch(() => {})
+        }).catch(() => {}).finally(() => setConfigLoaded(true))
+      } else {
+        setConfigLoaded(true)
       }
-    }).catch(() => {})
+    }).catch(() => { setConfigLoaded(true) })
   }, [])
 
   // Re-fetch API key status when keys are updated in settings
@@ -4498,8 +4501,8 @@ curl -X PATCH \\
               </>
             )}
             {(!saasEnabled || user) && (() => {
-              // Loading placeholder while API key status is being fetched
-              if (saasEnabled && user && apiKeyStatus === 'loading') {
+              // Ghost placeholder while config/auth/API key status is loading
+              if (!configLoaded || (saasEnabled && user && apiKeyStatus === 'loading')) {
                 return (
                   <div className="flex items-center gap-1.5 px-3 py-1.5">
                     <span className="w-2.5 h-2.5 rounded-full bg-dark-700 animate-pulse" />
@@ -6444,7 +6447,7 @@ curl -X PATCH \\
         {activeTab === 'status' && (
           <div className="max-w-2xl mx-auto animate-fade-in space-y-6">
             {/* API Key Status Banner */}
-            {saasEnabled && user && apiKeyStatus === 'loading' && (
+            {saasEnabled && user && !configLoaded && (
               <div className="flex items-center gap-3 p-4 bg-dark-800/50 border border-dark-800 rounded-xl animate-pulse">
                 <span className="w-5 h-5 rounded bg-dark-700 shrink-0" />
                 <div className="flex-1 space-y-1.5">
@@ -6454,7 +6457,7 @@ curl -X PATCH \\
                 <span className="w-20 h-7 rounded-lg bg-dark-700" />
               </div>
             )}
-            {saasEnabled && user && apiKeyStatus === 'unconfigured' && (
+            {saasEnabled && user && configLoaded && apiKeyStatus === 'unconfigured' && (
               <div className="flex items-center gap-3 p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl">
                 <svg className="w-5 h-5 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
                 <div className="flex-1">
