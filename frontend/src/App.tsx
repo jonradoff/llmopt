@@ -6616,12 +6616,16 @@ curl -X PATCH \\
               {healthTimeline.length === 0 ? (
                 <p className="text-dark-500 text-sm text-center py-6">No historical data yet. Checks are recorded every 5 minutes.</p>
               ) : (() => {
-                // Extract unique model names from first record
-                const modelNames = healthTimeline[0]?.models.map(m => ({ model: m.model, name: m.name })) || []
+                // Extract model names from most recent record (last element, sorted ascending)
+                const latest = healthTimeline[healthTimeline.length - 1]
+                const modelNames = latest?.models.map(m => ({ model: m.model, name: m.name })) || []
+                // Filter to records matching current format (skip old claude-specific records)
+                const modelSet = new Set(modelNames.map(m => m.model))
+                const relevantTimeline = healthTimeline.filter(r => r.models.some(m => modelSet.has(m.model)))
                 return (
                   <div className="space-y-4">
                     {modelNames.map(({ model, name }) => {
-                      const statuses = healthTimeline.map(r => {
+                      const statuses = relevantTimeline.map(r => {
                         const m = r.models.find(mm => mm.model === model)
                         return { status: m?.status || 'error', time: r.checked_at, latency: m?.latency_ms }
                       })
@@ -6691,7 +6695,7 @@ curl -X PATCH \\
                       <div className="flex items-center gap-1.5"><div className="w-3 h-3 rounded-sm bg-emerald-500/60" /><span className="text-dark-500 text-[10px]">Available</span></div>
                       <div className="flex items-center gap-1.5"><div className="w-3 h-3 rounded-sm bg-amber-500/60" /><span className="text-dark-500 text-[10px]">Overloaded</span></div>
                       <div className="flex items-center gap-1.5"><div className="w-3 h-3 rounded-sm bg-red-500/60" /><span className="text-dark-500 text-[10px]">Error</span></div>
-                      <span className="text-dark-600 text-[10px] ml-auto">{healthTimeline.length} checks in last 24h</span>
+                      <span className="text-dark-600 text-[10px] ml-auto">{relevantTimeline.length} checks in last 24h</span>
                     </div>
                   </div>
                 )
