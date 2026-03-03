@@ -488,6 +488,7 @@ type DomainShare struct {
 // BrandScreenshot stores a captured homepage screenshot for a popular brand.
 type BrandScreenshot struct {
 	ID          primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	TenantID    string             `json:"tenant_id" bson:"tenantId"`
 	Domain      string             `json:"domain" bson:"domain"`
 	ImageData   []byte             `json:"-" bson:"imageData"`
 	ContentType string             `json:"content_type" bson:"contentType"`

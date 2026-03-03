@@ -192,7 +192,8 @@ func captureScreenshot(domain string) ([]byte, error) {
 }
 
 // captureBrandScreenshot captures and stores a screenshot for a domain.
-func captureBrandScreenshot(mongoDB *MongoDB, domain string) {
+// tenantID tracks which tenant triggered the capture (provenance).
+func captureBrandScreenshot(mongoDB *MongoDB, domain, tenantID string) {
 	log.Printf("Capturing screenshot for %s...", domain)
 
 	imgData, err := captureScreenshot(domain)
@@ -206,6 +207,7 @@ func captureBrandScreenshot(mongoDB *MongoDB, domain string) {
 				"error":      err.Error(),
 				"capturedAt": time.Now(),
 				"sizeBytes":  0,
+				"tenantId":   tenantID,
 			},
 			"$setOnInsert": bson.M{
 				"domain":      domain,
@@ -225,6 +227,7 @@ func captureBrandScreenshot(mongoDB *MongoDB, domain string) {
 	defer cancel()
 
 	doc := BrandScreenshot{
+		TenantID:    tenantID,
 		Domain:      domain,
 		ImageData:   imgData,
 		ContentType: "image/jpeg",
@@ -307,8 +310,14 @@ func ensurePopularScreenshots(mongoDB *MongoDB) {
 		return
 	}
 
+	// Build domain→tenantID map from shares for provenance tracking
+	shareTenantMap := make(map[string]string)
+	for _, s := range shares {
+		shareTenantMap[s.Domain] = s.TenantID
+	}
+
 	log.Printf("ensurePopularScreenshots: capturing screenshots for %d domains", len(needCapture))
 	for _, domain := range needCapture {
-		captureBrandScreenshot(mongoDB, domain)
+		captureBrandScreenshot(mongoDB, domain, shareTenantMap[domain])
 	}
 }

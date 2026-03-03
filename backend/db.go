@@ -174,7 +174,7 @@ func (m *MongoDB) ensureIndexes() {
 	}
 
 	screenshotIdx := []mongo.IndexModel{
-		{Keys: bson.D{{Key: "tenantId", Value: 1}, {Key: "domain", Value: 1}},
+		{Keys: bson.D{{Key: "domain", Value: 1}},
 			Options: options.Index().SetUnique(true)},
 		{Keys: bson.D{{Key: "capturedAt", Value: -1}}},
 	}
@@ -233,7 +233,7 @@ func (m *MongoDB) ensureIndexes() {
 	}
 }
 
-// migrateIndexes drops old {domain: 1} unique indexes that conflict in multi-tenant mode.
+// migrateIndexes drops old indexes that conflict with current index definitions.
 // Safe to run multiple times — dropping a non-existent index just returns an error we ignore.
 func (m *MongoDB) migrateIndexes() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -242,7 +242,7 @@ func (m *MongoDB) migrateIndexes() {
 	// Collections that had {domain: 1} unique indexes and now use {tenantId: 1, domain: 1} unique
 	collections := []string{
 		"brand_profiles", "domain_summaries", "video_analyses",
-		"reddit_analyses", "report_pdfs", "brand_screenshots", "search_analyses",
+		"reddit_analyses", "report_pdfs", "search_analyses",
 	}
 
 	for _, name := range collections {
@@ -253,6 +253,12 @@ func (m *MongoDB) migrateIndexes() {
 		}
 		// Also drop the old non-unique {tenantId: 1, domain: 1} to avoid conflict with new unique version
 		_, _ = coll.Indexes().DropOne(ctx, "tenantId_1_domain_1")
+	}
+
+	// brand_screenshots: changed from {tenantId, domain} compound to {domain} unique
+	ssColl := m.Database.Collection("brand_screenshots")
+	if _, err := ssColl.Indexes().DropOne(ctx, "tenantId_1_domain_1"); err == nil {
+		log.Printf("migrateIndexes: dropped old tenantId_1_domain_1 index on brand_screenshots")
 	}
 }
 

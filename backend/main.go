@@ -2695,7 +2695,7 @@ func handleSetDomainShare(mongoDB *MongoDB) http.HandlerFunc {
 
 		// Capture screenshot when domain is marked as popular
 		if req.Visibility == "popular" {
-			go captureBrandScreenshot(mongoDB, domain)
+			go captureBrandScreenshot(mongoDB, domain, tenantID)
 		}
 
 		shareURL := ""
@@ -8631,7 +8631,7 @@ func refreshStaleScreenshots(mongoDB *MongoDB) {
 		var ss BrandScreenshot
 		err := mongoDB.BrandScreenshots().FindOne(ctx, bson.M{"domain": s.Domain}).Decode(&ss)
 		if err != nil || ss.CapturedAt.Before(cutoff) {
-			go captureBrandScreenshot(mongoDB, s.Domain)
+			go captureBrandScreenshot(mongoDB, s.Domain, s.TenantID)
 			refreshed++
 		}
 	}

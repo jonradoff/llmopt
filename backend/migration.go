@@ -45,6 +45,7 @@ func (m *MongoDB) migrateTenantIDs() {
 		"brand_profiles",
 		"domain_summaries",
 		"video_analyses",
+		"brand_screenshots",
 	}
 
 	for _, coll := range collections {
