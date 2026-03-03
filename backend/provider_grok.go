@@ -22,6 +22,8 @@ func (p *GrokProvider) Name() string       { return "Grok" }
 
 func (p *GrokProvider) Models() []ModelDef {
 	return []ModelDef{
+		{ID: "grok-4-0709", Name: "Grok 4"},
+		{ID: "grok-4-fast-non-reasoning", Name: "Grok 4 Fast"},
 		{ID: "grok-3", Name: "Grok 3"},
 		{ID: "grok-3-mini", Name: "Grok 3 Mini"},
 	}
