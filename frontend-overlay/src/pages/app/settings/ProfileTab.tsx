@@ -455,7 +455,7 @@ function ProviderKeyCard({ provider, existingKey, isPrimary, onUpdate, onSetPrim
                   await saveAPIKey(provider.id, '', newModel);
                   onUpdate();
                 } catch {
-                  // Model update without key change needs the existing key
+                  // Silently ignore — model reverts on next load if save fails
                 }
               }}
               className="w-full px-3 py-1.5 bg-dark-900 border border-dark-700 rounded-lg text-sm text-white focus:outline-none focus:border-primary-500 transition-colors"

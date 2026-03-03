@@ -1355,12 +1355,35 @@ func handleSetAPIKey(mongoDB *MongoDB, encKey []byte) http.HandlerFunc {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
+		tenantID := saas.TenantIDFromContext(r.Context())
+
+		// If no key provided, just update the preferred model on the existing key
 		if req.Key == "" {
-			http.Error(w, `{"error":"key is required"}`, http.StatusBadRequest)
+			if req.PreferredModel == "" {
+				http.Error(w, `{"error":"key is required"}`, http.StatusBadRequest)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			defer cancel()
+			filter := bson.M{"tenantId": tenantID, "provider": provider}
+			res, err := mongoDB.TenantAPIKeys().UpdateOne(ctx, filter, bson.M{
+				"$set": bson.M{"preferredModel": req.PreferredModel, "updatedAt": time.Now()},
+			})
+			if err != nil {
+				http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+				return
+			}
+			if res.MatchedCount == 0 {
+				http.Error(w, `{"error":"no existing key for this provider"}`, http.StatusBadRequest)
+				return
+			}
+			var updated TenantAPIKey
+			mongoDB.TenantAPIKeys().FindOne(ctx, filter).Decode(&updated)
+			updated.EncryptedKey = ""
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(updated)
 			return
 		}
-
-		tenantID := saas.TenantIDFromContext(r.Context())
 
 		// Verify key with the provider
 		status := "active"
