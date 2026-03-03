@@ -154,6 +154,9 @@ func main() {
 	// Background cleanup: prune old data every 6 hours
 	go runCleanupJobs(mongoDB)
 
+	// Global health checks: probe all LLM providers every 5 minutes for the timeline
+	go runGlobalHealthChecks(mongoDB, apiKey, encryptionKey)
+
 	// withAuth wraps a handler with JWT + tenant middleware (SaaS mode only).
 	// In non-SaaS mode, returns the handler unwrapped.
 	withAuth := func(h http.HandlerFunc) http.HandlerFunc {
@@ -1265,6 +1268,105 @@ func handleHealthCheck(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 	}
 }
 
+// runGlobalHealthChecks periodically probes each LLM provider using any available
+// tenant key and stores the results in the health_checks collection for the timeline.
+func runGlobalHealthChecks(mongoDB *MongoDB, systemAnthropicKey string, encKey []byte) {
+	// Initial delay — let the server start up
+	time.Sleep(30 * time.Second)
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	check := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// For each LLM provider, find any active key from any tenant
+		type keyInfo struct {
+			provider LLMProvider
+			apiKey   string
+		}
+		var toCheck []keyInfo
+
+		for id, p := range providers {
+			var key string
+			if id == "anthropic" && systemAnthropicKey != "" {
+				// Use the system key for Anthropic
+				key = systemAnthropicKey
+			} else {
+				// Find any active tenant key for this provider
+				var doc TenantAPIKey
+				err := mongoDB.TenantAPIKeys().FindOne(ctx, bson.M{
+					"provider": id,
+					"status":   "active",
+				}).Decode(&doc)
+				if err != nil {
+					continue // No key available for this provider
+				}
+				plain, err := decryptSecret(doc.EncryptedKey, encKey)
+				if err != nil {
+					continue
+				}
+				key = plain
+			}
+			toCheck = append(toCheck, keyInfo{provider: p, apiKey: key})
+		}
+
+		if len(toCheck) == 0 {
+			return
+		}
+
+		// Probe each provider in parallel
+		results := make([]ModelStatusRecord, len(toCheck))
+		var wg sync.WaitGroup
+		for i, ki := range toCheck {
+			wg.Add(1)
+			go func(idx int, ki keyInfo) {
+				defer wg.Done()
+				checkCtx, checkCancel := context.WithTimeout(ctx, 30*time.Second)
+				defer checkCancel()
+
+				start := time.Now()
+				status, _ := ki.provider.VerifyKey(checkCtx, ki.apiKey)
+				latency := time.Since(start)
+
+				rec := ModelStatusRecord{
+					Model:     ki.provider.ProviderID(),
+					Name:      ki.provider.Name(),
+					LatencyMs: latency.Milliseconds(),
+				}
+				switch status {
+				case "active":
+					rec.Status = "available"
+					rec.HTTPStatus = 200
+				case "invalid":
+					rec.Status = "error"
+				case "no_credits":
+					rec.Status = "error"
+				default:
+					rec.Status = "error"
+				}
+				results[idx] = rec
+			}(i, ki)
+		}
+		wg.Wait()
+
+		// Store in health_checks collection
+		record := HealthRecord{
+			Models:    results,
+			CheckedAt: time.Now(),
+		}
+		if _, err := mongoDB.HealthChecks().InsertOne(ctx, record); err != nil {
+			log.Printf("Global health check: failed to save: %v", err)
+		}
+	}
+
+	check() // Run immediately
+	for range ticker.C {
+		check()
+	}
+}
+
 // handleProviderHealthCheck checks all API keys the tenant has configured
 // by calling VerifyKey on each provider. Returns per-provider health status.
 func handleProviderHealthCheck(mongoDB *MongoDB, encKey []byte) http.HandlerFunc {
@@ -1305,11 +1407,15 @@ func handleProviderHealthCheck(mongoDB *MongoDB, encKey []byte) http.HandlerFunc
 
 		for i, key := range keys {
 			if key.Provider == "youtube" {
+				ytStatus := "error"
+				if key.Status == "active" {
+					ytStatus = "available"
+				}
 				results[i] = providerResult{
 					Provider: "youtube",
 					Model:    "youtube-data-api",
 					Name:     "YouTube Data API",
-					Status:   key.Status,
+					Status:   ytStatus,
 				}
 				continue
 			}
