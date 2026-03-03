@@ -116,6 +116,7 @@ func main() {
 	// One-time migrations
 	mongoDB.migrateDomains()   // normalize domain fields (strip protocol)
 	mongoDB.migrateIndexes()   // drop old {domain:1} unique indexes for multi-tenant
+	seedEventDefinitions(mongoDB)
 	if ytKey != "" {
 		log.Println("YouTube API key configured — Video Authority enabled (system key)")
 	}
