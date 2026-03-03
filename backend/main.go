@@ -266,6 +266,7 @@ func main() {
 	mux.HandleFunc("GET /api/settings/api-keys/status", withAuth(handleAPIKeyStatus(mongoDB)))
 	mux.HandleFunc("GET /api/settings/primary-provider", withAuth(handleGetPrimaryProvider(mongoDB)))
 	mux.HandleFunc("PUT /api/settings/primary-provider", withAuth(handleSetPrimaryProvider(mongoDB)))
+	mux.HandleFunc("GET /api/health/providers", withAuth(handleProviderHealthCheck(mongoDB, encryptionKey)))
 
 	// ─── Public API v1 ────────────────────────────────────────────────────
 	withAPIAuth := func(h http.HandlerFunc) http.HandlerFunc {
@@ -336,6 +337,7 @@ func main() {
 	// OPTIONS handlers (CORS preflight — no auth)
 	// Note: OPTIONS /api/config already registered above with the GET handler
 	mux.HandleFunc("OPTIONS /api/health/claude", handleOptions)
+	mux.HandleFunc("OPTIONS /api/health/providers", handleOptions)
 	mux.HandleFunc("OPTIONS /api/health", handleOptions)
 	mux.HandleFunc("OPTIONS /api/analyze", handleOptions)
 	mux.HandleFunc("OPTIONS /api/analyses", handleOptions)
@@ -1259,6 +1261,134 @@ func handleHealthCheck(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]any{
 			"models":     results,
 			"checked_at": checkedAt,
+		})
+	}
+}
+
+// handleProviderHealthCheck checks all API keys the tenant has configured
+// by calling VerifyKey on each provider. Returns per-provider health status.
+func handleProviderHealthCheck(mongoDB *MongoDB, encKey []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenantID := saas.TenantIDFromContext(r.Context())
+
+		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		defer cancel()
+
+		// Load all API keys for this tenant
+		cursor, err := mongoDB.TenantAPIKeys().Find(ctx, bson.M{"tenantId": tenantID})
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"models": []any{}, "checked_at": time.Now()})
+			return
+		}
+		var keys []TenantAPIKey
+		if err := cursor.All(ctx, &keys); err != nil || len(keys) == 0 {
+			cursor.Close(ctx)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"models": []any{}, "checked_at": time.Now()})
+			return
+		}
+		cursor.Close(ctx)
+
+		// Check each provider in parallel
+		type providerResult struct {
+			Provider  string `json:"provider"`
+			Model     string `json:"model"`
+			Name      string `json:"name"`
+			Status    string `json:"status"`
+			LatencyMs int64  `json:"latency_ms,omitempty"`
+			Error     string `json:"error,omitempty"`
+		}
+
+		results := make([]providerResult, len(keys))
+		var wg sync.WaitGroup
+
+		for i, key := range keys {
+			if key.Provider == "youtube" {
+				results[i] = providerResult{
+					Provider: "youtube",
+					Model:    "youtube-data-api",
+					Name:     "YouTube Data API",
+					Status:   key.Status,
+				}
+				continue
+			}
+
+			provider := getProvider(key.Provider)
+			if provider == nil {
+				results[i] = providerResult{
+					Provider: key.Provider,
+					Model:    key.Provider,
+					Name:     key.Provider,
+					Status:   "error",
+					Error:    "unknown provider",
+				}
+				continue
+			}
+
+			plainKey, err := decryptSecret(key.EncryptedKey, encKey)
+			if err != nil {
+				results[i] = providerResult{
+					Provider: key.Provider,
+					Model:    key.Provider,
+					Name:     provider.Name(),
+					Status:   "error",
+					Error:    "decryption failed",
+				}
+				continue
+			}
+
+			wg.Add(1)
+			go func(idx int, p LLMProvider, apiKey string, k TenantAPIKey) {
+				defer wg.Done()
+
+				checkCtx, checkCancel := context.WithTimeout(ctx, 30*time.Second)
+				defer checkCancel()
+
+				start := time.Now()
+				status, err := p.VerifyKey(checkCtx, apiKey)
+				latency := time.Since(start)
+
+				res := providerResult{
+					Provider:  k.Provider,
+					Model:     k.PreferredModel,
+					Name:      p.Name(),
+					LatencyMs: latency.Milliseconds(),
+				}
+				if res.Model == "" {
+					// Use the first model as display name
+					models := p.Models()
+					if len(models) > 0 {
+						res.Model = models[0].ID
+					}
+				}
+
+				switch status {
+				case "active":
+					res.Status = "available"
+				case "invalid":
+					res.Status = "error"
+					res.Error = "API key is invalid or revoked"
+				case "no_credits":
+					res.Status = "error"
+					res.Error = "No credits / billing issue"
+				default:
+					res.Status = "error"
+					if err != nil {
+						res.Error = err.Error()
+					}
+				}
+
+				results[idx] = res
+			}(i, provider, plainKey, key)
+		}
+
+		wg.Wait()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"models":     results,
+			"checked_at": time.Now(),
 		})
 	}
 }

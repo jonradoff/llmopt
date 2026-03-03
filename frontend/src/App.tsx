@@ -455,6 +455,7 @@ type VideoView = 'input' | 'discovering' | 'review' | 'running' | 'results' | 't
 type OptimizeView = 'list' | 'detail' | 'running'
 
 interface ModelStatus {
+  provider?: string
   model: string
   name: string
   status: 'available' | 'overloaded' | 'error'
@@ -1107,19 +1108,15 @@ export default function App() {
   const checkHealth = useCallback(async () => {
     setHealthChecking(true)
     try {
-      const response = await apiFetch('/api/health/claude')
+      const response = await apiFetch('/api/health/providers')
       if (response.ok) {
         const data = await response.json() as HealthCheck
-        setHealthHistory(prev => [data, ...prev].slice(0, 50))
+        if (data.models && data.models.length > 0) {
+          setHealthHistory(prev => [data, ...prev].slice(0, 50))
+        }
       }
-    } catch (err) {
-      setHealthHistory(prev => [{
-        models: [
-          { model: 'claude-sonnet-4-6', name: 'Sonnet 4.6', status: 'error' as const, error: (err as Error).message },
-          { model: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5', status: 'error' as const, error: (err as Error).message },
-        ],
-        checked_at: new Date().toISOString(),
-      }, ...prev].slice(0, 50))
+    } catch {
+      // Network error — don't add fake entries
     } finally {
       setHealthChecking(false)
     }
@@ -4843,15 +4840,10 @@ curl -X PATCH \\
                 healthHistory[0].models.every(m => m.status !== 'available') ? 'text-red-300' : 'text-amber-300'
               }`}>
                 {healthHistory[0].models.every(m => m.status !== 'available')
-                  ? 'All Claude models are currently unavailable. Analysis requests will fail until service is restored.'
+                  ? 'All API providers are currently unavailable. Analysis requests will fail until service is restored.'
                   : (() => {
                       const degraded = healthHistory[0].models.filter(m => m.status !== 'available')
-                      const available = healthHistory[0].models.filter(m => m.status === 'available')
-                      const primary = healthHistory[0].models[0]
-                      if (primary.status !== 'available') {
-                        return `Primary model (${primary.name}) is ${primary.status}. Analysis will use ${available[0]?.name || 'fallback'} as fallback.`
-                      }
-                      return `${degraded.map(m => m.name).join(', ')} ${degraded.length > 1 ? 'are' : 'is'} currently ${degraded[0]?.status || 'unavailable'}.`
+                      return `${degraded.map(m => m.name).join(', ')} ${degraded.length > 1 ? 'are' : 'is'} currently unavailable.`
                     })()
                 }
               </p>
@@ -6503,7 +6495,7 @@ curl -X PATCH \\
             <div className="bg-dark-900/50 backdrop-blur-sm border border-dark-800 rounded-2xl p-6">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-widest">
-                  Claude API Status
+                  API Provider Status
                 </h3>
                 <button
                   onClick={checkHealth}
@@ -6558,11 +6550,6 @@ curl -X PATCH \\
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="text-white font-medium text-sm">{m.name}</span>
-                            {m.model === 'claude-sonnet-4-6' && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary-500/20 text-primary-400 border border-primary-500/30 font-semibold uppercase tracking-wider">
-                                Primary
-                              </span>
-                            )}
                             <span className={`text-xs font-medium ${
                               m.status === 'available' ? 'text-emerald-400' :
                               m.status === 'overloaded' ? 'text-amber-400' :
@@ -6576,7 +6563,6 @@ curl -X PATCH \\
                           <p className="text-dark-500 text-xs truncate">
                             {m.model}
                             {m.latency_ms !== undefined && ` · ${m.latency_ms}ms`}
-                            {m.http_status !== undefined && m.http_status !== 200 && ` · HTTP ${m.http_status}`}
                           </p>
                           {m.error && m.status !== 'available' && (
                             <p className="text-dark-500 text-xs mt-1 break-all line-clamp-3">
@@ -6597,12 +6583,12 @@ curl -X PATCH \\
                     ))}
                   </div>
 
-                  {/* Fallback indicator */}
-                  {healthHistory[0].models[0]?.status !== 'available' &&
+                  {/* Partial outage indicator */}
+                  {healthHistory[0].models.some(m => m.status !== 'available') &&
                    healthHistory[0].models.some(m => m.status === 'available') && (
                     <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
                       <p className="text-amber-300 text-sm">
-                        Currently using fallback: {healthHistory[0].models.find(m => m.status === 'available')?.name}
+                        {healthHistory[0].models.filter(m => m.status !== 'available').map(m => m.name).join(', ')} {healthHistory[0].models.filter(m => m.status !== 'available').length > 1 ? 'have' : 'has'} issues
                       </p>
                     </div>
                   )}
@@ -6646,9 +6632,6 @@ curl -X PATCH \\
                           <div className="flex items-center justify-between mb-2">
                             <div className="flex items-center gap-2">
                               <span className="text-white text-sm font-medium">{name}</span>
-                              {model === 'claude-sonnet-4-6' && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary-500/20 text-primary-400 border border-primary-500/30 font-semibold uppercase tracking-wider">Primary</span>
-                              )}
                             </div>
                             <span className={`text-xs font-medium ${uptime >= 95 ? 'text-emerald-400' : uptime >= 80 ? 'text-amber-400' : 'text-red-400'}`}>
                               {uptime}% uptime
