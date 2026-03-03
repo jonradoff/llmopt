@@ -186,7 +186,9 @@ const PROVIDERS: ProviderDef[] = [
     name: 'Grok',
     description: 'xAI models for analysis',
     models: [
-      { id: 'grok-3', name: 'Grok 3 (Recommended)' },
+      { id: 'grok-4-0709', name: 'Grok 4 (Recommended)' },
+      { id: 'grok-4-fast-non-reasoning', name: 'Grok 4 Fast' },
+      { id: 'grok-3', name: 'Grok 3' },
       { id: 'grok-3-mini', name: 'Grok 3 Mini (Faster, lower cost)' },
     ],
     placeholder: 'xai-...',
