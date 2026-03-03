@@ -21,13 +21,15 @@ func (p *GeminiProvider) Name() string       { return "Gemini" }
 
 func (p *GeminiProvider) Models() []ModelDef {
 	return []ModelDef{
+		{ID: "gemini-3.1-pro-preview", Name: "Gemini 3.1 Pro"},
+		{ID: "gemini-3-flash-preview", Name: "Gemini 3 Flash"},
 		{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro"},
-		{ID: "gemini-2.0-flash", Name: "Gemini 2.0 Flash"},
+		{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash"},
 	}
 }
 
 func (p *GeminiProvider) SmallModel() string {
-	return "gemini-2.0-flash"
+	return "gemini-2.5-flash"
 }
 
 // BuildStreamBody for Gemini is special — the model goes in the URL, not the body.
@@ -123,7 +125,7 @@ func (p *GeminiProvider) Stream(ctx context.Context, apiKey string, body []byte,
 	json.Unmarshal(body, &wrapper)
 	model := wrapper.Model
 	if model == "" {
-		model = "gemini-2.5-pro"
+		model = "gemini-3.1-pro-preview"
 	}
 
 	// Remove the _model field before sending to the API
@@ -235,7 +237,7 @@ func (p *GeminiProvider) VerifyKey(ctx context.Context, apiKey string) (string, 
 		},
 	})
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", apiKey)
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=%s", apiKey)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return "error", fmt.Errorf("create request: %w", err)

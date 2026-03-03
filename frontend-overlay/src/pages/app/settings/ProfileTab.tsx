@@ -206,8 +206,10 @@ const PROVIDERS: ProviderDef[] = [
     name: 'Gemini',
     description: 'Google AI models for analysis',
     models: [
-      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Recommended)' },
-      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash (Faster, lower cost)' },
+      { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro (Recommended)' },
+      { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash' },
+      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Faster, lower cost)' },
     ],
     placeholder: 'AIza...',
     helpSteps: [
