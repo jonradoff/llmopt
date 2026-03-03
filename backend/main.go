@@ -1237,28 +1237,7 @@ func handleHealthCheck(apiKey string, mongoDB *MongoDB) http.HandlerFunc {
 
 		checkedAt := time.Now()
 
-		// Persist to DB
-		var modelRecords []ModelStatusRecord
-		for _, r := range results {
-			modelRecords = append(modelRecords, ModelStatusRecord{
-				Model:      r.Model,
-				Name:       r.Name,
-				Status:     r.Status,
-				LatencyMs:  r.LatencyMs,
-				HTTPStatus: r.HTTPStatus,
-			})
-		}
-		record := HealthRecord{
-			Models:    modelRecords,
-			CheckedAt: checkedAt,
-		}
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if _, err := mongoDB.HealthChecks().InsertOne(ctx, record); err != nil {
-				log.Printf("Failed to save health check: %v", err)
-			}
-		}()
+		// NOTE: DB persistence removed — global health check goroutine now handles timeline data.
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -1294,18 +1273,21 @@ func runGlobalHealthChecks(mongoDB *MongoDB, systemAnthropicKey string, encKey [
 			ID primitive.ObjectID `bson:"_id"`
 		}
 		if err := mongoDB.Database.Collection("tenants").FindOne(ctx, bson.M{"isRoot": true}).Decode(&rootTenant); err != nil {
-			return // No root tenant yet
+			log.Printf("Global health check: root tenant lookup failed: %v", err)
+			return
 		}
 		rootTenantID := rootTenant.ID.Hex()
 
 		// Load all root tenant keys at once
 		keyCursor, err := mongoDB.TenantAPIKeys().Find(ctx, bson.M{"tenantId": rootTenantID})
 		if err != nil {
+			log.Printf("Global health check: failed to load root tenant keys: %v", err)
 			return
 		}
 		var rootKeys []TenantAPIKey
 		keyCursor.All(ctx, &rootKeys)
 		keyCursor.Close(ctx)
+		log.Printf("Global health check: found %d keys for root tenant %s", len(rootKeys), rootTenantID)
 
 		rootKeyMap := map[string]TenantAPIKey{}
 		for _, k := range rootKeys {
@@ -1352,8 +1334,10 @@ func runGlobalHealthChecks(mongoDB *MongoDB, systemAnthropicKey string, encKey [
 		}
 
 		if len(toCheck) == 0 {
+			log.Printf("Global health check: no providers to check (rootKeys=%d)", len(rootKeys))
 			return
 		}
+		log.Printf("Global health check: probing %d providers", len(toCheck))
 
 		// Probe each provider in parallel
 		results := make([]ModelStatusRecord, len(toCheck))
@@ -1397,9 +1381,16 @@ func runGlobalHealthChecks(mongoDB *MongoDB, systemAnthropicKey string, encKey [
 		}
 		if _, err := mongoDB.HealthChecks().InsertOne(ctx, record); err != nil {
 			log.Printf("Global health check: failed to save: %v", err)
+		} else {
+			names := make([]string, len(results))
+			for i, r := range results {
+				names[i] = fmt.Sprintf("%s=%s", r.Name, r.Status)
+			}
+			log.Printf("Global health check: saved [%s]", strings.Join(names, ", "))
 		}
 	}
 
+	log.Println("Global health check: starting (30s delay)")
 	check() // Run immediately
 	for range ticker.C {
 		check()
