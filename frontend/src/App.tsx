@@ -2798,7 +2798,7 @@ export default function App() {
       // Fetch available providers
       apiFetch('/api/settings/api-keys').then(r => r.ok ? r.json() : null).then(data => {
         if (data?.keys) {
-          const active = data.keys.filter((k: { status: string }) => k.status === 'active')
+          const active = data.keys.filter((k: { status: string; provider: string }) => k.status === 'active' && k.provider !== 'youtube')
           setTestAvailableProviders(active)
           setTestSelectedProviders(active.map((k: { provider: string }) => k.provider))
         }
