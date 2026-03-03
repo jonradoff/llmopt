@@ -1282,11 +1282,13 @@ func runGlobalHealthChecks(mongoDB *MongoDB, systemAnthropicKey string, encKey [
 		defer cancel()
 
 		// Use root tenant's API keys for global health probes
-		type keyInfo struct {
-			provider LLMProvider
-			apiKey   string
+		type checkItem struct {
+			providerID string
+			name       string
+			verifyFunc func(ctx context.Context, key string) (string, error)
+			apiKey     string
 		}
-		var toCheck []keyInfo
+		var toCheck []checkItem
 
 		var rootTenant struct {
 			ID primitive.ObjectID `bson:"_id"`
@@ -1296,27 +1298,57 @@ func runGlobalHealthChecks(mongoDB *MongoDB, systemAnthropicKey string, encKey [
 		}
 		rootTenantID := rootTenant.ID.Hex()
 
+		// Load all root tenant keys at once
+		keyCursor, err := mongoDB.TenantAPIKeys().Find(ctx, bson.M{"tenantId": rootTenantID})
+		if err != nil {
+			return
+		}
+		var rootKeys []TenantAPIKey
+		keyCursor.All(ctx, &rootKeys)
+		keyCursor.Close(ctx)
+
+		rootKeyMap := map[string]TenantAPIKey{}
+		for _, k := range rootKeys {
+			rootKeyMap[k.Provider] = k
+		}
+
+		// LLM providers
 		for id, p := range providers {
 			var key string
 			if id == "anthropic" && systemAnthropicKey != "" {
 				key = systemAnthropicKey
-			} else {
-				var doc TenantAPIKey
-				err := mongoDB.TenantAPIKeys().FindOne(ctx, bson.M{
-					"tenantId": rootTenantID,
-					"provider": id,
-					"status":   "active",
-				}).Decode(&doc)
-				if err != nil {
-					continue // Root tenant has no key for this provider
-				}
+			} else if doc, ok := rootKeyMap[id]; ok {
 				plain, err := decryptSecret(doc.EncryptedKey, encKey)
 				if err != nil {
 					continue
 				}
 				key = plain
+			} else {
+				continue
 			}
-			toCheck = append(toCheck, keyInfo{provider: p, apiKey: key})
+			pCopy := p // capture for closure
+			toCheck = append(toCheck, checkItem{
+				providerID: id,
+				name:       p.Name(),
+				verifyFunc: pCopy.VerifyKey,
+				apiKey:     key,
+			})
+		}
+
+		// YouTube (not an LLM provider but tracked for health)
+		if doc, ok := rootKeyMap["youtube"]; ok {
+			plain, err := decryptSecret(doc.EncryptedKey, encKey)
+			if err == nil {
+				toCheck = append(toCheck, checkItem{
+					providerID: "youtube",
+					name:       "YouTube",
+					verifyFunc: func(ctx context.Context, key string) (string, error) {
+						status := verifyYouTubeKey(ctx, key)
+						return status, nil
+					},
+					apiKey: plain,
+				})
+			}
 		}
 
 		if len(toCheck) == 0 {
@@ -1326,20 +1358,20 @@ func runGlobalHealthChecks(mongoDB *MongoDB, systemAnthropicKey string, encKey [
 		// Probe each provider in parallel
 		results := make([]ModelStatusRecord, len(toCheck))
 		var wg sync.WaitGroup
-		for i, ki := range toCheck {
+		for i, ci := range toCheck {
 			wg.Add(1)
-			go func(idx int, ki keyInfo) {
+			go func(idx int, ci checkItem) {
 				defer wg.Done()
 				checkCtx, checkCancel := context.WithTimeout(ctx, 30*time.Second)
 				defer checkCancel()
 
 				start := time.Now()
-				status, _ := ki.provider.VerifyKey(checkCtx, ki.apiKey)
+				status, _ := ci.verifyFunc(checkCtx, ci.apiKey)
 				latency := time.Since(start)
 
 				rec := ModelStatusRecord{
-					Model:     ki.provider.ProviderID(),
-					Name:      ki.provider.Name(),
+					Model:     ci.providerID,
+					Name:      ci.name,
 					LatencyMs: latency.Milliseconds(),
 				}
 				switch status {
@@ -1354,7 +1386,7 @@ func runGlobalHealthChecks(mongoDB *MongoDB, systemAnthropicKey string, encKey [
 					rec.Status = "error"
 				}
 				results[idx] = rec
-			}(i, ki)
+			}(i, ci)
 		}
 		wg.Wait()
 
