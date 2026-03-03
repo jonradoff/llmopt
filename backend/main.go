@@ -1281,27 +1281,34 @@ func runGlobalHealthChecks(mongoDB *MongoDB, systemAnthropicKey string, encKey [
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		// For each LLM provider, find any active key from any tenant
+		// Use root tenant's API keys for global health probes
 		type keyInfo struct {
 			provider LLMProvider
 			apiKey   string
 		}
 		var toCheck []keyInfo
 
+		var rootTenant struct {
+			ID primitive.ObjectID `bson:"_id"`
+		}
+		if err := mongoDB.Database.Collection("tenants").FindOne(ctx, bson.M{"isRoot": true}).Decode(&rootTenant); err != nil {
+			return // No root tenant yet
+		}
+		rootTenantID := rootTenant.ID.Hex()
+
 		for id, p := range providers {
 			var key string
 			if id == "anthropic" && systemAnthropicKey != "" {
-				// Use the system key for Anthropic
 				key = systemAnthropicKey
 			} else {
-				// Find any active tenant key for this provider
 				var doc TenantAPIKey
 				err := mongoDB.TenantAPIKeys().FindOne(ctx, bson.M{
+					"tenantId": rootTenantID,
 					"provider": id,
 					"status":   "active",
 				}).Decode(&doc)
 				if err != nil {
-					continue // No key available for this provider
+					continue // Root tenant has no key for this provider
 				}
 				plain, err := decryptSecret(doc.EncryptedKey, encKey)
 				if err != nil {
