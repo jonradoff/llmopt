@@ -1,6 +1,253 @@
 # LLM Optimizer
 
-LLM Optimizer analyzes and optimizes your brand's visibility across AI-powered answer engines, search, video, and social platforms. It provides actionable intelligence through site analysis, answer engine optimization scoring, video authority analysis, Reddit authority analysis, search visibility analysis, and LLM knowledge testing.
+[![Go](https://github.com/jonradoff/llmopt/actions/workflows/ci.yml/badge.svg)](https://github.com/jonradoff/llmopt/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/jonradoff/llmopt/branch/master/graph/badge.svg)](https://codecov.io/gh/jonradoff/llmopt)
+[![Go Report Card](https://goreportcard.com/badge/github.com/jonradoff/llmopt)](https://goreportcard.com/report/github.com/jonradoff/llmopt)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+LLM Optimizer is an AI visibility intelligence platform. It analyzes how large language models and AI search engines perceive, cite, and recommend brands — then provides research-backed optimization strategies to improve that visibility.
+
+ChatGPT, Claude, Gemini, Perplexity, and Google AI Overviews are replacing traditional search for millions of people. The signals that determine whether an AI recommends your brand are fundamentally different from traditional SEO: earned media coverage, transcript quality, content structure, training data frequency, and citation network dynamics matter more than backlinks and keyword density. LLM Optimizer measures these signals across five analysis dimensions and produces a composite AI Visibility Score (0-100) with prioritized, actionable recommendations.
+
+## What It Analyzes
+
+LLM Optimizer performs six types of analysis, each grounded in peer-reviewed research:
+
+**Answer Engine Optimization** — Analyzes your website's content against the optimization strategies validated by the [GEO (Generative Engine Optimization)](https://arxiv.org/abs/2311.09735) research. Scores pages on quotation density (+41% visibility), statistical evidence (+33%), source citations (+28%), fluency, structural optimization, and machine readability. Produces per-question optimization scores with specific rewrite recommendations.
+
+**Video Authority Analysis** — Two-phase analysis of YouTube presence. Phase 1 uses a fast model to assess individual videos for transcript quality, keyword alignment, and caption availability. Phase 2 feeds compact assessments into a reasoning model for four-pillar scoring: Transcript Authority, Topical Dominance, Citation Network, and Brand Narrative. Based on research showing YouTube is now the [#1 social citation source](https://www.adweek.com/media/youtube-reddit-ai-search-engine-citations) for LLMs, appearing in 16% of AI answers.
+
+**Reddit Authority Analysis** — Scrapes Reddit discussions mentioning your brand and analyzes community sentiment, competitive positioning, and training data signal strength. Uses Reddit's public `.json` endpoints with Cloudflare WARP proxy fallback. Scores four pillars: Presence, Sentiment, Competitive Position, and Training Signal.
+
+**Search Visibility Analysis** — Evaluates your site's visibility across both Google AI Overviews and standalone LLMs. Checks robots.txt AI crawler policies, structured data, content freshness, brand search momentum, and earned media signals. Based on research showing only [12% overlap](https://ahrefs.com/blog/ai-search-traffic-study/) between Google top-10 results and ChatGPT/Perplexity citations.
+
+**LLM Knowledge Testing** — Directly queries multiple LLM providers (Anthropic, OpenAI, Gemini, Grok) with your brand's target queries and analyzes how each model responds. Compares your brand's presence, accuracy, and recommendation likelihood across providers. Supports head-to-head competitor comparison.
+
+**Brand Intelligence** — Aggregates all analysis dimensions into a composite AI Visibility Score weighted across Optimization (30%), Video Authority (20%), Reddit Authority (20%), Search Visibility (15%), and LLM Test (15%). Generates prioritized action items that track through to completion.
+
+## Research Foundation
+
+The analysis methodology is grounded in published research. Key findings that inform the scoring:
+
+- **Content optimization**: Embedding authoritative quotations improves AI citation visibility by +41%; adding statistics by +33%; keyword stuffing *reduces* visibility by -9% ([GEO, Princeton/KDD 2024](https://arxiv.org/abs/2311.09735)).
+- **Training data frequency**: Answer accuracy more than doubles from rare (1-5 documents) to high-frequency (51+ documents) in training data. Being in training data AND being retrievable provides a compounding advantage ([NanoKnow, 2026](https://arxiv.org/abs/2602.20122)).
+- **Source preferences**: AI search engines cite earned media 72-92% of the time vs. 18-27% for brand-owned content. Only 15-50% overlap with traditional Google results ([GEO, Toronto 2025](https://arxiv.org/abs/2509.08919)).
+- **Video transcripts**: A 7B-parameter model trained on YouTube transcripts surpassed 72B models in commentary quality. Transcript quality is the dominant signal for video LLM influence — not production value or view counts ([LiveCC, CVPR 2025](https://arxiv.org/abs/2504.16030)).
+- **Citation concentration**: Top 20 news sources capture 28-67% of all AI citations depending on provider. Different AI providers cite substantially different sources (cross-family similarity: 0.11-0.58) ([AI Search Arena, 2025](https://arxiv.org/abs/2507.05301)).
+- **Content freshness**: AI assistants cite content 25.7% newer than traditional search. Freshness signals can shift ranking by up to 95 positions ([Ahrefs, 2025](https://ahrefs.com/blog/freshness-seo/)).
+
+For the complete research synthesis with methodology details, scoring frameworks, and prompt architecture, see [research.md](research.md).
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Caddy (port 8080)                   │
+│                   TLS + reverse proxy                   │
+└──────────┬────────────────────────────┬─────────────────┘
+           │                            │
+    /api/auth, /api/users,       Everything else
+    /api/tenants, /api/billing,
+    /api/admin, /api/bootstrap
+           │                            │
+           ▼                            ▼
+┌─────────────────────┐    ┌──────────────────────────────┐
+│  LastSaaS Backend   │    │   LLM Optimizer Backend      │
+│    (port 8091)      │    │       (port 8090)            │
+│                     │    │                              │
+│  - Authentication   │    │  - Site analysis engine      │
+│  - OAuth / SSO      │    │  - Video analysis (2-phase)  │
+│  - Billing (Stripe) │    │  - Reddit analysis           │
+│  - Tenant management│    │  - Search visibility         │
+│  - API key mgmt     │    │  - LLM knowledge testing     │
+│  - User management  │    │  - Brand intelligence        │
+│                     │    │  - MCP server (OAuth 2.1)    │
+│                     │    │  - REST API (v1)             │
+│                     │    │  - PDF report generation     │
+│                     │    │  - Health monitoring          │
+│                     │    │  - Cloudflare WARP proxy     │
+└─────────────────────┘    └──────────────────────────────┘
+           │                            │
+           └────────────┬───────────────┘
+                        ▼
+              ┌───────────────────┐
+              │   MongoDB Atlas   │
+              │                   │
+              │  - analyses       │
+              │  - brand_profiles │
+              │  - video_analyses │
+              │  - reddit_cache   │
+              │  - health_checks  │
+              │  - tenants / users│
+              └───────────────────┘
+```
+
+**Backend** — Go 1.24, standard library `net/http` with `gorilla/mux`-style routing. No web framework. LLM provider abstraction supports Anthropic, OpenAI, Gemini, and Grok with streaming SSE responses. Each provider implements a common interface for `Call`, `Stream`, `VerifyKey`, and `BuildStreamBody`.
+
+**Frontend** — React 19 + TypeScript + Vite + Tailwind CSS. Single-page application with SSE streaming for real-time analysis progress. The SaaS deployment uses a frontend overlay system that extends the base [LastSaaS](https://github.com/jonradoff/lastsaas) frontend with product-specific pages.
+
+**Multi-tenant SaaS** — Built on [LastSaaS](https://github.com/jonradoff/lastsaas), an open-source SaaS framework that provides authentication, billing (Stripe), tenant isolation, and user management. LLM Optimizer runs as a dependent application — LastSaaS handles the auth/billing plane while LLM Optimizer handles the product plane.
+
+**MCP Server** — [Model Context Protocol](https://modelcontextprotocol.io) server using Streamable HTTP transport with OAuth 2.1 (PKCE + Dynamic Client Registration). Lets AI assistants like Claude access analysis data, visibility scores, and action items programmatically.
+
+**Cloudflare WARP** — Integrated as a SOCKS5 proxy for Reddit scraping fallback (handles 429/403 rate limits).
+
+## Prerequisites
+
+- **Go 1.24+**
+- **Node.js 20+** and npm
+- **MongoDB** (Atlas recommended, local works for development)
+- **Anthropic API key** (required — used for site analysis, optimization scoring, and brand intelligence)
+- **[LastSaaS](https://github.com/jonradoff/lastsaas)** (required for SaaS mode with auth/billing; optional for standalone mode)
+
+Optional API keys for additional providers and features:
+- **OpenAI API key** — LLM knowledge testing with GPT models
+- **Google Gemini API key** — LLM knowledge testing with Gemini models
+- **xAI Grok API key** — LLM knowledge testing with Grok models
+- **YouTube Data API key** — Video authority analysis
+
+## Setup
+
+### Standalone Mode (single user, no auth)
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/jonradoff/llmopt.git
+   cd llmopt
+   ```
+
+2. Copy the example environment file and fill in your values:
+   ```bash
+   cp .env.dev.example .env
+   ```
+
+   Required variables:
+   ```
+   ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
+   MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/?appName=Cluster0
+   PORT=8080
+   ```
+
+3. Build and run the backend:
+   ```bash
+   cd backend
+   go build -o llmopt .
+   ./llmopt
+   ```
+
+4. Build and run the frontend (in a separate terminal):
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+
+5. Open `http://localhost:5173` in your browser.
+
+### SaaS Mode (multi-tenant with auth and billing)
+
+SaaS mode requires [LastSaaS](https://github.com/jonradoff/lastsaas) as a dependency. LastSaaS provides authentication (OAuth/SSO), Stripe billing, tenant management, and the admin interface.
+
+1. Clone with the LastSaaS dependency:
+   ```bash
+   git clone https://github.com/jonradoff/llmopt.git
+   cd llmopt
+   git clone https://github.com/jonradoff/lastsaas.git lastsaas
+   ```
+
+2. Configure environment variables:
+   ```bash
+   cp .env.prod.example .env
+   ```
+
+   Additional variables required for SaaS mode:
+   ```
+   LLMOPT_SAAS_ENABLED=true
+   LLMOPT_ENCRYPTION_KEY=<32-byte-hex-key-for-tenant-api-key-encryption>
+   LLMOPT_JWT_ACCESS_SECRET=<random-secret-for-jwt-signing>
+   ```
+
+   See the [LastSaaS README](https://github.com/jonradoff/lastsaas#readme) for the full set of auth/billing environment variables (Google OAuth, Stripe keys, etc.).
+
+3. For local development, use the start script:
+   ```bash
+   ./start-saas.sh
+   ```
+
+4. For production deployment on Fly.io:
+   ```bash
+   fly deploy -c fly.saas.toml
+   ```
+   See [deploy.md](deploy.md) for the full deployment guide.
+
+### Build Verification
+
+```bash
+cd backend && go build ./...
+cd ../frontend && npx tsc --noEmit
+```
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for analysis engine |
+| `MONGODB_URI` | Yes | MongoDB connection string |
+| `PORT` | No | Server port (default: 8080) |
+| `DATABASE_NAME` | No | MongoDB database name (default: llmopt) |
+| `LLMOPT_SAAS_ENABLED` | SaaS only | Enable multi-tenant SaaS mode |
+| `LLMOPT_ENCRYPTION_KEY` | SaaS only | AES key for encrypting tenant API keys |
+| `LLMOPT_JWT_ACCESS_SECRET` | SaaS only | HMAC secret for JWT signing |
+| `MCP_JWT_SECRET` | No | MCP OAuth token signing key (derived from encryption key if not set) |
+| `BASE_URL` | No | Public URL for OAuth metadata (default: `https://llmopt.fly.dev`) |
+| `YOUTUBE_API_KEY` | No | YouTube Data API key for video analysis |
+
+## Project Structure
+
+```
+llmopt/
+├── backend/
+│   ├── main.go              # HTTP server, routes, handlers, health checks
+│   ├── models.go            # MongoDB document models
+│   ├── db.go                # Database connection, collections, indexes
+│   ├── llm.go               # LLM provider abstraction, streaming helpers
+│   ├── provider.go          # Provider interface and registry
+│   ├── provider_anthropic.go # Anthropic Claude implementation
+│   ├── provider_openai.go   # OpenAI GPT implementation
+│   ├── provider_gemini.go   # Google Gemini implementation
+│   ├── provider_grok.go     # xAI Grok implementation
+│   ├── youtube.go           # YouTube Data API client, video analysis
+│   ├── reddit.go            # Reddit scraper with WARP fallback
+│   ├── report_pdf.go        # PDF report generation
+│   ├── screenshot.go        # Chromedp-based page screenshots
+│   ├── api_v1.go            # REST API v1 handlers
+│   ├── crypto.go            # AES encryption for tenant API keys
+│   ├── migration.go         # Database migrations
+│   ├── telemetry.go         # Anonymous usage telemetry
+│   └── internal/
+│       ├── mcpserver/       # MCP protocol server (OAuth 2.1 + tools)
+│       ├── saas/            # SaaS middleware (JWT, tenant context)
+│       └── ratelimit/       # Rate limiting
+├── frontend/                # React + TypeScript + Vite + Tailwind
+│   └── src/
+│       ├── App.tsx          # Main application (analysis UI, dashboards)
+│       └── main.tsx         # Entry point
+├── frontend-overlay/        # SaaS-specific frontend extensions
+│   └── src/
+│       ├── pages/           # Settings, API key management
+│       └── components/      # SaaS-specific UI components
+├── deploy/
+│   ├── Caddyfile            # Caddy reverse proxy config
+│   └── supervisord.conf     # Process manager config
+├── lastsaas/                # LastSaaS dependency (git clone, gitignored)
+├── research.md              # Full research synthesis with citations
+├── deploy.md                # Production deployment guide
+├── Dockerfile               # Standalone mode
+├── Dockerfile.saas          # SaaS mode (Caddy + supervisord)
+├── fly.toml                 # Fly.io config (standalone)
+├── fly.saas.toml            # Fly.io config (SaaS)
+└── start-saas.sh            # Local SaaS development script
+```
 
 ## MCP Server
 
@@ -26,144 +273,7 @@ The MCP server supports two authentication methods:
 | `llmopt_list_todos` | List action items from optimization analyses | `status` (optional): todo, completed, backlogged, archived; `domain` (optional) |
 | `llmopt_update_todo` | Update a todo item's status (admin/owner only) | `id` (required), `status` (required): todo, completed, backlogged, archived |
 
-### Examples
-
-#### 1. List all tracked domains
-
-Discover which domains have analysis data in your account.
-
-```json
-{
-  "tool": "llmopt_list_domains",
-  "input": {}
-}
-```
-
-**Response:**
-```json
-{
-  "domains": ["example.com", "competitor.io", "mybrand.co"],
-  "count": 3
-}
-```
-
-#### 2. Get a video authority report
-
-Retrieve the video authority analysis for a domain, including YouTube presence scoring across four pillars: Transcript Authority, Topical Dominance, Citation Network, and Brand Narrative.
-
-```json
-{
-  "tool": "llmopt_get_report",
-  "input": {
-    "domain": "example.com",
-    "report_type": "video"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "domain": "example.com",
-  "result": {
-    "overallScore": 72,
-    "pillars": {
-      "transcriptAuthority": { "score": 78, "summary": "..." },
-      "topicalDominance": { "score": 65, "summary": "..." },
-      "citationNetwork": { "score": 70, "summary": "..." },
-      "brandNarrative": { "score": 75, "summary": "..." }
-    }
-  },
-  "generatedAt": "2026-02-28T10:30:00Z"
-}
-```
-
-#### 3. Check visibility score
-
-Get the composite AI visibility score, which aggregates Optimization (30%), Video Authority (20%), Reddit Authority (20%), Search Visibility (15%), and LLM Test (15%) into a single 0-100 score.
-
-```json
-{
-  "tool": "llmopt_get_visibility_score",
-  "input": {
-    "domain": "example.com"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "domain": "example.com",
-  "score": 68,
-  "components": [
-    { "name": "Optimization", "score": 75, "weight": 0.30, "available": true },
-    { "name": "Video Authority", "score": 72, "weight": 0.20, "available": true },
-    { "name": "Reddit Authority", "score": 58, "weight": 0.20, "available": true },
-    { "name": "Search Visibility", "score": 62, "weight": 0.15, "available": true },
-    { "name": "LLM Test", "score": 70, "weight": 0.15, "available": true }
-  ],
-  "available": 5,
-  "total": 5
-}
-```
-
-#### 4. List open todos for a domain
-
-Find all actionable recommendations that haven't been completed yet for a specific domain.
-
-```json
-{
-  "tool": "llmopt_list_todos",
-  "input": {
-    "status": "todo",
-    "domain": "example.com"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "todos": [
-    {
-      "_id": "683abc1234567890abcdef01",
-      "domain": "example.com",
-      "title": "Add structured FAQ schema to pricing page",
-      "description": "The pricing page lacks FAQ schema markup...",
-      "status": "todo",
-      "priority": "high",
-      "createdAt": "2026-02-25T14:00:00Z"
-    }
-  ],
-  "count": 1
-}
-```
-
-#### 5. Mark a todo as completed
-
-Update the status of a todo item after implementing the recommendation. Requires admin or owner role.
-
-```json
-{
-  "tool": "llmopt_update_todo",
-  "input": {
-    "id": "683abc1234567890abcdef01",
-    "status": "completed"
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "updated": true,
-  "id": "683abc1234567890abcdef01",
-  "status": "completed"
-}
-```
-
-### Configuration
+### MCP Configuration
 
 #### Claude Desktop
 
@@ -212,23 +322,18 @@ curl -X POST https://llmopt.fly.dev/mcp \
 
 ### OAuth Endpoints
 
-The MCP server implements OAuth 2.1 with PKCE for MCP client compatibility:
-
 | Endpoint | Description |
 |----------|-------------|
 | `GET /.well-known/oauth-protected-resource` | Protected Resource Metadata (RFC 9728) |
 | `GET /.well-known/oauth-authorization-server` | Authorization Server Metadata (RFC 8414) |
 | `POST /oauth/register` | Dynamic Client Registration (RFC 7591) |
-| `GET /oauth/authorize` | Authorization endpoint (shows API key entry form) |
+| `GET /oauth/authorize` | Authorization endpoint |
 | `POST /oauth/token` | Token endpoint (code exchange + refresh) |
-
-### Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `MCP_JWT_SECRET` | HMAC-SHA256 signing key for MCP access tokens | Derived from `ENCRYPTION_KEY` |
-| `BASE_URL` | Public URL of the server (used in OAuth metadata) | `https://llmopt.fly.dev` |
 
 ## REST API
 
-A REST API is also available at `/api/v1/`. See the [API Reference](https://llmopt.fly.dev/api/v1/docs) for full documentation, or visit the [API Docs](https://llmopt.fly.dev/docs) page for a formatted guide.
+A REST API is also available at `/api/v1/`. See the [API Docs](https://llmopt.fly.dev/docs) page for a formatted guide.
+
+## License
+
+[MIT](LICENSE) - Copyright (c) 2026 Metavert LLC
