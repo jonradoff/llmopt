@@ -1,0 +1,51 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "id": "abc123",
+            "subreddit": "technology",
+            "title": "Discussion about test brand",
+            "selftext": "What do people think about this brand? I've been using it for a few months.",
+            "author": "testuser1",
+            "score": 42,
+            "upvote_ratio": 0.92,
+            "num_comments": 15,
+            "url": "https://www.reddit.com/r/technology/comments/abc123/discussion_about_test_brand/",
+            "permalink": "/r/technology/comments/abc123/discussion_about_test_brand/",
+            "created_utc": 1706800000,
+            "is_self": true
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "author": "commenter1",
+            "body": "I really like this brand, been using it for years.",
+            "score": 25,
+            "depth": 0
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "author": "commenter2",
+            "body": "It's okay but there are better alternatives out there.",
+            "score": 12,
+            "depth": 0
+          }
+        }
+      ]
+    }
+  }
+]

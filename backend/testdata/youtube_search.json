@@ -1,0 +1,30 @@
+{
+  "kind": "youtube#searchListResponse",
+  "pageInfo": {"totalResults": 2, "resultsPerPage": 5},
+  "items": [
+    {
+      "kind": "youtube#searchResult",
+      "id": {"kind": "youtube#video", "videoId": "test_video_001"},
+      "snippet": {
+        "publishedAt": "2025-01-15T10:00:00Z",
+        "channelId": "UCtest_channel_001",
+        "title": "Test Video One",
+        "description": "A test video about the brand",
+        "channelTitle": "Test Channel",
+        "liveBroadcastContent": "none"
+      }
+    },
+    {
+      "kind": "youtube#searchResult",
+      "id": {"kind": "youtube#video", "videoId": "test_video_002"},
+      "snippet": {
+        "publishedAt": "2025-02-20T14:30:00Z",
+        "channelId": "UCtest_channel_002",
+        "title": "Test Video Two",
+        "description": "Another test video",
+        "channelTitle": "Another Channel",
+        "liveBroadcastContent": "none"
+      }
+    }
+  ]
+}

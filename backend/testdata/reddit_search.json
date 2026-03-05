@@ -1,0 +1,42 @@
+{
+  "kind": "Listing",
+  "data": {
+    "after": null,
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "id": "abc123",
+          "subreddit": "technology",
+          "title": "Discussion about test brand",
+          "selftext": "What do people think about this brand?",
+          "author": "testuser1",
+          "score": 42,
+          "upvote_ratio": 0.92,
+          "num_comments": 15,
+          "url": "https://www.reddit.com/r/technology/comments/abc123/discussion_about_test_brand/",
+          "permalink": "/r/technology/comments/abc123/discussion_about_test_brand/",
+          "created_utc": 1706800000,
+          "is_self": true
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "id": "def456",
+          "subreddit": "technology",
+          "title": "Best alternatives to test brand",
+          "selftext": "Looking for alternatives",
+          "author": "testuser2",
+          "score": 28,
+          "upvote_ratio": 0.85,
+          "num_comments": 8,
+          "url": "https://www.reddit.com/r/technology/comments/def456/best_alternatives/",
+          "permalink": "/r/technology/comments/def456/best_alternatives/",
+          "created_utc": 1706700000,
+          "is_self": true
+        }
+      }
+    ]
+  }
+}

@@ -13,6 +13,9 @@ import (
 	"time"
 )
 
+// openaiAPIBase is the base URL for the OpenAI API. Overridable in tests.
+var openaiAPIBase = "https://api.openai.com"
+
 // OpenAIProvider implements LLMProvider for the OpenAI API.
 type OpenAIProvider struct{}
 
@@ -56,7 +59,7 @@ func (p *OpenAIProvider) Call(ctx context.Context, apiKey, model, prompt string,
 		},
 	})
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/responses", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", openaiAPIBase+"/v1/responses", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -104,7 +107,7 @@ func (p *OpenAIProvider) Call(ctx context.Context, apiKey, model, prompt string,
 }
 
 func (p *OpenAIProvider) Stream(ctx context.Context, apiKey string, body []byte, w http.ResponseWriter, flusher http.Flusher) (*StreamResult, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/responses", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", openaiAPIBase+"/v1/responses", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -218,7 +221,7 @@ func (p *OpenAIProvider) VerifyKey(ctx context.Context, apiKey string) (string, 
 		"input": "Reply with just the word 'ok'.",
 	})
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/responses", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", openaiAPIBase+"/v1/responses", bytes.NewReader(body))
 	if err != nil {
 		return "error", fmt.Errorf("create request: %w", err)
 	}

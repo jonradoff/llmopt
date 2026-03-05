@@ -15,6 +15,9 @@ import (
 
 // GrokProvider implements LLMProvider for the xAI Grok API.
 // The xAI API is OpenAI-compatible (chat completions format).
+// grokAPIBase is the base URL for the Grok API. Overridable in tests.
+var grokAPIBase = "https://api.x.ai"
+
 type GrokProvider struct{}
 
 func (p *GrokProvider) ProviderID() string { return "grok" }
@@ -59,7 +62,7 @@ func (p *GrokProvider) Call(ctx context.Context, apiKey, model, prompt string, m
 		},
 	})
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.x.ai/v1/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", grokAPIBase+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -98,7 +101,7 @@ func (p *GrokProvider) Call(ctx context.Context, apiKey, model, prompt string, m
 }
 
 func (p *GrokProvider) Stream(ctx context.Context, apiKey string, body []byte, w http.ResponseWriter, flusher http.Flusher) (*StreamResult, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.x.ai/v1/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", grokAPIBase+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -200,7 +203,7 @@ func (p *GrokProvider) VerifyKey(ctx context.Context, apiKey string) (string, er
 		},
 	})
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.x.ai/v1/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", grokAPIBase+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "error", fmt.Errorf("create request: %w", err)
 	}

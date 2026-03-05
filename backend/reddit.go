@@ -22,6 +22,9 @@ const redditCacheTTL = 7 * 24 * time.Hour // 7 days
 
 var redditClient = &http.Client{Timeout: 15 * time.Second}
 
+// redditBaseURL is the base URL for Reddit (var for test swapping).
+var redditBaseURL = "https://www.reddit.com"
+
 // ── Reddit JSON API fetcher ─────────────────────────────────────────
 
 var browserUAs = []string{
@@ -116,11 +119,11 @@ func redditSearch(subreddit, query string, timeFilter string, limit int) ([]Redd
 
 	var baseURL string
 	if subreddit == "" || subreddit == "all" {
-		baseURL = "https://www.reddit.com/search.json"
+		baseURL = redditBaseURL + "/search.json"
 	} else {
 		// Strip r/ prefix if present
 		subreddit = strings.TrimPrefix(subreddit, "r/")
-		baseURL = fmt.Sprintf("https://www.reddit.com/r/%s/search.json", url.PathEscape(subreddit))
+		baseURL = fmt.Sprintf("%s/r/%s/search.json", redditBaseURL, url.PathEscape(subreddit))
 	}
 
 	u := fmt.Sprintf("%s?q=%s&sort=relevance&t=%s&limit=%d&restrict_sr=1",
@@ -161,7 +164,7 @@ func redditFetchThread(permalink string) (*RedditThread, error) {
 	}
 	// Remove trailing slash, append .json
 	permalink = strings.TrimRight(permalink, "/")
-	u := fmt.Sprintf("https://www.reddit.com%s.json?limit=25&sort=top&depth=2", permalink)
+	u := fmt.Sprintf("%s%s.json?limit=25&sort=top&depth=2", redditBaseURL, permalink)
 
 	body, err := redditHTTPGet(u)
 	if err != nil {

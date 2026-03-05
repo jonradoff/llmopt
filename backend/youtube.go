@@ -29,8 +29,13 @@ import (
 // ytHTTPClient is a shared HTTP client for YouTube Data API v3 calls.
 var ytHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
+// youtubeAPIBase is the base URL for YouTube Data API v3 (var for test swapping).
+var youtubeAPIBase = "https://www.googleapis.com/youtube/v3"
+
+// innertubePlayerURL is the InnerTube player API endpoint (var for test swapping).
+var innertubePlayerURL = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+
 const (
-	youtubeAPIBase = "https://www.googleapis.com/youtube/v3"
 	cacheTTL        = 14 * 24 * time.Hour  // 14 days for API search/metadata results
 	transcriptTTL   = 365 * 24 * time.Hour // ~1 year for transcripts (essentially immutable)
 	assessmentTTL   = 30 * 24 * time.Hour  // 30 days for video assessments (context-dependent)
@@ -375,7 +380,7 @@ func innertubePlayerRequest(videoID string, clientBody []byte, userAgent string,
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	req, err := http.NewRequest("POST",
-		"https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+		innertubePlayerURL,
 		strings.NewReader(string(clientBody)))
 	if err != nil {
 		return nil, err

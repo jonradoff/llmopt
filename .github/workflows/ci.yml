@@ -22,6 +22,10 @@ jobs:
 
       - name: Test with coverage
         working-directory: backend
+        env:
+          # Uses a restricted Atlas user with access ONLY to llmopt_test database.
+          # Never expose production MONGODB_URI to CI.
+          MONGODB_TEST_URI: ${{ secrets.MONGODB_TEST_URI }}
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage to Codecov

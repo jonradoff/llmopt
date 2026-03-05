@@ -13,6 +13,9 @@ import (
 	"time"
 )
 
+// geminiAPIBase is the base URL for the Gemini API. Overridable in tests.
+var geminiAPIBase = "https://generativelanguage.googleapis.com"
+
 // GeminiProvider implements LLMProvider for the Google Gemini API.
 type GeminiProvider struct{}
 
@@ -77,7 +80,7 @@ func (p *GeminiProvider) Call(ctx context.Context, apiKey, model, prompt string,
 		},
 	})
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, apiKey)
+	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", geminiAPIBase, model, apiKey)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
@@ -134,7 +137,7 @@ func (p *GeminiProvider) Stream(ctx context.Context, apiKey string, body []byte,
 	delete(bodyMap, "_model")
 	cleanBody, _ := json.Marshal(bodyMap)
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", model, apiKey)
+	url := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", geminiAPIBase, model, apiKey)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(cleanBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -237,7 +240,7 @@ func (p *GeminiProvider) VerifyKey(ctx context.Context, apiKey string) (string, 
 		},
 	})
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=%s", apiKey)
+	url := fmt.Sprintf("%s/v1beta/models/gemini-2.5-flash:generateContent?key=%s", geminiAPIBase, apiKey)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return "error", fmt.Errorf("create request: %w", err)

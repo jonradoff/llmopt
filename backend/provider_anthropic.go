@@ -13,6 +13,9 @@ import (
 	"time"
 )
 
+// anthropicAPIBase is the base URL for the Anthropic API. Overridable in tests.
+var anthropicAPIBase = "https://api.anthropic.com"
+
 // AnthropicProvider implements LLMProvider for the Anthropic Claude API.
 type AnthropicProvider struct{}
 
@@ -63,7 +66,7 @@ func (p *AnthropicProvider) Call(ctx context.Context, apiKey, model, prompt stri
 	callCtx, callCancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer callCancel()
 
-	httpReq, err := http.NewRequestWithContext(callCtx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(callCtx, "POST", anthropicAPIBase+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -104,7 +107,7 @@ func (p *AnthropicProvider) Call(ctx context.Context, apiKey, model, prompt stri
 }
 
 func (p *AnthropicProvider) Stream(ctx context.Context, apiKey string, body []byte, w http.ResponseWriter, flusher http.Flusher) (*StreamResult, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", anthropicAPIBase+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -252,7 +255,7 @@ func (p *AnthropicProvider) VerifyKey(ctx context.Context, apiKey string) (strin
 		},
 	})
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", anthropicAPIBase+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return "error", fmt.Errorf("create request: %w", err)
 	}

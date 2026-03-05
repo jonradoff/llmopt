@@ -1,0 +1,18 @@
+{
+  "kind": "youtube#channelListResponse",
+  "pageInfo": {"totalResults": 1, "resultsPerPage": 5},
+  "items": [
+    {
+      "kind": "youtube#channel",
+      "id": "UCtest_channel_001",
+      "snippet": {
+        "title": "Test Channel"
+      },
+      "statistics": {
+        "subscriberCount": "50000",
+        "videoCount": "120",
+        "viewCount": "5000000"
+      }
+    }
+  ]
+}

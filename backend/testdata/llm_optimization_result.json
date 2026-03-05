@@ -1,0 +1,31 @@
+{
+  "overall_score": 72,
+  "content_authority": {
+    "score": 78,
+    "evidence": ["Strong technical content", "Regular blog updates"],
+    "improvements": ["Add more case studies"]
+  },
+  "structural_optimization": {
+    "score": 65,
+    "evidence": ["Good URL structure"],
+    "improvements": ["Add FAQ schema markup", "Improve internal linking"]
+  },
+  "source_authority": {
+    "score": 70,
+    "evidence": ["Cited by industry publications"],
+    "improvements": ["Build more backlinks"]
+  },
+  "knowledge_persistence": {
+    "score": 75,
+    "evidence": ["Content updated regularly"],
+    "improvements": ["Add publication dates"]
+  },
+  "competitors": [
+    {"domain": "competitor1.com", "score_estimate": 80, "strengths": "Strong brand recognition"},
+    {"domain": "competitor2.com", "score_estimate": 65, "strengths": "Good technical docs"}
+  ],
+  "recommendations": [
+    {"priority": "high", "action": "Add structured data markup", "expected_impact": "Improved rich snippets", "dimension": "structural_optimization"},
+    {"priority": "medium", "action": "Create comparison pages", "expected_impact": "Better competitive positioning", "dimension": "content_authority"}
+  ]
+}

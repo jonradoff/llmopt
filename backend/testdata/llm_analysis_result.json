@@ -1,0 +1,23 @@
+{
+  "site_summary": "Test Brand is a technology company focused on AI-powered solutions for enterprise customers.",
+  "questions": [
+    {
+      "question": "What is Test Brand?",
+      "relevance": "high",
+      "category": "brand",
+      "page_urls": ["https://testbrand.com/about"],
+      "brand_status": "strong"
+    },
+    {
+      "question": "Test Brand vs competitors",
+      "relevance": "high",
+      "category": "comparison",
+      "page_urls": ["https://testbrand.com/compare"],
+      "brand_status": "moderate"
+    }
+  ],
+  "crawled_pages": [
+    {"url": "https://testbrand.com/", "title": "Test Brand - AI Solutions"},
+    {"url": "https://testbrand.com/about", "title": "About Us"}
+  ]
+}

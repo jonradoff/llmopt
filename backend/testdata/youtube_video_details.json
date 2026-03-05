@@ -1,0 +1,27 @@
+{
+  "kind": "youtube#videoListResponse",
+  "pageInfo": {"totalResults": 1, "resultsPerPage": 1},
+  "items": [
+    {
+      "kind": "youtube#video",
+      "id": "test_video_001",
+      "snippet": {
+        "publishedAt": "2025-01-15T10:00:00Z",
+        "channelId": "UCtest_channel_001",
+        "title": "Test Video One",
+        "description": "A detailed test video about the brand and its products",
+        "channelTitle": "Test Channel",
+        "tags": ["test", "brand", "review"],
+        "categoryId": "22"
+      },
+      "contentDetails": {
+        "duration": "PT10M30S"
+      },
+      "statistics": {
+        "viewCount": "15000",
+        "likeCount": "500",
+        "commentCount": "75"
+      }
+    }
+  ]
+}
