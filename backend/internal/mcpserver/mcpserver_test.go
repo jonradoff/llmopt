@@ -124,7 +124,7 @@ func TestTenantBSON_EmptyContext(t *testing.T) {
 func newTestOAuth(t *testing.T) *OAuthServer {
 	t.Helper()
 	// Use a stub saas.Middleware (nil db, but we don't call DB-dependent methods)
-	s := NewOAuthServer(nil, "test-secret-for-mcp-oauth-1234567890", "https://test.example.com")
+	s := NewOAuthServer(nil, "test-secret-for-mcp-oauth-1234567890", "https://test.example.com", nil)
 	t.Cleanup(func() {
 		// The cleanup goroutine will exit on GC
 	})

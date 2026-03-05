@@ -413,7 +413,7 @@ func main() {
 
 	var oauthSrv *mcpserver.OAuthServer
 	if sm != nil {
-		oauthSrv = mcpserver.NewOAuthServer(sm, mcpJWTSecret, baseURL)
+		oauthSrv = mcpserver.NewOAuthServer(sm, mcpJWTSecret, baseURL, mongoDB.Database)
 	}
 	mcpHandler := mcpserver.New(sm, mongoDB.Database, oauthSrv, baseURL)
 

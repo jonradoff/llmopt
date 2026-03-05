@@ -1,12 +1,14 @@
 package mcpserver
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -14,20 +16,36 @@ import (
 	"sync"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+
 	"llmopt/internal/saas"
 )
 
 // OAuthServer implements a minimal OAuth 2.1 authorization server for MCP clients.
 // It supports Dynamic Client Registration (RFC 7591), Authorization Code with PKCE,
-// and refresh tokens. State is stored in-memory (resets on restart).
+// and refresh tokens. Refresh tokens are persisted to MongoDB when a DB is provided
+// (so they survive server restarts); otherwise they fall back to in-memory storage.
 type OAuthServer struct {
 	mu            sync.RWMutex
 	clients       map[string]*oauthClient
 	authCodes     map[string]*authCode
-	refreshTokens map[string]*refreshToken
+	refreshTokens map[string]*refreshToken // fallback when refreshColl == nil
+	refreshColl   *mongo.Collection
 	jwtSecret     []byte
 	baseURL       string
 	sm            *saas.Middleware
+}
+
+// refreshTokenDoc is the MongoDB document for persisted refresh tokens.
+type refreshTokenDoc struct {
+	Token     string    `bson:"_id"`
+	UserID    string    `bson:"user_id"`
+	TenantID  string    `bson:"tenant_id"`
+	Email     string    `bson:"email"`
+	Role      string    `bson:"role"`
+	ExpiresAt time.Time `bson:"expires_at"`
 }
 
 type oauthClient struct {
@@ -55,7 +73,9 @@ type refreshToken struct {
 }
 
 // NewOAuthServer creates an OAuth server for MCP authentication.
-func NewOAuthServer(sm *saas.Middleware, jwtSecret, baseURL string) *OAuthServer {
+// When db is non-nil, refresh tokens are persisted to MongoDB (collection
+// "mcp_refresh_tokens") so they survive server restarts.
+func NewOAuthServer(sm *saas.Middleware, jwtSecret, baseURL string, db *mongo.Database) *OAuthServer {
 	secret := sha256.Sum256([]byte(jwtSecret))
 	s := &OAuthServer{
 		clients:       make(map[string]*oauthClient),
@@ -65,27 +85,112 @@ func NewOAuthServer(sm *saas.Middleware, jwtSecret, baseURL string) *OAuthServer
 		baseURL:       baseURL,
 		sm:            sm,
 	}
+	if db != nil {
+		s.refreshColl = db.Collection("mcp_refresh_tokens")
+		go s.ensureTTLIndex()
+	}
 	go s.cleanup()
 	return s
+}
+
+// ensureTTLIndex creates a TTL index on expires_at so MongoDB auto-expires old tokens.
+func (s *OAuthServer) ensureTTLIndex() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := s.refreshColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "expires_at", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(0),
+	})
+	if err != nil {
+		log.Printf("MCP: failed to create TTL index on mcp_refresh_tokens: %v", err)
+	}
+}
+
+// storeRefreshToken persists a refresh token to MongoDB or in-memory.
+func (s *OAuthServer) storeRefreshToken(token string, info *saas.AuthInfo, expiresAt time.Time) {
+	if s.refreshColl != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		doc := refreshTokenDoc{
+			Token:     token,
+			UserID:    info.UserID,
+			TenantID:  info.TenantID,
+			Email:     info.Email,
+			Role:      info.Role,
+			ExpiresAt: expiresAt,
+		}
+		if _, err := s.refreshColl.InsertOne(ctx, doc); err != nil {
+			log.Printf("MCP: failed to store refresh token: %v", err)
+		}
+		return
+	}
+	// In-memory fallback (used when no DB, e.g. tests).
+	s.mu.Lock()
+	s.refreshTokens[token] = &refreshToken{
+		Token:     token,
+		AuthInfo:  info,
+		ExpiresAt: expiresAt,
+	}
+	s.mu.Unlock()
+}
+
+// lookupRefreshToken retrieves a refresh token from MongoDB or in-memory.
+func (s *OAuthServer) lookupRefreshToken(token string) (*refreshToken, bool) {
+	if s.refreshColl != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var doc refreshTokenDoc
+		if err := s.refreshColl.FindOne(ctx, bson.M{"_id": token}).Decode(&doc); err != nil {
+			return nil, false
+		}
+		if time.Now().After(doc.ExpiresAt) {
+			return nil, false
+		}
+		return &refreshToken{
+			Token: doc.Token,
+			AuthInfo: &saas.AuthInfo{
+				UserID:   doc.UserID,
+				TenantID: doc.TenantID,
+				Email:    doc.Email,
+				Role:     doc.Role,
+				Method:   "mcp_refresh",
+			},
+			ExpiresAt: doc.ExpiresAt,
+		}, true
+	}
+	// In-memory fallback.
+	s.mu.RLock()
+	rt, ok := s.refreshTokens[token]
+	s.mu.RUnlock()
+	return rt, ok
 }
 
 // cleanup periodically removes expired auth codes and refresh tokens.
 func (s *OAuthServer) cleanup() {
 	for {
 		time.Sleep(5 * time.Minute)
-		s.mu.Lock()
 		now := time.Now()
+		s.mu.Lock()
 		for k, v := range s.authCodes {
 			if now.After(v.ExpiresAt) {
 				delete(s.authCodes, k)
 			}
 		}
-		for k, v := range s.refreshTokens {
-			if now.After(v.ExpiresAt) {
-				delete(s.refreshTokens, k)
+		// Clean in-memory refresh tokens when not using MongoDB.
+		if s.refreshColl == nil {
+			for k, v := range s.refreshTokens {
+				if now.After(v.ExpiresAt) {
+					delete(s.refreshTokens, k)
+				}
 			}
 		}
 		s.mu.Unlock()
+		// MongoDB TTL index handles expiry automatically, but we also delete proactively.
+		if s.refreshColl != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, _ = s.refreshColl.DeleteMany(ctx, bson.M{"expires_at": bson.M{"$lt": now}})
+			cancel()
+		}
 	}
 }
 
@@ -322,14 +427,7 @@ func (s *OAuthServer) handleAuthCodeExchange(w http.ResponseWriter, r *http.Requ
 	// Issue access token (JWT) and refresh token
 	accessToken := s.signJWT(ac.AuthInfo, time.Hour)
 	refreshTok := randomString(64)
-
-	s.mu.Lock()
-	s.refreshTokens[refreshTok] = &refreshToken{
-		Token:     refreshTok,
-		AuthInfo:  ac.AuthInfo,
-		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
-	}
-	s.mu.Unlock()
+	s.storeRefreshToken(refreshTok, ac.AuthInfo, time.Now().Add(30*24*time.Hour))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -349,9 +447,7 @@ func (s *OAuthServer) handleRefreshTokenExchange(w http.ResponseWriter, r *http.
 		return
 	}
 
-	s.mu.RLock()
-	rt, ok := s.refreshTokens[token]
-	s.mu.RUnlock()
+	rt, ok := s.lookupRefreshToken(token)
 
 	if !ok || time.Now().After(rt.ExpiresAt) {
 		http.Error(w, `{"error":"invalid_grant","error_description":"refresh token expired or invalid"}`, http.StatusBadRequest)
