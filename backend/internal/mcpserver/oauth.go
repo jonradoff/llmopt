@@ -34,7 +34,8 @@ type OAuthServer struct {
 	authCodes     map[string]*authCode
 	refreshTokens map[string]*refreshToken // fallback when refreshColl == nil
 	refreshColl   *mongo.Collection
-	db            *mongo.Database // for lok_ user access key validation
+	clientsColl   *mongo.Collection // persists dynamic client registrations across restarts
+	db            *mongo.Database   // for lok_ user access key validation
 	jwtSecret     []byte
 	baseURL       string
 	sm            *saas.Middleware
@@ -90,7 +91,9 @@ func NewOAuthServer(sm *saas.Middleware, jwtSecret, baseURL string, db *mongo.Da
 	if db != nil {
 		s.db = db
 		s.refreshColl = db.Collection("mcp_refresh_tokens")
+		s.clientsColl = db.Collection("mcp_oauth_clients")
 		go s.ensureTTLIndex()
+		go s.loadClientsFromDB()
 	}
 	go s.cleanup()
 	return s
@@ -107,6 +110,88 @@ func (s *OAuthServer) ensureTTLIndex() {
 	if err != nil {
 		log.Printf("MCP: failed to create TTL index on mcp_refresh_tokens: %v", err)
 	}
+}
+
+// loadClientsFromDB pre-populates the in-memory client map from MongoDB on startup.
+func (s *OAuthServer) loadClientsFromDB() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cursor, err := s.clientsColl.Find(ctx, bson.M{})
+	if err != nil {
+		log.Printf("MCP: failed to load clients from DB: %v", err)
+		return
+	}
+	defer cursor.Close(ctx)
+	var loaded int
+	for cursor.Next(ctx) {
+		var c oauthClient
+		if err := cursor.Decode(&c); err == nil {
+			s.mu.Lock()
+			s.clients[c.ClientID] = &c
+			s.mu.Unlock()
+			loaded++
+		}
+	}
+	log.Printf("MCP: loaded %d OAuth clients from DB", loaded)
+}
+
+// persistClient saves a newly registered client to MongoDB.
+func (s *OAuthServer) persistClient(client *oauthClient) {
+	if s.clientsColl == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// Upsert so re-registration of the same clientID doesn't error.
+	_, err := s.clientsColl.ReplaceOne(ctx,
+		bson.M{"_id": client.ClientID},
+		bson.M{
+			"_id":          client.ClientID,
+			"client_name":  client.ClientName,
+			"redirect_uris": client.RedirectURIs,
+			"created_at":   client.CreatedAt,
+		},
+		options.Replace().SetUpsert(true),
+	)
+	if err != nil {
+		log.Printf("MCP: failed to persist OAuth client %s: %v", client.ClientID, err)
+	}
+}
+
+// lookupClient returns a client by ID, checking memory first then MongoDB.
+func (s *OAuthServer) lookupClient(clientID string) (*oauthClient, bool) {
+	s.mu.RLock()
+	c, ok := s.clients[clientID]
+	s.mu.RUnlock()
+	if ok {
+		return c, true
+	}
+	// Not in memory — try DB (handles post-restart case).
+	if s.clientsColl == nil {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var doc struct {
+		ID           string   `bson:"_id"`
+		ClientName   string   `bson:"client_name"`
+		RedirectURIs []string `bson:"redirect_uris"`
+		CreatedAt    time.Time `bson:"created_at"`
+	}
+	if err := s.clientsColl.FindOne(ctx, bson.M{"_id": clientID}).Decode(&doc); err != nil {
+		return nil, false
+	}
+	c = &oauthClient{
+		ClientID:     doc.ID,
+		ClientName:   doc.ClientName,
+		RedirectURIs: doc.RedirectURIs,
+		CreatedAt:    doc.CreatedAt,
+	}
+	// Cache it back in memory.
+	s.mu.Lock()
+	s.clients[clientID] = c
+	s.mu.Unlock()
+	return c, true
 }
 
 // storeRefreshToken persists a refresh token to MongoDB or in-memory.
@@ -254,6 +339,7 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.clients[clientID] = client
 	s.mu.Unlock()
+	go s.persistClient(client)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -280,9 +366,7 @@ func (s *OAuthServer) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
-	client, ok := s.clients[clientID]
-	s.mu.RUnlock()
+	client, ok := s.lookupClient(clientID)
 	if !ok {
 		http.Error(w, `{"error":"invalid_client"}`, http.StatusBadRequest)
 		return
@@ -331,10 +415,7 @@ func (s *OAuthServer) HandleAuthorizeSubmit(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	s.mu.RLock()
-	_, ok := s.clients[clientID]
-	s.mu.RUnlock()
-	if !ok {
+	if _, ok := s.lookupClient(clientID); !ok {
 		http.Error(w, `{"error":"invalid_client"}`, http.StatusBadRequest)
 		return
 	}
