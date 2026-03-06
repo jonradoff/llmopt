@@ -1,10 +1,13 @@
 # Smithery configuration for LLM Optimizer MCP Server
-# https://smithery.ai/docs/build/project-config/smithery-yaml
+# https://smithery.ai/docs/build/external
 #
-# This server is remotely hosted at https://llmopt.metavert.io/mcp
-# It implements OAuth 2.1 with PKCE (RFC 7591) for authentication.
-# Users connect by visiting https://llmopt.metavert.io and creating an account,
-# then generating an API key at https://llmopt.metavert.io/last/api
+# Published as: jonradoff/llmopt
+# Listing: https://smithery.ai/servers/jonradoff/llmopt
+#
+# To publish manually:
+#   smithery auth login
+#   smithery mcp publish "https://llmopt.metavert.io/mcp" -n jonradoff/llmopt \
+#     --config-schema '{"type":"object","properties":{"apiKey":{"type":"string"}},"required":[]}'
 
 startCommand:
   type: http
@@ -16,10 +19,4 @@ startCommand:
         description: >
           Your LLM Optimizer API key (starts with lsk_).
           Create one at https://llmopt.metavert.io/last/api after signing up.
-        secret: true
     required: []
-  externalUrl: "https://llmopt.metavert.io/mcp"
-
-build:
-  # No build step — server is pre-deployed at llmopt.metavert.io
-  hosted: true

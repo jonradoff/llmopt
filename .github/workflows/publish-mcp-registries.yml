@@ -1,0 +1,58 @@
+name: Publish to MCP Registries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:  # allow manual trigger
+
+jobs:
+  publish-mcp-registry:
+    name: Official MCP Registry (registry.modelcontextprotocol.io)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          sudo mv mcp-publisher /usr/local/bin/
+          mcp-publisher --version
+
+      - name: Authenticate (HTTP domain verification)
+        run: |
+          mcp-publisher login http \
+            --domain metavert.io \
+            --private-key "${{ secrets.MCP_REGISTRY_PRIVATE_KEY }}"
+
+      - name: Validate server.json
+        run: mcp-publisher validate server.json
+
+      - name: Publish
+        run: mcp-publisher publish server.json
+
+  publish-smithery:
+    name: Smithery (smithery.ai)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Smithery CLI
+        run: npm install -g @smithery/cli@latest
+
+      - name: Authenticate
+        run: |
+          echo "Smithery requires interactive auth."
+          echo "Run locally: smithery auth login"
+          echo "Then re-run this workflow, or add SMITHERY_API_KEY to GitHub secrets."
+        # TODO: once SMITHERY_API_KEY is added to secrets, replace above with:
+        # env:
+        #   SMITHERY_API_KEY: ${{ secrets.SMITHERY_API_KEY }}
+        # run: smithery auth login --api-key "$SMITHERY_API_KEY" || true
+
+      - name: Publish to Smithery
+        run: |
+          smithery mcp publish "https://llmopt.metavert.io/mcp" \
+            -n jonradoff/llmopt \
+            --config-schema '{"type":"object","properties":{"apiKey":{"type":"string","description":"LLM Optimizer API key (lsk_...). Get one at https://llmopt.metavert.io/last/api"}},"required":[]}'
+        continue-on-error: true  # Smithery failures should not block the release
