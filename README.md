@@ -255,7 +255,7 @@ LLM Optimizer includes a [Model Context Protocol (MCP)](https://modelcontextprot
 
 **Server URL:** `https://llmopt.metavert.io/mcp`
 
-Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io) as `io.metavert/llmopt` and on [Smithery](https://smithery.ai/servers/jonradoff/llmopt).
+Listed on [Smithery](https://smithery.ai/servers/jonradoff/llmopt) and [awesome-mcp-servers](https://github.com/punkpeye/awesome-mcp-servers) (Glama). Official MCP Registry submission in progress.
 
 ### Privacy
 
@@ -325,6 +325,8 @@ On first use, Claude Code will open a browser to authorize. Enter your `lok_` ac
 
 #### Claude Desktop
 
+**Option A — OAuth (easiest, no key to manage):**
+
 ```bash
 npm install -g mcp-remote
 ```
@@ -341,6 +343,28 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   }
 }
 ```
+
+On first launch, a browser window will open to authorize. Sign in at [llmopt.metavert.io](https://llmopt.metavert.io) and enter your `lok_` access key.
+
+**Option B — Direct key (no browser auth, simpler for power users):**
+
+```json
+{
+  "mcpServers": {
+    "llmopt-mcp": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://llmopt.metavert.io/mcp",
+        "--header",
+        "Authorization: Bearer lok_your_access_key_here"
+      ]
+    }
+  }
+}
+```
+
+Replace `lok_your_access_key_here` with a key from **Settings → Access Keys**.
 
 #### Direct HTTP
 
