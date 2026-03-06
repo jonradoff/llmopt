@@ -1,52 +1,26 @@
-# Stage 1: Build Go binary
-FROM golang:1.24-alpine AS backend-builder
-WORKDIR /app
-COPY backend/go.mod backend/go.sum ./
-RUN go mod download
-COPY backend/ .
-RUN CGO_ENABLED=0 GOOS=linux go build -o llmopt .
+# LLM Optimizer MCP Server - Docker proxy image
+#
+# This image runs mcp-remote to proxy stdio MCP connections to the
+# hosted LLM Optimizer MCP endpoint at https://llmopt.metavert.io/mcp
+#
+# Usage (with API key):
+#   docker run -i --rm -e API_KEY=lok_xxx ghcr.io/jonradoff/llmopt
+#
+# Usage (OAuth flow):
+#   docker run -i --rm ghcr.io/jonradoff/llmopt
+#
+# MCP client config (Claude Desktop, etc.):
+#   {
+#     "command": "docker",
+#     "args": ["run", "-i", "--rm", "-e", "API_KEY=lok_xxx", "ghcr.io/jonradoff/llmopt"]
+#   }
 
-# Stage 2: Build frontend
-FROM node:22-alpine AS frontend-builder
-WORKDIR /build
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
-COPY frontend/ .
-RUN npm run build
+FROM node:22-alpine
+RUN npm install -g mcp-remote
 
-# Stage 3: Build SaaS frontend (LastSaaS + llmopt overlay)
-FROM node:22-alpine AS saas-frontend-builder
-WORKDIR /build
-COPY lastsaas/frontend/ ./
-COPY frontend-overlay/ ./
-RUN npm install --legacy-peer-deps 2>/dev/null || npm install
-RUN npm install react-is --legacy-peer-deps 2>/dev/null || true
-RUN npm run build
+ENV API_KEY=""
 
-# Stage 4: Production runtime (Debian for Cloudflare WARP support)
-FROM debian:bookworm-slim
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl gnupg dbus \
-    && curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
-       | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ bookworm main" \
-       > /etc/apt/sources.list.d/cloudflare-client.list \
-    && apt-get update && apt-get install -y --no-install-recommends cloudflare-warp \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-COPY --from=backend-builder /app/llmopt .
-COPY --from=frontend-builder /build/dist ./static
-COPY --from=saas-frontend-builder /build/dist ./saas-frontend
-COPY start.sh .
-RUN chmod +x start.sh
-
-ENV STATIC_DIR=/app/static
-ENV LLMOPT_FRONTEND_DIR=/app/saas-frontend
-ENV PORT=8080
-
-EXPOSE 8080
-
-CMD ["./start.sh"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

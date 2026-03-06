@@ -50,13 +50,17 @@ func authMiddleware(sm *saas.Middleware, oauth *OAuthServer, baseURL string, nex
 		}
 
 		auth := r.Header.Get("Authorization")
-		if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
+		// Accept "Bearer <token>" or bare "lok_..." (Smithery injects the key directly)
+		var token string
+		if strings.HasPrefix(auth, "Bearer ") {
+			token = strings.TrimPrefix(auth, "Bearer ")
+		} else if strings.HasPrefix(auth, "lok_") {
+			token = auth
+		} else {
 			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+baseURL+`/.well-known/oauth-protected-resource"`)
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-
-		token := strings.TrimPrefix(auth, "Bearer ")
 		tenantIDHint := r.Header.Get("X-Tenant-ID")
 
 		var info *saas.AuthInfo

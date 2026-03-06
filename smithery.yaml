@@ -6,6 +6,7 @@
 #
 startCommand:
   type: http
+  url: https://llmopt.metavert.io/mcp
   configSchema:
     type: object
     properties:
@@ -14,4 +15,7 @@ startCommand:
         description: >
           Your LLM Optimizer access key (starts with lok_).
           Create one at https://llmopt.metavert.io under Settings → Access Keys after signing up.
+        x-to:
+          header: Authorization
+          prefix: "Bearer "
     required: []
