@@ -4,11 +4,6 @@
 # Published as: jonradoff/llmopt
 # Listing: https://smithery.ai/servers/jonradoff/llmopt
 #
-# To publish manually:
-#   smithery auth login
-#   smithery mcp publish "https://llmopt.metavert.io/mcp" -n jonradoff/llmopt \
-#     --config-schema '{"type":"object","properties":{"apiKey":{"type":"string"}},"required":[]}'
-
 startCommand:
   type: http
   configSchema:
@@ -17,6 +12,6 @@ startCommand:
       apiKey:
         type: string
         description: >
-          Your LLM Optimizer API key (starts with lsk_).
-          Create one at https://llmopt.metavert.io/last/api after signing up.
+          Your LLM Optimizer access key (starts with lok_).
+          Create one at https://llmopt.metavert.io under Settings → Access Keys after signing up.
     required: []

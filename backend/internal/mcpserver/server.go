@@ -63,8 +63,11 @@ func authMiddleware(sm *saas.Middleware, oauth *OAuthServer, baseURL string, nex
 		var err error
 
 		if strings.HasPrefix(token, "lsk_") {
-			// Direct API key
+			// Direct LastSaaS API key
 			info, err = sm.ValidateToken(r.Context(), token, tenantIDHint)
+		} else if strings.HasPrefix(token, "lok_") && oauth != nil {
+			// Direct user access key (lok_ prefix) — no OAuth flow required
+			info, err = oauth.validateLokKey(r.Context(), token)
 		} else if oauth != nil {
 			// Try as MCP-issued JWT first
 			info, err = oauth.ValidateAccessToken(token)
