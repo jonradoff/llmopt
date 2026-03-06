@@ -2,6 +2,17 @@ import { useState, useEffect, useCallback } from 'react';
 import { Key, Plus, Trash2, Copy, Check, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
 
+// Authenticated fetch — injects the JWT + tenant headers that the SaaS middleware requires.
+function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const token = localStorage.getItem('lastsaas_access_token');
+  const tenantId = localStorage.getItem('lastsaas_active_tenant');
+  const headers = new Headers(options.headers);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  if (tenantId) headers.set('X-Tenant-ID', tenantId);
+  headers.set('Content-Type', 'application/json');
+  return fetch(url, { ...options, headers });
+}
+
 interface AccessKey {
   id: string;
   name: string;
@@ -28,7 +39,7 @@ export default function AccessKeysTab() {
   const fetchKeys = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/user/access-keys', { credentials: 'include' });
+      const res = await authFetch('/api/user/access-keys');
       if (res.ok) {
         const data = await res.json();
         setKeys(data.keys ?? []);
@@ -46,10 +57,8 @@ export default function AccessKeysTab() {
     if (!newKeyName.trim()) return;
     setCreating(true);
     try {
-      const res = await fetch('/api/user/access-keys', {
+      const res = await authFetch('/api/user/access-keys', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify({ name: newKeyName.trim() }),
       });
       if (!res.ok) {
@@ -72,11 +81,8 @@ export default function AccessKeysTab() {
   const handleDelete = async (id: string) => {
     setDeletingId(id);
     try {
-      const res = await fetch(`/api/user/access-keys/${id}`, {
-        method: 'DELETE',
-        credentials: 'include',
-      });
-      if (res.ok) {
+      const res = await authFetch(`/api/user/access-keys/${id}`, { method: 'DELETE' });
+      if (res.ok || res.status === 204) {
         toast.success('Access key revoked');
         setKeys(prev => prev.filter(k => k.id !== id));
       } else {
