@@ -261,6 +261,11 @@ func main() {
 	mux.HandleFunc("POST /api/domains/{domain}/report/pdf", withAuth(withRL(ratelimit.PDFGenerateLimit, handleGeneratePDF(mongoDB))))
 	mux.HandleFunc("GET /api/domains/{domain}/report/pdf/{id}", withAuth(handleServePDF(mongoDB)))
 
+	// User Access Keys (lok_ keys for MCP server access)
+	mux.HandleFunc("GET /api/user/access-keys", withAuth(handleListUserAccessKeys(mongoDB)))
+	mux.HandleFunc("POST /api/user/access-keys", withAuth(handleCreateUserAccessKey(mongoDB)))
+	mux.HandleFunc("DELETE /api/user/access-keys/{id}", withAuth(handleDeleteUserAccessKey(mongoDB)))
+
 	// API Key Management
 	mux.HandleFunc("GET /api/settings/api-keys", withAuth(handleListAPIKeys(mongoDB)))
 	mux.HandleFunc("PUT /api/settings/api-keys/{provider}", withAuth(handleSetAPIKey(mongoDB, encryptionKey)))
@@ -393,6 +398,8 @@ func main() {
 	mux.HandleFunc("OPTIONS /api/test/{domain}/competitors", handleOptions)
 	mux.HandleFunc("OPTIONS /api/test/{domain}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/test/generate-queries", handleOptions)
+	mux.HandleFunc("OPTIONS /api/user/access-keys", handleOptions)
+	mux.HandleFunc("OPTIONS /api/user/access-keys/{id}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/settings/api-keys", handleOptions)
 	mux.HandleFunc("OPTIONS /api/settings/api-keys/{provider}", handleOptions)
 	mux.HandleFunc("OPTIONS /api/settings/api-keys/{provider}/verify", handleOptions)

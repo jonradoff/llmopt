@@ -840,3 +840,18 @@ type LLMTest struct {
 	CompetitorOf      string               `json:"competitor_of,omitempty" bson:"competitorOf,omitempty"`
 	GeneratedAt       time.Time            `json:"generated_at" bson:"generatedAt"`
 }
+
+// UserAccessKey is a per-user API key for accessing llmopt's MCP server.
+// Keys use the "lok_" prefix and are stored as SHA-256 hashes — the raw key
+// is returned only once at creation time.
+type UserAccessKey struct {
+	ID         primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+	UserID     string             `json:"user_id" bson:"userId"`
+	TenantID   string             `json:"tenant_id" bson:"tenantId"`
+	Name       string             `json:"name" bson:"name"`
+	KeyHash    string             `json:"-" bson:"keyHash"`   // SHA-256 hex, never exposed
+	KeyPreview string             `json:"key_preview" bson:"keyPreview"` // e.g. "lok_...abc123"
+	CreatedAt  time.Time          `json:"created_at" bson:"createdAt"`
+	LastUsedAt *time.Time         `json:"last_used_at,omitempty" bson:"lastUsedAt,omitempty"`
+	IsActive   bool               `json:"is_active" bson:"isActive"`
+}

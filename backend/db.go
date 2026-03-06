@@ -231,6 +231,16 @@ func (m *MongoDB) ensureIndexes() {
 	if err != nil {
 		log.Printf("Warning: failed to create indexes on failed_analyses: %v", err)
 	}
+
+	accessKeyIdx := []mongo.IndexModel{
+		{Keys: bson.D{{Key: "keyHash", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "userId", Value: 1}, {Key: "isActive", Value: 1}}},
+		{Keys: bson.D{{Key: "tenantId", Value: 1}}},
+	}
+	_, err = m.UserAccessKeys().Indexes().CreateMany(ctx, accessKeyIdx)
+	if err != nil {
+		log.Printf("Warning: failed to create indexes on user_access_keys: %v", err)
+	}
 }
 
 // migrateIndexes drops old indexes that conflict with current index definitions.
@@ -330,6 +340,10 @@ func (m *MongoDB) LLMTests() *mongo.Collection {
 
 func (m *MongoDB) TenantSettings() *mongo.Collection {
 	return m.Database.Collection("tenant_settings")
+}
+
+func (m *MongoDB) UserAccessKeys() *mongo.Collection {
+	return m.Database.Collection("user_access_keys")
 }
 
 func (m *MongoDB) FailedAnalyses() *mongo.Collection {

@@ -10,6 +10,9 @@ before building. They replace or add to the base LastSaaS UI.
 | `src/App.tsx` | Routes: auth at root (incl. MFA, magic link), app pages under `/last/`, dashboard redirects to `/` |
 | `src/components/Layout.tsx` | Simplified sidebar: Back to App, Team, Plan, Settings |
 | `src/pages/app/DashboardPage.tsx` | Redirects to `/` (main llmopt app) |
+| `src/pages/app/SettingsPage.tsx` | Adds "Access Keys" tab for `lok_` MCP access key management |
+| `src/pages/app/settings/AccessKeysTab.tsx` | New: create/list/revoke `lok_` MCP access keys |
+| `src/pages/app/settings/ProfileTab.tsx` | Custom profile tab with llmopt-specific display name handling |
 
 ## Notes
 

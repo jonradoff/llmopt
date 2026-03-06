@@ -462,6 +462,29 @@ func (m *Middleware) resolveAuthInfoTenant(ctx context.Context, info *AuthInfo, 
 	return nil
 }
 
+// ResolveAuthInfo builds an AuthInfo from a known userID and tenantID by loading
+// fresh data from the database. Used to validate third-party access keys (e.g. lok_)
+// that store userID/tenantID but not the full auth state.
+func (m *Middleware) ResolveAuthInfo(ctx context.Context, userIDStr, tenantIDStr, method string) (*AuthInfo, error) {
+	userOID, err := primitive.ObjectIDFromHex(userIDStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid user ID")
+	}
+	var user User
+	if err := m.users.FindOne(ctx, bson.M{"_id": userOID, "isActive": true}).Decode(&user); err != nil {
+		return nil, fmt.Errorf("user not found or inactive")
+	}
+	info := &AuthInfo{
+		UserID: userIDStr,
+		Email:  user.Email,
+		Method: method,
+	}
+	if err := m.resolveAuthInfoTenant(ctx, info, tenantIDStr); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
 // SetAuthContext populates the request context with auth values from AuthInfo.
 func SetAuthContext(ctx context.Context, info *AuthInfo) context.Context {
 	ctx = context.WithValue(ctx, ctxUserID, info.UserID)

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -33,6 +34,7 @@ type OAuthServer struct {
 	authCodes     map[string]*authCode
 	refreshTokens map[string]*refreshToken // fallback when refreshColl == nil
 	refreshColl   *mongo.Collection
+	db            *mongo.Database // for lok_ user access key validation
 	jwtSecret     []byte
 	baseURL       string
 	sm            *saas.Middleware
@@ -86,6 +88,7 @@ func NewOAuthServer(sm *saas.Middleware, jwtSecret, baseURL string, db *mongo.Da
 		sm:            sm,
 	}
 	if db != nil {
+		s.db = db
 		s.refreshColl = db.Collection("mcp_refresh_tokens")
 		go s.ensureTTLIndex()
 	}
@@ -336,8 +339,14 @@ func (s *OAuthServer) HandleAuthorizeSubmit(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Validate the API key
-	info, err := s.sm.ValidateToken(r.Context(), apiKey, "")
+	// Validate the API key — supports both lsk_ (LastSaaS) and lok_ (llmopt user access keys).
+	var info *saas.AuthInfo
+	var err error
+	if strings.HasPrefix(apiKey, "lok_") {
+		info, err = s.validateLokKey(r.Context(), apiKey)
+	} else {
+		info, err = s.sm.ValidateToken(r.Context(), apiKey, "")
+	}
 	if err != nil {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, errorPage, "Invalid API key. Please check your key and try again.")
@@ -464,6 +473,42 @@ func (s *OAuthServer) handleRefreshTokenExchange(w http.ResponseWriter, r *http.
 		"expires_in":   3600,
 		"scope":        "mcp:read mcp:write",
 	})
+}
+
+// userAccessKeyDoc is the minimal shape we need from the user_access_keys collection.
+type userAccessKeyDoc struct {
+	UserID   string `bson:"userId"`
+	TenantID string `bson:"tenantId"`
+}
+
+// validateLokKey validates a lok_ user access key against the user_access_keys collection
+// and returns a fresh AuthInfo by resolving the user and tenant from the database.
+func (s *OAuthServer) validateLokKey(ctx context.Context, rawKey string) (*saas.AuthInfo, error) {
+	if s.db == nil {
+		return nil, fmt.Errorf("database not available")
+	}
+	sum := sha256.Sum256([]byte(rawKey))
+	hash := hex.EncodeToString(sum[:])
+
+	coll := s.db.Collection("user_access_keys")
+	var doc userAccessKeyDoc
+	if err := coll.FindOne(ctx, bson.M{"keyHash": hash, "isActive": true}).Decode(&doc); err != nil {
+		return nil, fmt.Errorf("invalid access key")
+	}
+
+	info, err := s.sm.ResolveAuthInfo(ctx, doc.UserID, doc.TenantID, "lok_key")
+	if err != nil {
+		return nil, err
+	}
+
+	// Update lastUsedAt asynchronously
+	go func() {
+		bg, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = coll.UpdateOne(bg, bson.M{"keyHash": hash}, bson.M{"$set": bson.M{"lastUsedAt": time.Now()}})
+	}()
+
+	return info, nil
 }
 
 // signJWT creates an HMAC-SHA256 signed JWT with the auth info.
