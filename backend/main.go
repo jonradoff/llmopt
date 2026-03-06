@@ -408,7 +408,7 @@ func main() {
 	}
 	baseURL := os.Getenv("BASE_URL")
 	if baseURL == "" {
-		baseURL = "https://llmopt.fly.dev"
+		baseURL = "https://llmopt.metavert.io"
 	}
 
 	var oauthSrv *mcpserver.OAuthServer

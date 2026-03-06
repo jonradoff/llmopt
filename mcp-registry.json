@@ -1,0 +1,53 @@
+{
+  "name": "LLM Optimizer",
+  "id": "io.metavert.llmopt",
+  "description": "Query your LLM Optimizer brand intelligence data: domains, AI visibility scores, optimization recommendations, YouTube video analysis, Reddit presence, search rankings, and todos.",
+  "version": "1.0.0",
+  "homepage": "https://llmopt.metavert.io",
+  "repository": "https://github.com/jonradoff/llmopt",
+  "license": "MIT",
+  "keywords": ["llm", "seo", "ai-visibility", "brand-intelligence", "optimization"],
+  "servers": [
+    {
+      "type": "http",
+      "url": "https://llmopt.metavert.io/mcp",
+      "transport": "streamable-http"
+    }
+  ],
+  "authentication": {
+    "type": "oauth2",
+    "authorization_url": "https://llmopt.metavert.io/oauth/authorize",
+    "token_url": "https://llmopt.metavert.io/oauth/token",
+    "registration_url": "https://llmopt.metavert.io/oauth/register",
+    "scopes": ["mcp:read", "mcp:write"],
+    "pkce_required": true,
+    "discovery": "https://llmopt.metavert.io/.well-known/oauth-authorization-server"
+  },
+  "tools": [
+    {
+      "name": "llmopt_list_domains",
+      "description": "List all domains tracked in LLM Optimizer for the authenticated account.",
+      "read_only": true
+    },
+    {
+      "name": "llmopt_get_report",
+      "description": "Get a specific report for a domain: analysis, optimizations, video, reddit, search, summary, tests, or brand.",
+      "read_only": true
+    },
+    {
+      "name": "llmopt_get_visibility_score",
+      "description": "Get the AI visibility score (0-100) and component breakdown for a domain.",
+      "read_only": true
+    },
+    {
+      "name": "llmopt_list_todos",
+      "description": "List optimization todos for a domain with optional status/filter.",
+      "read_only": true
+    },
+    {
+      "name": "llmopt_update_todo",
+      "description": "Update the status of an optimization todo (admin/owner only).",
+      "read_only": false
+    }
+  ]
+}
