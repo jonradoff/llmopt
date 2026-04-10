@@ -336,6 +336,14 @@ func handleHomePage(mongoDB *MongoDB, staticDir string) http.HandlerFunc {
 			return
 		}
 
+		// Browsers get the SPA (which handles auth client-side via localStorage JWT).
+		// Crawlers and fetch tools get the server-rendered marketing page.
+		if !isCrawler(r.UserAgent()) {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
