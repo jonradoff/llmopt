@@ -185,7 +185,8 @@ footer .inner{max-width:56rem;margin:0 auto;padding:0 1rem;display:flex;flex-dir
   <p>Across the research, a consistent pattern emerges: AI search engines overwhelmingly favor earned media over brand-owned content, citing third-party sources <a href="#geo-toronto">72-92% of the time</a>. Content that includes quotations from authoritative sources gains <a href="#geo-princeton">+41% visibility</a> &#8212; the single most effective optimization technique identified. Meanwhile, YouTube has rapidly become the dominant social citation source for LLMs, with its <a href="#youtube-citations">share doubling to 39%</a> between August and December 2024. Critically, <a href="#livecc">video LLMs process content through transcripts</a>, not visual analysis &#8212; a 7B model trained on YouTube transcripts outperformed 72B models, proving that transcript quality matters far more than production value.</p>
   <p>Reddit has emerged as the <a href="#youtube-citations">#2 social citation source for LLMs</a>, with unique authority dynamics. Reddit was foundational in LLM training through datasets like <a href="#reddit-webtext">WebText</a> and the <a href="#reddit-common-crawl">Common Crawl</a>, and continues through <a href="#reddit-data-deals">$60M (Google) and $70M (OpenAI) annual licensing deals</a>. Unlike YouTube's channel-centric authority, Reddit's influence comes from <a href="#reddit-community-consensus">multi-user validation</a> &#8212; upvoted comment consensus, especially in "best X for Y" recommendation threads, creates credibility signals that LLMs weight heavily. The <a href="#geo-toronto">Toronto GEO paper</a> classifies Reddit as "Social" &#8212; a category AI search engines suppress in direct citations &#8212; yet Reddit's pervasive presence in training data means it heavily shapes baseline model knowledge even when not explicitly cited.</p>
   <p>A critical "two-world" split has emerged between Google AI Overviews and standalone LLMs. <a href="#ahrefs-aio-citations">76% of AI Overview citations</a> pull from top-10 organic pages &#8212; making traditional search rankings the primary signal for AIO inclusion. But for standalone LLMs like ChatGPT, <a href="#ahrefs-ai-search-overlap">only 12% of cited URLs rank in Google's top 10</a>. The <a href="#ahrefs-75k-brands">strongest predictor of AI citation across platforms is YouTube mentions (0.737 correlation)</a>, followed by web mentions (0.664) &#8212; not backlinks. Meanwhile, content freshness has become a significant signal: AI assistants cite content that is <a href="#ahrefs-freshness">25.7% newer</a> than traditional search results, and <a href="#seer-recency">65% of AI bot crawl hits target content less than a year old</a>. The <a href="#cloudflare-ai-crawlers">explosive growth of AI crawlers (GPTBot up 305% YoY)</a> makes robots.txt policy a direct lever for AI visibility.</p>
-  <p>However, this new landscape comes with important caveats. Citation accuracy across AI answer engines remains <a href="#false-promise">surprisingly poor (49-68%)</a>, with nearly a third of claims lacking any source backing. Citation concentration follows power-law dynamics, where the <a href="#news-citing-patterns">top 20 sources capture 28-67% of all citations</a>. And LLMs exhibit strong <a href="#lost-in-the-middle">positional bias</a>, reliably attending to content at the beginning and end of context while ignoring the middle. Together, these findings inform LLM Optimizer's scoring frameworks across answer optimization, video authority, Reddit authority, and search visibility analysis.</p>
+  <p>However, this new landscape comes with important caveats. Citation accuracy across AI answer engines remains <a href="#false-promise">surprisingly poor (49-68%)</a>, with nearly a third of claims lacking any source backing. Citation concentration follows power-law dynamics, where the <a href="#news-citing-patterns">top 20 sources capture 28-67% of all citations</a>. And LLMs exhibit strong <a href="#lost-in-the-middle">positional bias</a>, reliably attending to content at the beginning and end of context while ignoring the middle.</p>
+  <p>Compounding these challenges, <a href="#resoneo-citation-collapse">model updates can sharply reduce citation volume</a>. When GPT-5.3 replaced GPT-4o as ChatGPT's default, unique domains cited per response dropped 20.5% overnight &#8212; meaning brands that had achieved dynamic visibility through real-time retrieval lost it without any change on their end. This volatility reinforces the importance of <em>parametric</em> visibility (being embedded in training data) alongside dynamic visibility (being citable at inference time). Research into <a href="#dejan-brand-authority">LLM parametric memory</a> reveals that network centrality &#8212; being densely associated with high-authority brands in a model's knowledge graph &#8212; outweighs raw mention frequency. A brand that appears alongside category leaders in training data gains disproportionate visibility, even if it is mentioned less often overall. Together, these findings inform LLM Optimizer's scoring frameworks across answer optimization, video authority, Reddit authority, and search visibility analysis.</p>
 </div>
 </section>
 
@@ -314,6 +315,18 @@ footer .inner{max-width:56rem;margin:0 auto;padding:0 1rem;display:flex;flex-dir
   <div class="paper-title">AI Overviews Study: 200,000 Keywords</div>
   <div class="paper-venue">Semrush, 2025</div>
   <div class="paper-desc">Reddit (40.1%) and Wikipedia (26.3%) dominate AIO citations. 80% of AIO responses target informational queries. 82% appear for keywords with &lt;1,000 monthly searches.</div>
+</a>
+
+<a id="resoneo-citation-collapse" class="paper" href="https://think.resoneo.com/chatgpt/5.3-5.4/" target="_blank" rel="noopener noreferrer">
+  <div class="paper-title">ChatGPT Search Visibility: GPT-5.3/5.4 Citation Analysis</div>
+  <div class="paper-venue">Resoneo, 2026</div>
+  <div class="paper-desc">27,000 responses across 400 prompts over 14 weeks. After GPT-5.3 launched, unique domains cited per response dropped 20.5% (19.1 &#8594; 15.2) and unique URLs dropped 21.0% (24.1 &#8594; 19.1). Formalizes the distinction between parametric visibility (training data knowledge) and dynamic visibility (real-time web retrieval).</div>
+</a>
+
+<a id="dejan-brand-authority" class="paper" href="https://think.resoneo.com/chatgpt/5.3-5.4/" target="_blank" rel="noopener noreferrer">
+  <div class="paper-title">Brand Authority Index: Network Centrality in LLM Parametric Memory</div>
+  <div class="paper-venue">Dejan AI / Resoneo, 2026</div>
+  <div class="paper-desc">Queried Gemini 200,000 times across ~20 million brand mentions, building a 2.9 million-node directed association graph. Found that network centrality &#8212; being densely associated with high-authority brands &#8212; outweighs raw mention frequency for parametric visibility. A brand with zero spontaneous recall ranked highest due to dense intersections with authority brands.</div>
 </a>
 </section>
 
@@ -544,6 +557,18 @@ footer .inner{max-width:56rem;margin:0 auto;padding:0 1rem;display:flex;flex-dir
   <div class="finding-title">AI crawlers are growing explosively</div>
   <div class="finding-detail">GPTBot grew 305% YoY, with OpenAI's crawl-to-referral ratio at 1,700:1. Each major AI company now runs 3 separate bots (training, indexing, user-fetch). Blocking training bots while allowing search bots is a valid strategy.</div>
   <div class="finding-source">Cloudflare, 2025</div>
+</a>
+
+<a class="finding" href="#resoneo-citation-collapse">
+  <div class="finding-title">Model updates can collapse citation volume overnight</div>
+  <div class="finding-detail">When GPT-5.3 replaced GPT-4o as the default model, unique domains cited per response dropped 20.5% and unique URLs dropped 21%. The study formalizes two distinct visibility types: parametric (stable, from training data) and dynamic (volatile, from real-time retrieval) &#8212; and shows that model updates can sharply reduce the latter.</div>
+  <div class="finding-source">Resoneo, 2026</div>
+</a>
+
+<a class="finding" href="#dejan-brand-authority">
+  <div class="finding-title">Brand network centrality outweighs raw mention frequency</div>
+  <div class="finding-detail">A 200,000-query study of LLM parametric memory found that brands densely associated with high-authority peers rank higher than brands with more raw mentions. A brand with zero spontaneous recall ranked #1 because of its network position among luxury category leaders. Being mentioned alongside the right brands matters more than being mentioned often.</div>
+  <div class="finding-source">Dejan AI / Resoneo, 2026</div>
 </a>
 </section>
 
