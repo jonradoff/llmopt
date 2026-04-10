@@ -1,0 +1,61 @@
+{{template "base.html" .}}
+
+{{define "title"}}Action Items: {{.BrandName}} &#8212; LLM Optimizer{{end}}
+
+{{define "meta"}}
+<meta name="description" content="Prioritized AI visibility optimization action items for {{.BrandName}} ({{.Domain}}). {{.TodoCount}} recommendations with expected impact across answer optimization, video, Reddit, and search.">
+<link rel="canonical" href="https://llmopt.metavert.io/share/{{.ShareID}}/todos">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Action Items: {{.BrandName}}">
+<meta property="og:description" content="{{.TodoCount}} prioritized optimization recommendations for {{.BrandName}}.">
+<meta property="og:url" content="https://llmopt.metavert.io/share/{{.ShareID}}/todos">
+<meta property="og:site_name" content="LLM Optimizer">
+{{end}}
+
+{{define "header_right"}}
+<a href="/share/{{.ShareID}}" class="back">
+  <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
+  Back to Report
+</a>
+{{end}}
+
+{{define "body"}}
+<main class="content">
+  <h1>Action Items</h1>
+  <p class="subtitle">{{.BrandName}} &middot; {{.Domain}} &middot; {{.TodoCount}} item{{if ne .TodoCount 1}}s{{end}}</p>
+
+  <div class="tabs">
+    <a href="/share/{{.ShareID}}" class="tab">Overview</a>
+    {{if .HasBrand}}<a href="/share/{{.ShareID}}/brand" class="tab">Brand</a>{{end}}
+    {{if .HasVideo}}<a href="/share/{{.ShareID}}/video" class="tab">Video</a>{{end}}
+    {{if .HasReddit}}<a href="/share/{{.ShareID}}/reddit" class="tab">Reddit</a>{{end}}
+    {{if .HasSearch}}<a href="/share/{{.ShareID}}/search" class="tab">Search</a>{{end}}
+    <a href="/share/{{.ShareID}}/todos" class="tab tab-active">To-Do</a>
+  </div>
+
+  {{if .Todos}}
+  {{range .Todos}}
+  <div class="card" style="padding:1rem">
+    <div class="flex items-start gap-3">
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 mb-1" style="flex-wrap:wrap">
+          <span class="priority {{priorityClass .Priority}}">{{.Priority}}</span>
+          {{if .Dimension}}<span class="pill">{{.Dimension}}</span>{{end}}
+          {{if .SourceType}}<span class="pill">{{.SourceType}}</span>{{end}}
+          {{if eq .Status "completed"}}<span class="pill pill-green">Completed</span>{{end}}
+        </div>
+        <p class="card-title" style="margin-bottom:.25rem">{{.Action}}</p>
+        {{if .Summary}}<p class="card-desc">{{.Summary}}</p>{{end}}
+        {{if .ExpectedImpact}}<p class="text-xs text-dim mt-2">Expected impact: {{.ExpectedImpact}}</p>{{end}}
+        {{if .Question}}<p class="text-xs text-dim mt-1">Question: {{.Question}}</p>{{end}}
+      </div>
+    </div>
+  </div>
+  {{end}}
+  {{else}}
+  <div class="card-padded" style="text-align:center">
+    <p class="text-muted">No action items yet. Run an analysis to generate optimization recommendations.</p>
+  </div>
+  {{end}}
+</main>
+{{end}}

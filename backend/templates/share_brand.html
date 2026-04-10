@@ -1,0 +1,124 @@
+{{template "base.html" .}}
+
+{{define "title"}}Brand Intelligence: {{.BrandName}} &#8212; LLM Optimizer{{end}}
+
+{{define "meta"}}
+<meta name="description" content="Brand intelligence profile for {{.BrandName}} ({{.Domain}}). Competitors, target queries, key messages, differentiators, and audience analysis for AI search optimization.">
+<link rel="canonical" href="https://llmopt.metavert.io/share/{{.ShareID}}/brand">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Brand Intelligence: {{.BrandName}}">
+<meta property="og:description" content="Brand intelligence profile for {{.BrandName}}. Competitors, target queries, and AI optimization strategy.">
+<meta property="og:url" content="https://llmopt.metavert.io/share/{{.ShareID}}/brand">
+<meta property="og:site_name" content="LLM Optimizer">
+{{end}}
+
+{{define "header_right"}}
+<a href="/share/{{.ShareID}}" class="back">
+  <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
+  Back to Report
+</a>
+{{end}}
+
+{{define "body"}}
+<main class="content">
+  <h1>Brand Intelligence</h1>
+  <p class="subtitle">{{.BrandName}} &middot; {{.Domain}}</p>
+
+  <div class="tabs">
+    <a href="/share/{{.ShareID}}" class="tab">Overview</a>
+    <a href="/share/{{.ShareID}}/brand" class="tab tab-active">Brand</a>
+    {{if .HasVideo}}<a href="/share/{{.ShareID}}/video" class="tab">Video</a>{{end}}
+    {{if .HasReddit}}<a href="/share/{{.ShareID}}/reddit" class="tab">Reddit</a>{{end}}
+    {{if .HasSearch}}<a href="/share/{{.ShareID}}/search" class="tab">Search</a>{{end}}
+    {{if .HasTodos}}<a href="/share/{{.ShareID}}/todos" class="tab">To-Do</a>{{end}}
+  </div>
+
+  {{if .Brand}}
+  {{if .Brand.Description}}
+  <section>
+    <h2>Description</h2>
+    <div class="digest"><p>{{.Brand.Description}}</p></div>
+  </section>
+  {{end}}
+
+  {{if .Brand.Categories}}
+  <section>
+    <h2>Categories</h2>
+    <div class="flex gap-2" style="flex-wrap:wrap">
+      {{range .Brand.Categories}}<span class="pill pill-purple">{{.}}</span>{{end}}
+    </div>
+  </section>
+  {{end}}
+
+  {{if .Brand.Competitors}}
+  <section>
+    <h2>Competitors</h2>
+    {{range .Brand.Competitors}}
+    <div class="card" style="display:flex;align-items:center;gap:.75rem">
+      <div class="flex-1">
+        <p class="card-title">{{.Name}}{{if .URL}} <span class="text-xs text-muted">({{.URL}})</span>{{end}}</p>
+        {{if .Relationship}}<span class="pill">{{.Relationship}}</span>{{end}}
+        {{if .Notes}}<p class="card-desc">{{.Notes}}</p>{{end}}
+      </div>
+    </div>
+    {{end}}
+  </section>
+  {{end}}
+
+  {{if .Brand.TargetQueries}}
+  <section>
+    <h2>Target Queries</h2>
+    {{range .Brand.TargetQueries}}
+    <div class="card" style="display:flex;align-items:center;gap:.5rem">
+      <div class="flex-1">
+        <p class="card-title">{{.Query}}</p>
+        {{if .Type}}<span class="pill">{{.Type}}</span>{{end}}
+        {{if .Priority}}<span class="pill {{pillClass .Priority}}">{{.Priority}}</span>{{end}}
+      </div>
+    </div>
+    {{end}}
+  </section>
+  {{end}}
+
+  {{if .Brand.KeyMessages}}
+  <section>
+    <h2>Key Messages</h2>
+    {{range .Brand.KeyMessages}}
+    <div class="card" style="display:flex;align-items:center;gap:.5rem">
+      <div class="flex-1">
+        <p class="card-title">{{.Claim}}</p>
+        {{if .EvidenceURL}}<p class="card-desc"><a href="{{.EvidenceURL}}" target="_blank" rel="noopener noreferrer">Evidence</a></p>{{end}}
+        {{if .Priority}}<span class="pill {{pillClass .Priority}}">{{.Priority}}</span>{{end}}
+      </div>
+    </div>
+    {{end}}
+  </section>
+  {{end}}
+
+  {{if .Brand.Differentiators}}
+  <section>
+    <h2>Differentiators</h2>
+    <ul class="evidence">
+      {{range .Brand.Differentiators}}<li>{{.}}</li>{{end}}
+    </ul>
+  </section>
+  {{end}}
+
+  {{if .Brand.PrimaryAudience}}
+  <section>
+    <h2>Primary Audience</h2>
+    <div class="card-padded"><p class="text-sm">{{.Brand.PrimaryAudience}}</p></div>
+  </section>
+  {{end}}
+
+  {{if .Brand.Products}}
+  <section>
+    <h2>Products</h2>
+    <div class="flex gap-2" style="flex-wrap:wrap">
+      {{range .Brand.Products}}<span class="pill">{{.}}</span>{{end}}
+    </div>
+  </section>
+  {{end}}
+  {{end}}
+</main>
+{{end}}

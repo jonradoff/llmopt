@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{block "title" .}}LLM Optimizer{{end}}</title>
+{{block "meta" .}}{{end}}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/seo.css">
+</head>
+<body>
+
+<header>
+<div class="inner">
+  <a href="/" class="logo">
+    <div class="logo-icon">
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z"/></svg>
+    </div>
+    LLM Optimizer
+  </a>
+  {{block "header_right" .}}
+  <nav>
+    <a href="/research">Research</a>
+    <a href="/docs">API Docs</a>
+    <a href="/signup" class="btn-primary" style="padding:.375rem .75rem;font-size:.8125rem;border-radius:.5rem">Sign Up</a>
+  </nav>
+  {{end}}
+</div>
+</header>
+
+{{block "body" .}}{{end}}
+
+<footer>
+<div class="inner">
+  <div class="footer-links">
+    <a href="https://github.com/jonradoff/llmopt" target="_blank" rel="noopener noreferrer">GitHub (MIT License)</a>
+    <span class="footer-sep">&middot;</span>
+    <a href="https://www.metavert.io/privacy-policy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
+    <span class="footer-sep">&middot;</span>
+    <a href="https://www.metavert.io/terms-of-service" target="_blank" rel="noopener noreferrer">Terms of Service</a>
+    <span class="footer-sep">&middot;</span>
+    <a href="/research">Research Citations</a>
+    <span class="footer-sep">&middot;</span>
+    <a href="/docs">API Docs</a>
+    <span class="footer-sep">&middot;</span>
+    <a href="/api/v1/docs" target="_blank" rel="noopener noreferrer">API Reference (MD)</a>
+  </div>
+  <p class="footer-copy">&copy; 2026 Metavert LLC. All content licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">Creative Commons Attribution 4.0</a>.</p>
+</div>
+</footer>
+
+</body>
+</html>

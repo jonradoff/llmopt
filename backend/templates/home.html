@@ -1,0 +1,125 @@
+{{template "base.html" .}}
+
+{{define "title"}}LLM Optimizer &#8212; AI Search Visibility for Marketers{{end}}
+
+{{define "meta"}}
+<meta name="description" content="Optimize your brand's visibility across ChatGPT, Perplexity, Gemini, and other AI search engines. Analyze, score, and improve how LLMs represent your brand.">
+<meta name="keywords" content="LLM optimization, AI search visibility, ChatGPT SEO, AI answer optimization, brand visibility, generative engine optimization, GEO">
+<link rel="canonical" href="https://llmopt.metavert.io/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="LLM Optimizer &#8212; AI Search Visibility for Marketers">
+<meta property="og:description" content="Optimize your brand's visibility across ChatGPT, Perplexity, Gemini, and other AI search engines.">
+<meta property="og:url" content="https://llmopt.metavert.io/">
+<meta property="og:site_name" content="LLM Optimizer">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="LLM Optimizer &#8212; AI Search Visibility for Marketers">
+<meta name="twitter:description" content="Optimize your brand's visibility across ChatGPT, Perplexity, Gemini, and other AI search engines.">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "LLM Optimizer",
+  "description": "Optimize your brand's visibility across ChatGPT, Perplexity, Gemini, and other AI search engines. Analyze, score, and improve how LLMs represent your brand.",
+  "url": "https://llmopt.metavert.io/",
+  "applicationCategory": "BusinessApplication",
+  "operatingSystem": "Web",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD",
+    "description": "Free self-hosted, paid hosted version"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "Metavert LLC",
+    "url": "https://www.metavert.io"
+  }
+}
+</script>
+{{end}}
+
+{{define "body"}}
+<main class="content">
+  <div class="hero">
+    <h1>Be the Brand AI Recommends</h1>
+    <p>ChatGPT, Claude, Gemini, and Perplexity are replacing search for millions of people. We help you see how AI sees your brand &#8212; and optimize so it recommends you.</p>
+  </div>
+
+  {{if .Brands}}
+  <section>
+    <h2 style="text-align:center;margin-bottom:.5rem">Popular Brand Reports</h2>
+    <p class="subtitle" style="text-align:center">See how leading brands perform across AI search engines.</p>
+    <div class="brand-grid">
+      {{range .Brands}}
+      <a href="/share/{{.ShareID}}" class="brand-card">
+        <h3>{{.BrandName}}</h3>
+        <div class="domain">{{.Domain}}</div>
+        <div class="stats">
+          {{if gt .AvgScore 0}}
+          <span class="flex items-center gap-1">
+            <span class="score-sm score-{{scoreClass .AvgScore}}">{{.AvgScore}}</span>
+            Score
+          </span>
+          {{end}}
+          <span>{{.ReportCount}} report{{if ne .ReportCount 1}}s{{end}}</span>
+          {{if .HasVideo}}<span>Video</span>{{end}}
+        </div>
+      </a>
+      {{end}}
+    </div>
+  </section>
+  {{end}}
+
+  <section>
+    <div class="cta">
+      <h3>Analyze your brand's AI visibility</h3>
+      <p>Get a comprehensive visibility score across answer optimization, video authority, Reddit presence, and search visibility.</p>
+      <div class="cta-buttons">
+        <a href="/signup" class="btn-primary">
+          Get Started Free
+          <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/></svg>
+        </a>
+        <a href="https://github.com/jonradoff/llmopt" target="_blank" rel="noopener noreferrer" class="btn-secondary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+          Self-Host Free
+        </a>
+      </div>
+      <p class="cta-note">LLM Optimizer is open-source (MIT). Our hosted version supports ongoing development.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 style="text-align:center;margin-bottom:.5rem">How It Works</h2>
+    <p class="subtitle" style="text-align:center">Research-backed analysis across every dimension of AI visibility.</p>
+    <div class="grid-2">
+      <div class="card-padded">
+        <h3 style="margin-bottom:.75rem">Answer Optimization</h3>
+        <p class="text-sm text-muted leading-relaxed">Analyzes how well your content answers the questions AI search engines ask about your category. Scores content authority, structural optimization, source authority, and knowledge persistence.</p>
+      </div>
+      <div class="card-padded">
+        <h3 style="margin-bottom:.75rem">Video Authority</h3>
+        <p class="text-sm text-muted leading-relaxed">YouTube is the #1 social citation source for LLMs. We analyze transcript quality, topical dominance, citation networks, and brand narrative across your video presence.</p>
+      </div>
+      <div class="card-padded">
+        <h3 style="margin-bottom:.75rem">Reddit Authority</h3>
+        <p class="text-sm text-muted leading-relaxed">Reddit's multi-user validation creates credibility signals LLMs weight heavily. We measure presence, sentiment, competitive positioning, and training signal strength.</p>
+      </div>
+      <div class="card-padded">
+        <h3 style="margin-bottom:.75rem">Search Visibility</h3>
+        <p class="text-sm text-muted leading-relaxed">Bridges traditional SEO with AI citation dynamics. Evaluates AI Overview readiness, crawl accessibility, brand search momentum, content freshness, and category discovery.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2 style="text-align:center;margin-bottom:.5rem">Grounded in Research</h2>
+    <p class="subtitle" style="text-align:center">Every scoring framework is derived from peer-reviewed academic work.</p>
+    <div class="card-padded" style="text-align:center">
+      <p class="text-sm text-muted leading-relaxed" style="max-width:36rem;margin:0 auto 1rem">
+        Our methodology draws from 20+ research papers including GEO (Princeton/KDD 2024), NanoKnow (2026), and studies from Ahrefs, Cloudflare, and Seer Interactive.
+      </p>
+      <a href="/research" class="btn-secondary" style="display:inline-flex">Read the Research &rarr;</a>
+    </div>
+  </section>
+</main>
+{{end}}

@@ -1,0 +1,97 @@
+{{template "base.html" .}}
+
+{{define "title"}}Reddit Authority: {{.BrandName}} &#8212; LLM Optimizer{{end}}
+
+{{define "meta"}}
+<meta name="description" content="Reddit authority analysis for {{.BrandName}} ({{.Domain}}). Community discussion scored across presence, sentiment, competitive positioning, and training signal strength.">
+<link rel="canonical" href="https://llmopt.metavert.io/share/{{.ShareID}}/reddit">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Reddit Authority: {{.BrandName}}">
+<meta property="og:description" content="Reddit community discussion analysis for {{.BrandName}}. How Reddit shapes AI perception.">
+<meta property="og:url" content="https://llmopt.metavert.io/share/{{.ShareID}}/reddit">
+<meta property="og:site_name" content="LLM Optimizer">
+{{end}}
+
+{{define "header_right"}}
+<a href="/share/{{.ShareID}}" class="back">
+  <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
+  Back to Report
+</a>
+{{end}}
+
+{{define "body"}}
+<main class="content">
+  <div class="flex items-center gap-3 mb-2">
+    {{if .Reddit.Result}}<div class="score score-{{scoreClass .Reddit.Result.OverallScore}}">{{.Reddit.Result.OverallScore}}</div>{{end}}
+    <div>
+      <h1 style="margin-bottom:0">Reddit Authority</h1>
+      <p class="text-sm text-muted">{{.BrandName}} &middot; {{.Domain}}</p>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <a href="/share/{{.ShareID}}" class="tab">Overview</a>
+    {{if .HasBrand}}<a href="/share/{{.ShareID}}/brand" class="tab">Brand</a>{{end}}
+    {{if .HasVideo}}<a href="/share/{{.ShareID}}/video" class="tab">Video</a>{{end}}
+    <a href="/share/{{.ShareID}}/reddit" class="tab tab-active">Reddit</a>
+    {{if .HasSearch}}<a href="/share/{{.ShareID}}/search" class="tab">Search</a>{{end}}
+    {{if .HasTodos}}<a href="/share/{{.ShareID}}/todos" class="tab">To-Do</a>{{end}}
+  </div>
+
+  {{if .Reddit.Result}}
+  {{with .Reddit.Result}}
+  {{if .ExecutiveSummary}}
+  <section>
+    <h2>Executive Summary</h2>
+    <div class="digest"><p>{{nl2br .ExecutiveSummary}}</p></div>
+  </section>
+  {{end}}
+
+  <section>
+    <h2>Pillar Scores</h2>
+    <div class="grid-2">
+      <div class="card-padded">
+        <div class="fw-header"><span class="fw-name">Presence</span><span class="pill">25%</span></div>
+        <div class="score-sm score-{{scoreClass .Presence.Score}}" style="margin:.5rem 0">{{.Presence.Score}}</div>
+        {{if .Presence.Evidence}}<ul class="evidence">{{range .Presence.Evidence}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      </div>
+      <div class="card-padded">
+        <div class="fw-header"><span class="fw-name">Sentiment &amp; Recommendations</span><span class="pill">25%</span></div>
+        <div class="score-sm score-{{scoreClass .Sentiment.Score}}" style="margin:.5rem 0">{{.Sentiment.Score}}</div>
+        {{if .Sentiment.Evidence}}<ul class="evidence">{{range .Sentiment.Evidence}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      </div>
+      <div class="card-padded">
+        <div class="fw-header"><span class="fw-name">Competitive Positioning</span><span class="pill">25%</span></div>
+        <div class="score-sm score-{{scoreClass .Competitive.Score}}" style="margin:.5rem 0">{{.Competitive.Score}}</div>
+        {{if .Competitive.Evidence}}<ul class="evidence">{{range .Competitive.Evidence}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      </div>
+      <div class="card-padded">
+        <div class="fw-header"><span class="fw-name">Training Signal Strength</span><span class="pill">25%</span></div>
+        <div class="score-sm score-{{scoreClass .TrainingSignal.Score}}" style="margin:.5rem 0">{{.TrainingSignal.Score}}</div>
+        {{if .TrainingSignal.Evidence}}<ul class="evidence">{{range .TrainingSignal.Evidence}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      </div>
+    </div>
+  </section>
+
+  {{if .Recommendations}}
+  <section>
+    <h2>Recommendations</h2>
+    {{range .Recommendations}}
+    <div class="rec">
+      <span class="priority {{priorityClass .Priority}}">{{.Priority}}</span>
+      <p class="rec-action">{{.Action}}</p>
+      {{if .ExpectedImpact}}<p class="rec-impact">Expected impact: {{.ExpectedImpact}}</p>{{end}}
+    </div>
+    {{end}}
+  </section>
+  {{end}}
+
+  {{if .ConfidenceNote}}
+  <section>
+    <p class="text-xs text-dim" style="font-style:italic">{{.ConfidenceNote}}</p>
+  </section>
+  {{end}}
+  {{end}}
+  {{end}}
+</main>
+{{end}}

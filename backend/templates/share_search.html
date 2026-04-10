@@ -1,0 +1,104 @@
+{{template "base.html" .}}
+
+{{define "title"}}Search Visibility: {{.BrandName}} &#8212; LLM Optimizer{{end}}
+
+{{define "meta"}}
+<meta name="description" content="Search visibility analysis for {{.BrandName}} ({{.Domain}}). AI Overview readiness, crawl accessibility, brand search momentum, content freshness, and category discovery.">
+<link rel="canonical" href="https://llmopt.metavert.io/share/{{.ShareID}}/search">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Search Visibility: {{.BrandName}}">
+<meta property="og:description" content="Search visibility analysis for {{.BrandName}}. How search signals affect AI citation.">
+<meta property="og:url" content="https://llmopt.metavert.io/share/{{.ShareID}}/search">
+<meta property="og:site_name" content="LLM Optimizer">
+{{end}}
+
+{{define "header_right"}}
+<a href="/share/{{.ShareID}}" class="back">
+  <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
+  Back to Report
+</a>
+{{end}}
+
+{{define "body"}}
+<main class="content">
+  <div class="flex items-center gap-3 mb-2">
+    {{if .Search.Result}}<div class="score score-{{scoreClass .Search.Result.OverallScore}}">{{.Search.Result.OverallScore}}</div>{{end}}
+    <div>
+      <h1 style="margin-bottom:0">Search Visibility</h1>
+      <p class="text-sm text-muted">{{.BrandName}} &middot; {{.Domain}}</p>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <a href="/share/{{.ShareID}}" class="tab">Overview</a>
+    {{if .HasBrand}}<a href="/share/{{.ShareID}}/brand" class="tab">Brand</a>{{end}}
+    {{if .HasVideo}}<a href="/share/{{.ShareID}}/video" class="tab">Video</a>{{end}}
+    {{if .HasReddit}}<a href="/share/{{.ShareID}}/reddit" class="tab">Reddit</a>{{end}}
+    <a href="/share/{{.ShareID}}/search" class="tab tab-active">Search</a>
+    {{if .HasTodos}}<a href="/share/{{.ShareID}}/todos" class="tab">To-Do</a>{{end}}
+  </div>
+
+  {{if .Search.Result}}
+  {{with .Search.Result}}
+  {{if .ExecutiveSummary}}
+  <section>
+    <h2>Executive Summary</h2>
+    <div class="digest"><p>{{nl2br .ExecutiveSummary}}</p></div>
+  </section>
+  {{end}}
+
+  <section>
+    <h2>Pillar Scores</h2>
+    <div class="grid-2">
+      <div class="card-padded">
+        <div class="fw-header"><span class="fw-name">AI Overview Readiness</span><span class="pill">30%</span></div>
+        <div class="score-sm score-{{scoreClass .AIOReadiness.Score}}" style="margin:.5rem 0">{{.AIOReadiness.Score}}</div>
+        {{if .AIOReadiness.Evidence}}<ul class="evidence">{{range .AIOReadiness.Evidence}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      </div>
+      <div class="card-padded">
+        <div class="fw-header"><span class="fw-name">Crawl Accessibility</span><span class="pill">20%</span></div>
+        <div class="score-sm score-{{scoreClass .CrawlAccess.Score}}" style="margin:.5rem 0">{{.CrawlAccess.Score}}</div>
+        {{if .CrawlAccess.Evidence}}<ul class="evidence">{{range .CrawlAccess.Evidence}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      </div>
+      <div class="card-padded">
+        <div class="fw-header"><span class="fw-name">Brand Search Momentum</span><span class="pill">25%</span></div>
+        <div class="score-sm score-{{scoreClass .BrandMomentum.Score}}" style="margin:.5rem 0">{{.BrandMomentum.Score}}</div>
+        {{if .BrandMomentum.Evidence}}<ul class="evidence">{{range .BrandMomentum.Evidence}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      </div>
+      <div class="card-padded">
+        <div class="fw-header"><span class="fw-name">Content Freshness</span><span class="pill">25%</span></div>
+        <div class="score-sm score-{{scoreClass .ContentFreshness.Score}}" style="margin:.5rem 0">{{.ContentFreshness.Score}}</div>
+        {{if .ContentFreshness.Evidence}}<ul class="evidence">{{range .ContentFreshness.Evidence}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      </div>
+      {{if .CategoryDiscovery}}
+      <div class="card-padded">
+        <div class="fw-header"><span class="fw-name">Category Discovery</span><span class="pill">20%</span></div>
+        <div class="score-sm score-{{scoreClass .CategoryDiscovery.Score}}" style="margin:.5rem 0">{{.CategoryDiscovery.Score}}</div>
+        {{if .CategoryDiscovery.Evidence}}<ul class="evidence">{{range .CategoryDiscovery.Evidence}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      </div>
+      {{end}}
+    </div>
+  </section>
+
+  {{if .Recommendations}}
+  <section>
+    <h2>Recommendations</h2>
+    {{range .Recommendations}}
+    <div class="rec">
+      <span class="priority {{priorityClass .Priority}}">{{.Priority}}</span>
+      <p class="rec-action">{{.Action}}</p>
+      {{if .ExpectedImpact}}<p class="rec-impact">Expected impact: {{.ExpectedImpact}}</p>{{end}}
+    </div>
+    {{end}}
+  </section>
+  {{end}}
+
+  {{if .ConfidenceNote}}
+  <section>
+    <p class="text-xs text-dim" style="font-style:italic">{{.ConfidenceNote}}</p>
+  </section>
+  {{end}}
+  {{end}}
+  {{end}}
+</main>
+{{end}}

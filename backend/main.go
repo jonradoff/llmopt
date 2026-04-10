@@ -462,6 +462,9 @@ func main() {
 	mux.HandleFunc("GET /sitemap.xml", handleSitemap(mongoDB))
 	mux.HandleFunc("GET /research", handleResearchPage())
 	mux.HandleFunc("GET /research/", handleResearchPage())
+	mux.HandleFunc("GET /docs", handleDocsPage())
+	mux.HandleFunc("GET /docs/", handleDocsPage())
+	mux.HandleFunc("GET /static/", handleStaticAssets())
 
 	// Serve main frontend static files if available
 	staticDir := os.Getenv("STATIC_DIR")
@@ -470,8 +473,19 @@ func main() {
 	}
 	if info, err := os.Stat(staticDir); err == nil && info.IsDir() {
 		log.Printf("Serving frontend from %s", staticDir)
-		// Register /share/{shareId} with OG injection (before SPA catch-all)
-		mux.HandleFunc("GET /share/{shareId}", handleShareOG(mongoDB, staticDir))
+
+		// Server-rendered share pages (before SPA catch-all)
+		mux.HandleFunc("GET /share/{shareId}", handleSharePageSSR(mongoDB, staticDir))
+		mux.HandleFunc("GET /share/{shareId}/brand", handleShareBrandPage(mongoDB))
+		mux.HandleFunc("GET /share/{shareId}/video", handleShareVideoPage(mongoDB))
+		mux.HandleFunc("GET /share/{shareId}/reddit", handleShareRedditPage(mongoDB))
+		mux.HandleFunc("GET /share/{shareId}/search", handleShareSearchPage(mongoDB))
+		mux.HandleFunc("GET /share/{shareId}/todos", handleShareTodosPage(mongoDB))
+
+		// Server-rendered homepage for unauthenticated visitors
+		mux.HandleFunc("GET /{$}", handleHomePage(mongoDB, staticDir))
+
+		// SPA catch-all for authenticated app routes
 		mux.Handle("/", &spaHandler{staticPath: staticDir, indexPath: "index.html"})
 	} else {
 		log.Printf("No frontend directory at %s, API-only mode", staticDir)
@@ -3646,7 +3660,8 @@ func handleRobotsTxt() http.HandlerFunc {
 		fmt.Fprint(w, `User-agent: *
 Allow: /
 Allow: /research
-Allow: /share/popular
+Allow: /docs
+Allow: /share/
 Disallow: /api/
 Disallow: /last/
 Disallow: /login
@@ -3680,9 +3695,10 @@ func handleSitemap(mongoDB *MongoDB) http.HandlerFunc {
 		urls := []sitemapURL{
 			{Loc: baseURL + "/", LastMod: now},
 			{Loc: baseURL + "/research", LastMod: now},
+			{Loc: baseURL + "/docs", LastMod: now},
 		}
 
-		// Add popular domains
+		// Add popular domains with sub-pages
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
@@ -3691,10 +3707,16 @@ func handleSitemap(mongoDB *MongoDB) http.HandlerFunc {
 			var shares []DomainShare
 			if cursor.All(ctx, &shares) == nil {
 				for _, s := range shares {
-					urls = append(urls, sitemapURL{
-						Loc:     baseURL + "/share/" + s.ShareID,
-						LastMod: s.UpdatedAt.Format("2006-01-02"),
-					})
+					lastMod := s.UpdatedAt.Format("2006-01-02")
+					shareBase := baseURL + "/share/" + s.ShareID
+					urls = append(urls,
+						sitemapURL{Loc: shareBase, LastMod: lastMod},
+						sitemapURL{Loc: shareBase + "/brand", LastMod: lastMod},
+						sitemapURL{Loc: shareBase + "/video", LastMod: lastMod},
+						sitemapURL{Loc: shareBase + "/reddit", LastMod: lastMod},
+						sitemapURL{Loc: shareBase + "/search", LastMod: lastMod},
+						sitemapURL{Loc: shareBase + "/todos", LastMod: lastMod},
+					)
 				}
 			}
 			cursor.Close(ctx)

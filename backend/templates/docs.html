@@ -1,0 +1,179 @@
+{{template "base.html" .}}
+
+{{define "title"}}API Documentation &#8212; LLM Optimizer{{end}}
+
+{{define "meta"}}
+<meta name="description" content="Programmatic access to LLM Optimizer data. REST API for domain analysis, visibility scores, video authority, Reddit authority, search visibility, and action items.">
+<meta name="keywords" content="LLM Optimizer API, AI visibility API, GEO API, brand visibility API, REST API documentation">
+<link rel="canonical" href="https://llmopt.metavert.io/docs">
+<meta property="og:type" content="article">
+<meta property="og:title" content="API Documentation &#8212; LLM Optimizer">
+<meta property="og:description" content="Programmatic access to LLM Optimizer data. REST API for domain analysis, visibility scores, and optimization insights.">
+<meta property="og:url" content="https://llmopt.metavert.io/docs">
+<meta property="og:site_name" content="LLM Optimizer">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="API Documentation &#8212; LLM Optimizer">
+<meta name="twitter:description" content="Programmatic access to LLM Optimizer data.">
+{{end}}
+
+{{define "body"}}
+<main class="content">
+  <h1>API Documentation</h1>
+  <p class="subtitle">Programmatic access to your LLM Optimizer data. <a href="/api/v1/docs" target="_blank" rel="noopener noreferrer">View raw markdown reference</a></p>
+
+  <!-- Authentication -->
+  <section>
+    <h2>Authentication</h2>
+    <div class="card-padded">
+      <p class="text-sm" style="margin-bottom:1rem">All API requests require a Bearer token in the <code class="inline">Authorization</code> header.</p>
+      <div class="code-block" style="margin-bottom:1rem">
+        <div class="code-header">API Key (recommended for integrations)</div>
+        <div class="code-body" style="color:#22c55e">Authorization: Bearer lsk_your_api_key_here</div>
+      </div>
+      <p class="text-sm text-muted"><strong>Admin keys</strong> auto-resolve to the root tenant. <strong>User keys</strong> require the <code class="inline">X-Tenant-ID</code> header.</p>
+      <p class="text-sm text-muted mt-2">Generate API keys from the admin panel under Settings &gt; API Keys.</p>
+    </div>
+  </section>
+
+  <!-- Rate Limits -->
+  <section>
+    <h2>Rate Limits</h2>
+    <div class="grid-2">
+      <div class="card-padded" style="text-align:center">
+        <p style="font-size:2rem;font-weight:700;color:#fff">60</p>
+        <p class="text-sm text-muted">reads / minute</p>
+      </div>
+      <div class="card-padded" style="text-align:center">
+        <p style="font-size:2rem;font-weight:700;color:#fff">30</p>
+        <p class="text-sm text-muted">writes / minute</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Endpoints -->
+  <section>
+    <h2>Endpoints</h2>
+
+    <h3 style="margin-top:1.5rem;margin-bottom:1rem">Domain Data (Read-only)</h3>
+
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/domains</code><p class="card-desc">List all domains with data for your tenant</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/domains/{domain}/analysis</code><p class="card-desc">Latest site analysis report</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/domains/{domain}/optimizations</code><p class="card-desc">All answer optimization reports</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/domains/{domain}/video</code><p class="card-desc">Video authority analysis (4-pillar)</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/domains/{domain}/reddit</code><p class="card-desc">Reddit authority analysis (4-pillar)</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/domains/{domain}/search</code><p class="card-desc">Search visibility analysis (5-pillar)</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/domains/{domain}/summary</code><p class="card-desc">Cross-report executive summary</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/domains/{domain}/tests</code><p class="card-desc">LLM knowledge test results (up to 10)</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/domains/{domain}/score</code><p class="card-desc">Aggregate visibility score</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/domains/{domain}/brand</code><p class="card-desc">Brand profile</p></div>
+    </div>
+
+    <h3 style="margin-top:2rem;margin-bottom:1rem">Todos</h3>
+
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/todos</code><p class="card-desc">List action items. Filter: ?status=todo&amp;domain=example.com</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-get">GET</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/todos/{id}</code><p class="card-desc">Get a single todo by ID</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-patch">PATCH</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/todos/{id}</code><p class="card-desc">Update todo status (admin/owner only). Body: {"status": "completed"}</p></div>
+    </div>
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <span class="method method-post">POST</span>
+      <div><code class="text-white font-mono text-sm">/api/v1/todos/bulk-update</code><p class="card-desc">Bulk update todo statuses (admin/owner, max 100). Body: {"ids": [...], "status": "archived"}</p></div>
+    </div>
+
+    <div class="card-padded mt-4">
+      <h3 style="font-size:.875rem;margin-bottom:.5rem">Valid Todo Statuses</h3>
+      <div class="flex gap-2" style="flex-wrap:wrap">
+        <code class="inline">todo</code>
+        <code class="inline">completed</code>
+        <code class="inline">backlogged</code>
+        <code class="inline">archived</code>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quick Start -->
+  <section>
+    <h2>Quick Start</h2>
+    <div class="code-block">
+      <div class="code-header">curl</div>
+      <div class="code-body"># List all domains
+curl -H "Authorization: Bearer lsk_your_key" \
+  https://llmopt.metavert.io/api/v1/domains
+
+# Get analysis for a domain
+curl -H "Authorization: Bearer lsk_your_key" \
+  https://llmopt.metavert.io/api/v1/domains/example.com/analysis
+
+# Get visibility score
+curl -H "Authorization: Bearer lsk_your_key" \
+  https://llmopt.metavert.io/api/v1/domains/example.com/score
+
+# Mark a todo as completed (admin/owner)
+curl -X PATCH \
+  -H "Authorization: Bearer lsk_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "completed"}' \
+  https://llmopt.metavert.io/api/v1/todos/TODOID</div>
+    </div>
+  </section>
+
+  <!-- Error Codes -->
+  <section>
+    <h2>Error Codes</h2>
+    <div class="code-block">
+      <table>
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Code</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>400</code></td><td class="font-mono">BAD_REQUEST</td><td>Invalid input or missing fields</td></tr>
+          <tr><td><code>401</code></td><td class="font-mono">UNAUTHORIZED</td><td>Missing or invalid authentication</td></tr>
+          <tr><td><code>403</code></td><td class="font-mono">FORBIDDEN</td><td>Insufficient permissions</td></tr>
+          <tr><td><code>404</code></td><td class="font-mono">NOT_FOUND</td><td>Resource not found</td></tr>
+          <tr><td><code>429</code></td><td class="font-mono">RATE_LIMITED</td><td>Rate limit exceeded</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+{{end}}

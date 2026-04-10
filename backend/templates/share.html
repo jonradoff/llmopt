@@ -1,0 +1,159 @@
+{{template "base.html" .}}
+
+{{define "title"}}{{.BrandName}} &#8212; LLM Visibility Report | LLM Optimizer{{end}}
+
+{{define "meta"}}
+<meta name="description" content="See how {{.BrandName}} ({{.Domain}}) performs across AI search engines. LLM Visibility Score: {{.Score}}. Answer optimization, video authority, Reddit presence, and search visibility analysis.">
+<link rel="canonical" href="https://llmopt.metavert.io/share/{{.ShareID}}">
+<meta property="og:type" content="article">
+<meta property="og:title" content="{{.BrandName}} &#8212; LLM Visibility Report">
+<meta property="og:description" content="See how {{.BrandName}} performs across AI search engines. LLM Visibility Score and actionable optimization insights.">
+<meta property="og:url" content="https://llmopt.metavert.io/share/{{.ShareID}}">
+<meta property="og:site_name" content="LLM Optimizer">
+{{if .HasScreenshot}}<meta property="og:image" content="https://llmopt.metavert.io/api/share/popular/{{.Domain}}/screenshot">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://llmopt.metavert.io/api/share/popular/{{.Domain}}/screenshot">
+{{else}}<meta name="twitter:card" content="summary">
+{{end}}<meta name="twitter:title" content="{{.BrandName}} &#8212; LLM Visibility Report">
+<meta name="twitter:description" content="See how {{.BrandName}} performs across AI search engines.">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Article",
+  "headline": "{{.BrandName}} &#8212; LLM Visibility Report",
+  "description": "How {{.BrandName}} performs across AI search engines, including answer optimization, video authority, Reddit presence, and search visibility.",
+  "url": "https://llmopt.metavert.io/share/{{.ShareID}}",
+  "publisher": {"@type": "Organization", "name": "Metavert LLC", "url": "https://www.metavert.io"}
+}
+</script>
+{{end}}
+
+{{define "header_right"}}
+<nav>
+  <a href="/">Home</a>
+  <a href="/research">Research</a>
+</nav>
+{{end}}
+
+{{define "body"}}
+<main class="content">
+  <!-- Brand header -->
+  <div class="flex items-center gap-3 mb-2">
+    <div class="score score-{{scoreClass .Score}}">{{.Score}}</div>
+    <div>
+      <h1 style="margin-bottom:0">{{.BrandName}}</h1>
+      <p class="text-sm text-muted">{{.Domain}}</p>
+    </div>
+  </div>
+
+  <!-- Tab navigation -->
+  <div class="tabs">
+    <a href="/share/{{.ShareID}}" class="tab tab-active">Overview</a>
+    {{if .HasBrand}}<a href="/share/{{.ShareID}}/brand" class="tab">Brand</a>{{end}}
+    {{if .HasVideo}}<a href="/share/{{.ShareID}}/video" class="tab">Video</a>{{end}}
+    {{if .HasReddit}}<a href="/share/{{.ShareID}}/reddit" class="tab">Reddit</a>{{end}}
+    {{if .HasSearch}}<a href="/share/{{.ShareID}}/search" class="tab">Search</a>{{end}}
+    {{if .HasTodos}}<a href="/share/{{.ShareID}}/todos" class="tab">To-Do</a>{{end}}
+  </div>
+
+  {{if .Summary}}
+  <!-- Executive Summary -->
+  <section>
+    <h2>Executive Summary</h2>
+    <div class="digest">
+      <p>{{nl2br .Summary}}</p>
+    </div>
+  </section>
+  {{end}}
+
+  <!-- Visibility Score Components -->
+  {{if .Components}}
+  <section>
+    <h2>Visibility Score Breakdown</h2>
+    <div class="card-padded">
+      {{range .Components}}
+      {{if .Available}}
+      <div class="vs-row">
+        <span class="vs-name">{{.Name}}</span>
+        <div class="score-bar">
+          <div class="score-bar-fill {{barClass .Score}}" style="width:{{.Score}}%"></div>
+        </div>
+        <span class="vs-score-num" style="color:{{if ge .Score 70}}#22c55e{{else if ge .Score 40}}#eab308{{else}}#ef4444{{end}}">{{.Score}}</span>
+        <span class="vs-weight">{{pct .Weight}}%</span>
+      </div>
+      {{end}}
+      {{end}}
+    </div>
+  </section>
+  {{end}}
+
+  {{if .Optimizations}}
+  <!-- Recent Optimization Reports -->
+  <section>
+    <h2>Answer Optimization Reports</h2>
+    <p class="section-desc">How well your content answers the questions AI search engines ask.</p>
+    {{range .Optimizations}}
+    <div class="card" style="display:flex;align-items:flex-start;gap:.75rem">
+      <div class="score-sm score-{{scoreClass .Result.OverallScore}}">{{.Result.OverallScore}}</div>
+      <div class="min-w-0 flex-1">
+        <p class="card-title">{{.Question}}</p>
+        <div class="flex gap-2 mt-1" style="flex-wrap:wrap">
+          <span class="pill">Content: {{.Result.ContentAuthority.Score}}</span>
+          <span class="pill">Structure: {{.Result.StructuralOptimization.Score}}</span>
+          <span class="pill">Source: {{.Result.SourceAuthority.Score}}</span>
+          <span class="pill">Persistence: {{.Result.KnowledgePersistence.Score}}</span>
+        </div>
+      </div>
+    </div>
+    {{end}}
+  </section>
+  {{end}}
+
+  <!-- Links to detailed sub-pages -->
+  <section>
+    <h2>Detailed Analysis</h2>
+    <div class="grid-2">
+      {{if .HasBrand}}
+      <a href="/share/{{.ShareID}}/brand" class="card-padded" style="display:block">
+        <h3>Brand Intelligence</h3>
+        <p class="text-sm text-muted">Competitors, target queries, key messages, differentiators, and audience profile.</p>
+      </a>
+      {{end}}
+      {{if .HasVideo}}
+      <a href="/share/{{.ShareID}}/video" class="card-padded" style="display:block">
+        <h3>Video Authority {{if .VideoScore}}<span class="pill pill-{{scoreClass .VideoScore}}">{{.VideoScore}}</span>{{end}}</h3>
+        <p class="text-sm text-muted">YouTube presence analysis across transcript authority, topical dominance, citation network, and brand narrative.</p>
+      </a>
+      {{end}}
+      {{if .HasReddit}}
+      <a href="/share/{{.ShareID}}/reddit" class="card-padded" style="display:block">
+        <h3>Reddit Authority {{if .RedditScore}}<span class="pill pill-{{scoreClass .RedditScore}}">{{.RedditScore}}</span>{{end}}</h3>
+        <p class="text-sm text-muted">Community discussion analysis across presence, sentiment, competitive positioning, and training signal strength.</p>
+      </a>
+      {{end}}
+      {{if .HasSearch}}
+      <a href="/share/{{.ShareID}}/search" class="card-padded" style="display:block">
+        <h3>Search Visibility {{if .SearchScore}}<span class="pill pill-{{scoreClass .SearchScore}}">{{.SearchScore}}</span>{{end}}</h3>
+        <p class="text-sm text-muted">AI Overview readiness, crawl accessibility, brand search momentum, content freshness, and category discovery.</p>
+      </a>
+      {{end}}
+      {{if .HasTodos}}
+      <a href="/share/{{.ShareID}}/todos" class="card-padded" style="display:block">
+        <h3>Action Items <span class="pill">{{.TodoCount}}</span></h3>
+        <p class="text-sm text-muted">Prioritized optimization recommendations with expected impact.</p>
+      </a>
+      {{end}}
+    </div>
+  </section>
+
+  <section>
+    <div class="cta">
+      <h3>Get your own visibility report</h3>
+      <p>Analyze your brand's AI search presence and get actionable optimization recommendations.</p>
+      <div class="cta-buttons">
+        <a href="/signup" class="btn-primary">Get Started Free</a>
+      </div>
+    </div>
+  </section>
+</main>
+{{end}}
