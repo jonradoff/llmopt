@@ -461,6 +461,7 @@ func main() {
 	mux.HandleFunc("GET /robots.txt", handleRobotsTxt())
 	mux.HandleFunc("GET /sitemap.xml", handleSitemap(mongoDB))
 	mux.HandleFunc("GET /research", handleResearchPage())
+	mux.HandleFunc("GET /research/", handleResearchPage())
 
 	// Serve main frontend static files if available
 	staticDir := os.Getenv("STATIC_DIR")
