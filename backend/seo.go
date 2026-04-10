@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"golang.org/x/sync/errgroup"
 )
@@ -310,14 +311,15 @@ func fetchFullShareData(ctx context.Context, mongoDB *MongoDB, ds *DomainShare, 
 
 // ---------- page handlers ----------
 
-// homeBrand is a simplified brand entry for the homepage grid.
+// homeBrand is a brand entry for the homepage grid.
 type homeBrand struct {
-	Domain      string
-	BrandName   string
-	ShareID     string
-	AvgScore    int
-	ReportCount int
-	HasVideo    bool
+	Domain        string
+	BrandName     string
+	ShareID       string
+	AvgScore      int
+	ReportCount   int
+	HasVideo      bool
+	HasScreenshot bool
 }
 
 // handleHomePage serves the server-rendered marketing homepage.
@@ -337,32 +339,171 @@ func handleHomePage(mongoDB *MongoDB, staticDir string) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		var brands []homeBrand
-
 		cur, err := mongoDB.DomainShares().Find(ctx, bson.M{"visibility": "popular"})
-		if err == nil {
-			var shares []DomainShare
-			if cur.All(ctx, &shares) == nil {
-				for _, s := range shares {
-					brandName := s.Domain
-					var bp BrandProfile
-					if mongoDB.BrandProfiles().FindOne(ctx, bson.M{
-						"tenantId": s.TenantID,
-						"domain":   s.Domain,
-					}).Decode(&bp) == nil && bp.BrandName != "" {
-						brandName = bp.BrandName
-					}
-					brands = append(brands, homeBrand{
-						Domain:    s.Domain,
-						BrandName: brandName,
-						ShareID:   s.ShareID,
-					})
-				}
-			}
+		if err != nil {
+			w.Header().Set("Cache-Control", "public, max-age=300")
+			renderPage(w, "home.html", homeData{})
+			return
+		}
+		var shares []DomainShare
+		if cur.All(ctx, &shares) != nil || len(shares) == 0 {
+			w.Header().Set("Cache-Control", "public, max-age=300")
+			renderPage(w, "home.html", homeData{})
+			return
 		}
 
+		// Build lookup structures (same batch approach as handleGetPopularDomains)
+		type domainKey struct{ tenantID, domain string }
+		keyIndex := make(map[domainKey]int, len(shares))
+		results := make([]homeBrand, len(shares))
+		orFilter := make(bson.A, 0, len(shares))
+		domains := make([]string, 0, len(shares))
+
+		for i, s := range shares {
+			results[i] = homeBrand{Domain: s.Domain, ShareID: s.ShareID, BrandName: s.Domain}
+			keyIndex[domainKey{s.TenantID, s.Domain}] = i
+			orFilter = append(orFilter, bson.M{"tenantId": s.TenantID, "domain": s.Domain})
+			domains = append(domains, s.Domain)
+		}
+		batchFilter := bson.M{"$or": orFilter}
+
+		g, gctx := errgroup.WithContext(ctx)
+
+		// Brand names
+		g.Go(func() error {
+			bpCur, err := mongoDB.BrandProfiles().Find(gctx, batchFilter,
+				options.Find().SetProjection(bson.M{"tenantId": 1, "domain": 1, "brandName": 1}))
+			if err != nil {
+				return nil
+			}
+			defer bpCur.Close(gctx)
+			for bpCur.Next(gctx) {
+				var bp struct {
+					TenantID  string `bson:"tenantId"`
+					Domain    string `bson:"domain"`
+					BrandName string `bson:"brandName"`
+				}
+				if bpCur.Decode(&bp) == nil {
+					if idx, ok := keyIndex[domainKey{bp.TenantID, bp.Domain}]; ok && bp.BrandName != "" {
+						results[idx].BrandName = bp.BrandName
+					}
+				}
+			}
+			return nil
+		})
+
+		// Optimization counts + avg scores
+		g.Go(func() error {
+			pipeline := mongo.Pipeline{
+				{{Key: "$match", Value: batchFilter}},
+				{{Key: "$group", Value: bson.D{
+					{Key: "_id", Value: bson.D{{Key: "tenantId", Value: "$tenantId"}, {Key: "domain", Value: "$domain"}}},
+					{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+					{Key: "avgScore", Value: bson.D{{Key: "$avg", Value: "$result.overallScore"}}},
+				}}},
+			}
+			oCur, err := mongoDB.Optimizations().Aggregate(gctx, pipeline)
+			if err != nil {
+				return nil
+			}
+			defer oCur.Close(gctx)
+			for oCur.Next(gctx) {
+				var row struct {
+					ID       struct{ TenantID, Domain string } `bson:"_id"`
+					Count    int                               `bson:"count"`
+					AvgScore float64                           `bson:"avgScore"`
+				}
+				if oCur.Decode(&row) == nil {
+					if idx, ok := keyIndex[domainKey{row.ID.TenantID, row.ID.Domain}]; ok {
+						results[idx].ReportCount = row.Count
+						results[idx].AvgScore = int(row.AvgScore)
+					}
+				}
+			}
+			return nil
+		})
+
+		// Analysis counts (fallback for report count)
+		g.Go(func() error {
+			pipeline := mongo.Pipeline{
+				{{Key: "$match", Value: batchFilter}},
+				{{Key: "$group", Value: bson.D{
+					{Key: "_id", Value: bson.D{{Key: "tenantId", Value: "$tenantId"}, {Key: "domain", Value: "$domain"}}},
+					{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+				}}},
+			}
+			aCur, err := mongoDB.Analyses().Aggregate(gctx, pipeline)
+			if err != nil {
+				return nil
+			}
+			defer aCur.Close(gctx)
+			for aCur.Next(gctx) {
+				var row struct {
+					ID    struct{ TenantID, Domain string } `bson:"_id"`
+					Count int                               `bson:"count"`
+				}
+				if aCur.Decode(&row) == nil {
+					if idx, ok := keyIndex[domainKey{row.ID.TenantID, row.ID.Domain}]; ok {
+						// Only set if no optimization count yet
+						if results[idx].ReportCount == 0 {
+							results[idx].ReportCount = row.Count
+						}
+					}
+				}
+			}
+			return nil
+		})
+
+		// Video existence
+		g.Go(func() error {
+			vCur, err := mongoDB.VideoAnalyses().Find(gctx, batchFilter,
+				options.Find().SetProjection(bson.M{"tenantId": 1, "domain": 1}))
+			if err != nil {
+				return nil
+			}
+			defer vCur.Close(gctx)
+			for vCur.Next(gctx) {
+				var v struct {
+					TenantID string `bson:"tenantId"`
+					Domain   string `bson:"domain"`
+				}
+				if vCur.Decode(&v) == nil {
+					if idx, ok := keyIndex[domainKey{v.TenantID, v.Domain}]; ok {
+						results[idx].HasVideo = true
+					}
+				}
+			}
+			return nil
+		})
+
+		// Screenshot existence
+		g.Go(func() error {
+			ssCur, err := mongoDB.BrandScreenshots().Find(gctx,
+				bson.M{"domain": bson.M{"$in": domains}, "sizeBytes": bson.M{"$gt": 0}},
+				options.Find().SetProjection(bson.M{"domain": 1}))
+			if err != nil {
+				return nil
+			}
+			defer ssCur.Close(gctx)
+			for ssCur.Next(gctx) {
+				var ss struct {
+					Domain string `bson:"domain"`
+				}
+				if ssCur.Decode(&ss) == nil {
+					for i := range results {
+						if results[i].Domain == ss.Domain {
+							results[i].HasScreenshot = true
+						}
+					}
+				}
+			}
+			return nil
+		})
+
+		_ = g.Wait()
+
 		w.Header().Set("Cache-Control", "public, max-age=300")
-		renderPage(w, "home.html", homeData{Brands: brands})
+		renderPage(w, "home.html", homeData{Brands: results})
 	}
 }
 

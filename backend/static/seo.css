@@ -53,8 +53,8 @@ section{margin-bottom:3rem}
 .digest p:last-child{margin-bottom:0}
 
 /* Score badge */
-.score{display:inline-flex;align-items:center;justify-content:center;width:3rem;height:3rem;border-radius:50%;font-weight:700;font-size:1rem;flex-shrink:0}
-.score-sm{width:2rem;height:2rem;font-size:.75rem;border-radius:50%}
+.score{display:inline-flex;align-items:center;justify-content:center;width:3.5rem;height:3.5rem;border-radius:50%;font-weight:700;font-size:1.125rem;flex-shrink:0;line-height:1;text-align:center}
+.score-sm{display:inline-flex;align-items:center;justify-content:center;width:2.25rem;height:2.25rem;font-size:.8125rem;border-radius:50%;font-weight:700;line-height:1;text-align:center;flex-shrink:0}
 .score-green{background:rgba(34,197,94,.15);color:#22c55e;border:2px solid rgba(34,197,94,.3)}
 .score-yellow{background:rgba(234,179,8,.15);color:#eab308;border:2px solid rgba(234,179,8,.3)}
 .score-red{background:rgba(239,68,68,.15);color:#ef4444;border:2px solid rgba(239,68,68,.3)}
@@ -119,7 +119,9 @@ code.inline{color:#7c6aef;background:#15151f;padding:.125rem .375rem;border-radi
 .brand-card:hover{border-color:rgba(124,106,239,.4);color:inherit}
 .brand-card h3{font-size:1rem;color:#fff;margin-bottom:.25rem;display:block}
 .brand-card .domain{font-size:.75rem;color:#4a4a5e;margin-bottom:.75rem}
-.brand-card .stats{display:flex;gap:1rem;font-size:.75rem;color:#6b6b80}
+.brand-card .stats{display:flex;align-items:center;gap:1rem;font-size:.75rem;color:#6b6b80}
+.brand-screenshot{margin:-1.25rem -1.25rem .75rem;overflow:hidden;border-radius:.75rem .75rem 0 0}
+.brand-screenshot img{width:100%;height:auto;display:block;border-bottom:1px solid #1e1e2e}
 
 /* Framework cards (from research) */
 .fw-card{background:rgba(10,10,15,.5);border:1px solid #1e1e2e;border-radius:.75rem;padding:1.25rem;margin-bottom:1rem}

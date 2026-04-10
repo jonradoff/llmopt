@@ -52,17 +52,24 @@
     <div class="brand-grid">
       {{range .Brands}}
       <a href="/share/{{.ShareID}}" class="brand-card">
-        <h3>{{.BrandName}}</h3>
-        <div class="domain">{{.Domain}}</div>
-        <div class="stats">
-          {{if gt .AvgScore 0}}
-          <span class="flex items-center gap-1">
-            <span class="score-sm score-{{scoreClass .AvgScore}}">{{.AvgScore}}</span>
-            Score
-          </span>
-          {{end}}
-          <span>{{.ReportCount}} report{{if ne .ReportCount 1}}s{{end}}</span>
-          {{if .HasVideo}}<span>Video</span>{{end}}
+        {{if .HasScreenshot}}
+        <div class="brand-screenshot">
+          <img src="/api/share/popular/{{.Domain}}/screenshot" alt="{{.BrandName}} visibility report" loading="lazy">
+        </div>
+        {{end}}
+        <div class="brand-info">
+          <h3>{{.BrandName}}</h3>
+          <div class="domain">{{.Domain}}</div>
+          <div class="stats">
+            {{if gt .AvgScore 0}}
+            <span class="flex items-center gap-2">
+              <span class="score-sm score-{{scoreClass .AvgScore}}">{{.AvgScore}}</span>
+              <span>Score</span>
+            </span>
+            {{end}}
+            {{if gt .ReportCount 0}}<span>{{.ReportCount}} report{{if ne .ReportCount 1}}s{{end}}</span>{{end}}
+            {{if .HasVideo}}<span>Video</span>{{end}}
+          </div>
         </div>
       </a>
       {{end}}
