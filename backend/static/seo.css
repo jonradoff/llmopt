@@ -120,8 +120,9 @@ code.inline{color:#7c6aef;background:#15151f;padding:.125rem .375rem;border-radi
 .brand-card h3{font-size:1rem;color:#fff;margin-bottom:.25rem;display:block}
 .brand-card .domain{font-size:.75rem;color:#4a4a5e;margin-bottom:.75rem}
 .brand-card .stats{display:flex;align-items:center;gap:1rem;font-size:.75rem;color:#6b6b80}
-.brand-screenshot{margin:-1.25rem -1.25rem .75rem;overflow:hidden;border-radius:.75rem .75rem 0 0}
-.brand-screenshot img{width:100%;height:auto;display:block;border-bottom:1px solid #1e1e2e}
+.brand-screenshot{margin:-1.25rem -1.25rem .75rem;overflow:hidden;border-radius:.75rem .75rem 0 0;height:10rem;position:relative}
+.brand-screenshot img{width:100%;height:100%;object-fit:cover;object-position:top left;display:block}
+.brand-screenshot::after{content:'';position:absolute;bottom:0;left:0;right:0;height:3rem;background:linear-gradient(transparent,rgba(10,10,15,.9));pointer-events:none}
 
 /* Framework cards (from research) */
 .fw-card{background:rgba(10,10,15,.5);border:1px solid #1e1e2e;border-radius:.75rem;padding:1.25rem;margin-bottom:1rem}
