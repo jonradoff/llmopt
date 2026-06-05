@@ -49,8 +49,8 @@ type RateLimitConfig struct {
 var (
 	AnalyzeLimit        = RateLimitConfig{MaxRequests: 5, Window: time.Minute}
 	OptimizeLimit       = RateLimitConfig{MaxRequests: 10, Window: time.Minute}
-	VideoDiscoverLimit  = RateLimitConfig{MaxRequests: 3, Window: time.Minute}
-	VideoAnalyzeLimit   = RateLimitConfig{MaxRequests: 3, Window: time.Minute}
+	VideoDiscoverLimit  = RateLimitConfig{MaxRequests: 10, Window: time.Minute}
+	VideoAnalyzeLimit   = RateLimitConfig{MaxRequests: 10, Window: time.Minute}
 	RedditDiscoverLimit = RateLimitConfig{MaxRequests: 5, Window: time.Minute}
 	RedditAnalyzeLimit  = RateLimitConfig{MaxRequests: 3, Window: time.Minute}
 	SearchAnalyzeLimit  = RateLimitConfig{MaxRequests: 3, Window: time.Minute}

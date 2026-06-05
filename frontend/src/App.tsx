@@ -894,6 +894,7 @@ export default function App() {
   const [videoSearchTerms, setVideoSearchTerms] = useState<string[]>([])
   const [videoSearchTermSources, setVideoSearchTermSources] = useState<Map<string, 'brand' | 'optimization' | 'user'>>(new Map())
   const [videoSearchTermInput, setVideoSearchTermInput] = useState('')
+  const [videoIncludeBrandSearches, setVideoIncludeBrandSearches] = useState(true)
   const [videoDiscovering, setVideoDiscovering] = useState(false)
   const [discoveredVideos, setDiscoveredVideos] = useState<YouTubeVideo[]>([])
   const [selectedVideoIds, setSelectedVideoIds] = useState<Set<string>>(new Set())
@@ -1744,6 +1745,7 @@ export default function App() {
           channel_url: videoChannelURL.trim(),
           search_terms: videoSearchTerms,
           competitors,
+          include_brand_searches: videoIncludeBrandSearches,
         }),
       })
 
@@ -1807,7 +1809,7 @@ export default function App() {
     } finally {
       setVideoDiscovering(false)
     }
-  }, [videoDomain, videoChannelURL, videoSearchTerms])
+  }, [videoDomain, videoChannelURL, videoSearchTerms, videoIncludeBrandSearches])
 
   const videoAnalyze = useCallback(async () => {
     if (selectedVideoIds.size === 0) return
@@ -7684,6 +7686,23 @@ curl -X PATCH \\
                   </div>
                 </div>
 
+                {/* YouTube bot-detection warning */}
+                <div className="bg-amber-500/5 border border-amber-500/20 rounded-2xl p-5">
+                  <div className="flex gap-4">
+                    <div className="shrink-0 mt-0.5">
+                      <svg className="w-6 h-6 text-amber-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+                    </div>
+                    <div>
+                      <p className="text-amber-300 font-semibold text-sm">Heads up: YouTube bot detection may block transcript fetching</p>
+                      <p className="text-amber-400/80 text-xs mt-1.5 leading-relaxed">
+                        YouTube aggressively blocks transcript requests from datacenter IPs (including this hosted instance), so analyses run from here often fail to retrieve captions and produce empty or incomplete reports.
+                        The most reliable workaround is to <span className="font-semibold">self-host this tool on a machine with a residential IP</span> (your laptop, a home server, etc.) — the same code path works fine from a normal home connection.
+                        Source available at <a href="https://github.com/jonradoff/llmopt" target="_blank" rel="noreferrer" className="underline hover:text-amber-300">github.com/jonradoff/llmopt</a>.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
 
                 {/* Collapsible Settings */}
                 <div className="bg-dark-900/50 border border-dark-800 rounded-2xl overflow-hidden">
@@ -7809,6 +7828,21 @@ curl -X PATCH \\
                       className="w-full px-3 py-2 bg-dark-800 border border-dark-700 rounded-lg text-white placeholder:text-dark-600 focus:outline-none focus:border-primary-500/50 text-sm"
                     />
                   </div>
+
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={videoIncludeBrandSearches}
+                      onChange={e => setVideoIncludeBrandSearches(e.target.checked)}
+                      className="mt-0.5 accent-primary-500"
+                    />
+                    <span className="text-sm text-dark-300">
+                      Auto-search brand name
+                      <span className="block text-xs text-dark-500 mt-0.5">
+                        Runs <span className="text-dark-400">{'"<brand> review"'}</span>, <span className="text-dark-400">{'"<brand> tutorial"'}</span>, and <span className="text-dark-400">{'"<brand> vs <competitor>"'}</span> queries. Turn off if your brand name is a common phrase (e.g. dance/theater terms) — it generates many false positives.
+                      </span>
+                    </span>
+                  </label>
                 </div>
 
 

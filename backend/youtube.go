@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -13,8 +14,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sync"
+	"sync/atomic"
 
 	"strconv"
 	"strings"
@@ -313,30 +318,57 @@ var warpClient = sync.OnceValue(func() *http.Client {
 	}
 })
 
+// preferredTranscriptMethod stores the name of the last method that successfully
+// fetched a transcript. fetchTranscript reorders its method list to try this one
+// first — YouTube blocks tend to apply uniformly, so once we find a working surface
+// we should stay on it instead of paying latency for repeated dry runs.
+var preferredTranscriptMethod atomic.Value // string
+
 // fetchTranscript tries multiple methods in sequence to get a video's transcript.
 // Each method targets a different YouTube API surface with different IP-trust behavior.
-// If all direct methods are blocked, WARP-proxied methods are tried (residential Cloudflare IP).
-// Returns (transcript, methodName, error). methodName is set when a fallback method succeeded.
+// Methods are tried in priority order; once one succeeds, its name is cached and
+// floated to the top of the next call's list. WARP-proxied variants follow direct ones.
+// Returns (transcript, methodName, error).
 func fetchTranscript(videoID string) (string, string, error) {
 	type method struct {
 		name string
 		fn   func(string) (string, error)
 	}
 
-	// Phase 1: Direct methods (no proxy)
+	// Phase 1: Direct methods. Order = current expected reliability (most likely first).
+	// yt-dlp goes first because it ships ongoing fixes for YouTube's bot-detection
+	// (PO tokens, etc.) that pure-Go HTTP clients can't replicate. The InnerTube
+	// methods follow as fast-path fallbacks for when yt-dlp itself is unavailable
+	// or has a transient hiccup.
 	methods := []method{
-		{"android", fetchTranscriptAndroid},
+		{"yt-dlp", fetchTranscriptYtDlp},
+		{"tv-embed", fetchTranscriptTVEmbed},
+		{"mweb", fetchTranscriptMWeb},
 		{"web", fetchTranscriptWeb},
+		{"android", fetchTranscriptAndroid},
 		{"scrape", fetchTranscriptWatchPage},
 	}
 
-	// Phase 2: WARP-proxied methods (if WARP is available)
+	// Phase 2: WARP-proxied methods (if WARP is available), same priority order.
 	if wc := warpClient(); wc != nil {
 		methods = append(methods,
-			method{"warp-android", makeWarpAndroid(wc)},
+			method{"warp-yt-dlp", fetchTranscriptYtDlpWarp},
+			method{"warp-tv-embed", makeWarpTVEmbed(wc)},
+			method{"warp-mweb", makeWarpMWeb(wc)},
 			method{"warp-web", makeWarpWeb(wc)},
+			method{"warp-android", makeWarpAndroid(wc)},
 			method{"warp-scrape", makeWarpScrape(wc)},
 		)
+	}
+
+	// Float the most-recently-successful method to the front.
+	if pref, _ := preferredTranscriptMethod.Load().(string); pref != "" {
+		for i, m := range methods {
+			if m.name == pref && i > 0 {
+				methods[0], methods[i] = methods[i], methods[0]
+				break
+			}
+		}
 	}
 
 	var lastErr error
@@ -344,6 +376,7 @@ func fetchTranscript(videoID string) (string, string, error) {
 	for _, m := range methods {
 		transcript, err := m.fn(videoID)
 		if err == nil && transcript != "" {
+			preferredTranscriptMethod.Store(m.name)
 			return transcript, m.name, nil
 		}
 		if errors.Is(err, errNoCaptions) {
@@ -599,7 +632,7 @@ func fetchTranscriptWebWith(videoID string, httpClient *http.Client) (string, er
 		"context": map[string]any{
 			"client": map[string]any{
 				"clientName":    "WEB",
-				"clientVersion": "2.20240313.05.00",
+				"clientVersion": "2.20250312.04.00",
 				"hl":            "en",
 				"gl":            "US",
 			},
@@ -608,7 +641,81 @@ func fetchTranscriptWebWith(videoID string, httpClient *http.Client) (string, er
 		"contentCheckOk": true,
 		"racyCheckOk":    true,
 	})
-	ua := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+	ua := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+
+	playerResp, err := innertubePlayerRequest(videoID, body, ua, httpClient)
+	if err != nil {
+		return "", err
+	}
+
+	captionURL, err := extractCaptionURL(videoID, playerResp)
+	if err != nil {
+		return "", err
+	}
+
+	text, err := fetchCaptionXML(captionURL, ua, httpClient)
+	if err != nil {
+		return "", err
+	}
+	return text, nil
+}
+
+// fetchTranscriptTVEmbedWith fetches via TVHTML5_SIMPLY_EMBEDDED_PLAYER InnerTube.
+// The smart-TV embed surface tends to dodge bot-detection that gates the WEB client.
+func fetchTranscriptTVEmbedWith(videoID string, httpClient *http.Client) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+				"clientVersion": "2.0",
+				"clientScreen":  "EMBED",
+				"hl":            "en",
+				"gl":            "US",
+			},
+			"thirdParty": map[string]any{
+				"embedUrl": "https://www.youtube.com/",
+			},
+		},
+		"videoId":        videoID,
+		"contentCheckOk": true,
+		"racyCheckOk":    true,
+	})
+	ua := "Mozilla/5.0 (PlayStation; PlayStation 4/12.00) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15"
+
+	playerResp, err := innertubePlayerRequest(videoID, body, ua, httpClient)
+	if err != nil {
+		return "", err
+	}
+
+	captionURL, err := extractCaptionURL(videoID, playerResp)
+	if err != nil {
+		return "", err
+	}
+
+	text, err := fetchCaptionXML(captionURL, ua, httpClient)
+	if err != nil {
+		return "", err
+	}
+	return text, nil
+}
+
+// fetchTranscriptMWebWith fetches via MWEB (mobile web) InnerTube using the given HTTP client.
+// Mobile web tends to face lighter bot-detection than the desktop WEB client.
+func fetchTranscriptMWebWith(videoID string, httpClient *http.Client) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "MWEB",
+				"clientVersion": "2.20250311.03.00",
+				"hl":            "en",
+				"gl":            "US",
+			},
+		},
+		"videoId":        videoID,
+		"contentCheckOk": true,
+		"racyCheckOk":    true,
+	})
+	ua := "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
 
 	playerResp, err := innertubePlayerRequest(videoID, body, ua, httpClient)
 	if err != nil {
@@ -691,6 +798,124 @@ func fetchTranscriptScrapeWith(videoID string, httpClient *http.Client) (string,
 	return text, nil
 }
 
+// fetchTranscriptYtDlpWith fetches subtitles via the yt-dlp subprocess.
+// proxyURL is optional ("socks5://127.0.0.1:40000" routes via WARP; empty = direct).
+// yt-dlp ships fast updates against YouTube bot-detection changes (PO tokens, client
+// signing, etc.) that pure-Go HTTP clients can't keep up with — this is the durable
+// path when InnerTube methods all return LOGIN_REQUIRED.
+func fetchTranscriptYtDlpWith(videoID, proxyURL string) (string, error) {
+	ytdlpPath, err := exec.LookPath("yt-dlp")
+	if err != nil {
+		return "", fmt.Errorf("yt-dlp not installed")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "yt-transcript-*")
+	if err != nil {
+		return "", fmt.Errorf("mkdtemp failed: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	args := []string{
+		"--skip-download",
+		"--write-auto-subs",
+		"--write-subs",
+		"--sub-langs", "en.*,en",
+		"--sub-format", "vtt",
+		"--no-warnings",
+		"--no-playlist",
+		"--retries", "1",
+		"--socket-timeout", "15",
+		"--no-cache-dir",
+		// EJS challenge-solver lib — auto-downloads on first use to solve YouTube's
+		// JS challenges. Without this, deno alone can't decode the obfuscated player
+		// signatures and every call falls back to LOGIN_REQUIRED.
+		"--remote-components", "ejs:github",
+		"-o", filepath.Join(tmpDir, "%(id)s"),
+	}
+	if proxyURL != "" {
+		args = append(args, "--proxy", proxyURL)
+	}
+	args = append(args, "https://www.youtube.com/watch?v="+videoID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, ytdlpPath, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		stderrText := stderr.String()
+		// Distinguish "no captions available" from real blocks/errors so the
+		// outer fetchTranscript loop can stop trying when the video genuinely
+		// has nothing to transcribe.
+		if strings.Contains(stderrText, "no subtitles") ||
+			strings.Contains(stderrText, "There are no subtitles") ||
+			strings.Contains(stderrText, "Video unavailable") {
+			return "", errNoCaptions
+		}
+		if strings.Contains(stderrText, "Sign in to confirm") ||
+			strings.Contains(stderrText, "not a bot") {
+			return "", fmt.Errorf("%w: yt-dlp: %s", errBlocked, truncStderr(stderrText))
+		}
+		return "", fmt.Errorf("yt-dlp failed: %v: %s", err, truncStderr(stderrText))
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(tmpDir, "*.vtt"))
+	if len(matches) == 0 {
+		return "", errNoCaptions
+	}
+
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		return "", fmt.Errorf("read vtt: %w", err)
+	}
+
+	return parseVTT(string(data)), nil
+}
+
+// vttInlineMarker strips inline timing/styling tags like <00:00:01.520> and <c>.
+var vttInlineMarker = regexp.MustCompile(`<[^>]*>`)
+
+// parseVTT converts a WebVTT caption file to plain text — strips timestamps,
+// metadata, inline markers, and deduplicates consecutive repeated lines
+// (auto-generated captions repeat each phrase as the running window scrolls).
+func parseVTT(s string) string {
+	var lines []string
+	var prev string
+	for _, raw := range strings.Split(s, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if line == "WEBVTT" || strings.Contains(line, "-->") {
+			continue
+		}
+		if strings.HasPrefix(line, "Kind:") ||
+			strings.HasPrefix(line, "Language:") ||
+			strings.HasPrefix(line, "NOTE") ||
+			strings.HasPrefix(line, "STYLE") {
+			continue
+		}
+		cleaned := strings.TrimSpace(vttInlineMarker.ReplaceAllString(line, ""))
+		cleaned = html.UnescapeString(cleaned)
+		if cleaned == "" || cleaned == prev {
+			continue
+		}
+		lines = append(lines, cleaned)
+		prev = cleaned
+	}
+	return strings.Join(lines, " ")
+}
+
+func truncStderr(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 200 {
+		return s[:200] + "…"
+	}
+	return s
+}
+
 // Direct method wrappers (nil = default HTTP client)
 func fetchTranscriptAndroid(videoID string) (string, error) {
 	return fetchTranscriptAndroidWith(videoID, nil)
@@ -698,8 +923,20 @@ func fetchTranscriptAndroid(videoID string) (string, error) {
 func fetchTranscriptWeb(videoID string) (string, error) {
 	return fetchTranscriptWebWith(videoID, nil)
 }
+func fetchTranscriptTVEmbed(videoID string) (string, error) {
+	return fetchTranscriptTVEmbedWith(videoID, nil)
+}
+func fetchTranscriptMWeb(videoID string) (string, error) {
+	return fetchTranscriptMWebWith(videoID, nil)
+}
 func fetchTranscriptWatchPage(videoID string) (string, error) {
 	return fetchTranscriptScrapeWith(videoID, nil)
+}
+func fetchTranscriptYtDlp(videoID string) (string, error) {
+	return fetchTranscriptYtDlpWith(videoID, "")
+}
+func fetchTranscriptYtDlpWarp(videoID string) (string, error) {
+	return fetchTranscriptYtDlpWith(videoID, "socks5://127.0.0.1:40000")
 }
 
 // WARP-proxied method factories
@@ -708,6 +945,12 @@ func makeWarpAndroid(wc *http.Client) func(string) (string, error) {
 }
 func makeWarpWeb(wc *http.Client) func(string) (string, error) {
 	return func(videoID string) (string, error) { return fetchTranscriptWebWith(videoID, wc) }
+}
+func makeWarpTVEmbed(wc *http.Client) func(string) (string, error) {
+	return func(videoID string) (string, error) { return fetchTranscriptTVEmbedWith(videoID, wc) }
+}
+func makeWarpMWeb(wc *http.Client) func(string) (string, error) {
+	return func(videoID string) (string, error) { return fetchTranscriptMWebWith(videoID, wc) }
 }
 func makeWarpScrape(wc *http.Client) func(string) (string, error) {
 	return func(videoID string) (string, error) { return fetchTranscriptScrapeWith(videoID, wc) }
@@ -1037,7 +1280,10 @@ func resolveChannelByUsername(apiKey, username string) (string, error) {
 
 // discoverVideos runs the auto-discovery process: searches YouTube for
 // brand-related, competitor, and category content.
-func discoverVideos(mongoDB *MongoDB, apiKey string, brandName, channelURL string, searchTerms, competitors, categories, keyUseCases []string, progress func(string)) ([]YouTubeVideo, int, error) {
+// includeBrandSearches gates the auto-generated `<brand> review`, `<brand> tutorial`,
+// and `<brand> vs <competitor>` queries — disable when the brand name is a common
+// phrase that would generate false positives.
+func discoverVideos(mongoDB *MongoDB, apiKey string, brandName, channelURL string, searchTerms, competitors, categories, keyUseCases []string, includeBrandSearches bool, progress func(string)) ([]YouTubeVideo, int, error) {
 	seen := make(map[string]bool)
 	var allVideos []YouTubeVideo
 	quotaUsed := 0
@@ -1064,45 +1310,58 @@ func discoverVideos(mongoDB *MongoDB, apiKey string, brandName, channelURL strin
 				progress(fmt.Sprintf("Found %d videos from your channel", len(videos)))
 			} else {
 				log.Printf("Warning: failed to fetch channel videos: %v", err)
-				progress("Could not fetch channel videos, continuing...")
+				progress(fmt.Sprintf("Could not fetch channel videos: %s", truncateErr(err, 200)))
 			}
 		} else {
 			log.Printf("Warning: failed to resolve channel ID from %s: %v", channelURL, err)
-			progress("Could not resolve channel URL, continuing...")
+			progress(fmt.Sprintf("Could not resolve channel URL: %s", truncateErr(err, 200)))
 		}
 	}
 
 	// 2. Brand-specific searches
 	searchCount := 0
-	totalSearches := 0
-	if brandName != "" {
-		totalSearches += 2 // review + tutorial
+	failedCount := 0
+	var firstErr error
+	recordErr := func(query string, err error) {
+		if err == nil {
+			return
+		}
+		failedCount++
+		if firstErr == nil {
+			firstErr = err
+		}
+		log.Printf("YouTube search failed [%q]: %v", query, err)
 	}
-	totalSearches += len(competitors)
+
+	totalSearches := 0
+	if brandName != "" && includeBrandSearches {
+		totalSearches += 2 // review + tutorial
+		totalSearches += len(competitors)
+	}
 	totalSearches += len(searchTerms)
 
 	if totalSearches > 0 {
 		progress(fmt.Sprintf("Searching YouTube across %d queries...", totalSearches))
 	}
 
-	if brandName != "" {
+	if brandName != "" && includeBrandSearches {
 		for _, suffix := range []string{"review", "tutorial"} {
 			query := brandName + " " + suffix
 			quotaUsed += 2
 			videos, err := cachedYouTubeSearch(mongoDB, apiKey, query, 10)
+			recordErr(query, err)
 			if err == nil {
 				addVideos(videos, "direct_mention")
 			}
 			searchCount++
 		}
-	}
 
-	// 3. Competitor comparison searches
-	for _, comp := range competitors {
-		if brandName != "" {
+		// 3. Competitor comparison searches (gated on same flag — brand name appears in every query)
+		for _, comp := range competitors {
 			query := brandName + " vs " + comp
 			quotaUsed += 2
 			videos, err := cachedYouTubeSearch(mongoDB, apiKey, query, 5)
+			recordErr(query, err)
 			if err == nil {
 				addVideos(videos, "competitor_comparison")
 			}
@@ -1114,6 +1373,7 @@ func discoverVideos(mongoDB *MongoDB, apiKey string, brandName, channelURL strin
 	for _, term := range searchTerms {
 		quotaUsed += 2
 		videos, err := cachedYouTubeSearch(mongoDB, apiKey, term, 10)
+		recordErr(term, err)
 		if err == nil {
 			addVideos(videos, "category_content")
 		}
@@ -1139,6 +1399,7 @@ func discoverVideos(mongoDB *MongoDB, apiKey string, brandName, channelURL strin
 	for _, term := range categorySearches {
 		quotaUsed += 2
 		videos, err := cachedYouTubeSearch(mongoDB, apiKey, term, 5)
+		recordErr(term, err)
 		if err == nil {
 			addVideos(videos, "category_content")
 		}
@@ -1146,9 +1407,26 @@ func discoverVideos(mongoDB *MongoDB, apiKey string, brandName, channelURL strin
 	}
 
 	if totalSearches > 0 {
-		progress(fmt.Sprintf("Completed %d searches — %d unique videos found", totalSearches, len(allVideos)))
+		if failedCount > 0 {
+			progress(fmt.Sprintf("Completed %d searches — %d unique videos found (%d failed: %s)",
+				totalSearches, len(allVideos), failedCount, truncateErr(firstErr, 200)))
+		} else {
+			progress(fmt.Sprintf("Completed %d searches — %d unique videos found", totalSearches, len(allVideos)))
+		}
 	}
 	return allVideos, quotaUsed, nil
+}
+
+// truncateErr returns the error string trimmed to max characters for display in progress messages.
+func truncateErr(err error, max int) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
 }
 
 // ── Unused import guard ─────────────────────────────────────────────────

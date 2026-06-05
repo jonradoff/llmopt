@@ -66,6 +66,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends cloudflare-warp \
     && rm -rf /var/lib/apt/lists/*
 
+# yt-dlp standalone binary — ships its own fast updates for YouTube's bot-detection
+# changes; used as a fallback transcript-fetcher in youtube.go.
+# Deno is required by yt-dlp's EJS (embedded JS) subsystem to solve YouTube's
+# JavaScript challenges; without it, every InnerTube call returns LOGIN_REQUIRED.
+RUN curl -fL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux \
+       -o /usr/local/bin/yt-dlp \
+    && chmod +x /usr/local/bin/yt-dlp \
+    && /usr/local/bin/yt-dlp --version \
+    && curl -fL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
+       -o /tmp/deno.zip \
+    && apt-get update && apt-get install -y --no-install-recommends unzip \
+    && unzip /tmp/deno.zip -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/deno \
+    && rm /tmp/deno.zip \
+    && apt-get purge -y unzip && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* \
+    && /usr/local/bin/deno --version
+
 WORKDIR /app
 
 # Copy llmopt binary

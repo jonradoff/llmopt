@@ -168,10 +168,12 @@ func main() {
 		}
 	}
 
-	// withRL wraps a handler with rate limiting by client IP.
+	// withRL wraps a handler with rate limiting by (client IP, request path).
+	// Keying on path as well prevents one endpoint's counter from gating another's —
+	// otherwise the most restrictive limit silently caps every endpoint per IP.
 	withRL := func(cfg ratelimit.RateLimitConfig, h http.HandlerFunc) http.HandlerFunc {
 		return rl.RateLimitHandler(cfg, func(r *http.Request) string {
-			return ratelimit.GetClientIP(r)
+			return ratelimit.GetClientIP(r) + "|" + r.URL.Path
 		}, h)
 	}
 
@@ -5280,15 +5282,20 @@ func handleVideoDiscover(mongoDB *MongoDB, encKey []byte, systemYTKey string, sa
 		}
 
 		var req struct {
-			Domain      string   `json:"domain"`
-			BrandName   string   `json:"brand_name"`
-			ChannelURL  string   `json:"channel_url"`
-			SearchTerms []string `json:"search_terms"`
-			Competitors []string `json:"competitors"`
+			Domain               string   `json:"domain"`
+			BrandName            string   `json:"brand_name"`
+			ChannelURL           string   `json:"channel_url"`
+			SearchTerms          []string `json:"search_terms"`
+			Competitors          []string `json:"competitors"`
+			IncludeBrandSearches *bool    `json:"include_brand_searches,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			sendSSE(w, flusher, "error", map[string]string{"message": "Invalid request body"})
 			return
+		}
+		includeBrandSearches := true // default on (opt-out)
+		if req.IncludeBrandSearches != nil {
+			includeBrandSearches = *req.IncludeBrandSearches
 		}
 
 		progress := func(msg string) {
@@ -5307,7 +5314,7 @@ func handleVideoDiscover(mongoDB *MongoDB, encKey []byte, systemYTKey string, sa
 			bCancel()
 		}
 
-		videos, quotaUsed, err := discoverVideos(mongoDB, ytKey, req.BrandName, req.ChannelURL, req.SearchTerms, req.Competitors, categories, keyUseCases, progress)
+		videos, quotaUsed, err := discoverVideos(mongoDB, ytKey, req.BrandName, req.ChannelURL, req.SearchTerms, req.Competitors, categories, keyUseCases, includeBrandSearches, progress)
 		if err != nil {
 			sendSSE(w, flusher, "error", map[string]string{"message": err.Error()})
 			return
