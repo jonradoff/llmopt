@@ -530,6 +530,102 @@ func buildReportPDF(
 			pdfBodyText(pdf, vr.ExecutiveSummary)
 		}
 
+		// What LLMs probably believe about the brand (narrative + sentiment)
+		if vr.BrandNarrative.NarrativeSummary != "" {
+			pdfCheckPageBreak(pdf, 24)
+			pdfSubHeader(pdf, "What LLMs Probably Believe About You")
+			pdfBodyText(pdf, vr.BrandNarrative.NarrativeSummary)
+			if s := vr.BrandNarrative.Sentiment; s.Total > 0 {
+				pdf.SetFont("Helvetica", "", 10)
+				pdf.SetTextColor(80, 80, 80)
+				pdf.CellFormat(0, 5, fmt.Sprintf("Sentiment across %d mentions: %d%% positive, %d%% neutral, %d%% negative",
+					s.Total, s.Positive*100/s.Total, s.Neutral*100/s.Total, s.Negative*100/s.Total), "", 1, "L", false, 0, "")
+				pdf.Ln(2)
+			}
+		}
+
+		// Key themes LLMs associate with the brand
+		if len(vr.BrandNarrative.KeyThemes) > 0 {
+			pdfCheckPageBreak(pdf, 14)
+			pdfSubHeader(pdf, "Key Themes")
+			pdfBodyText(pdf, strings.Join(vr.BrandNarrative.KeyThemes, " - "))
+		}
+
+		// Share of voice vs. competitors
+		if len(vr.TopicalDominance.ShareOfVoice) > 0 {
+			pdfCheckPageBreak(pdf, 20)
+			pdfSubHeader(pdf, "Share of Voice")
+			for _, sov := range vr.TopicalDominance.ShareOfVoice {
+				pdfCheckPageBreak(pdf, 6)
+				pdf.SetFont("Helvetica", "B", 10)
+				pdf.SetTextColor(80, 80, 80)
+				pdf.CellFormat(20, 5, fmt.Sprintf("%.0f%%", sov.Percentage), "", 0, "L", false, 0, "")
+				pdf.SetFont("Helvetica", "", 10)
+				pdf.SetTextColor(60, 60, 60)
+				pdf.CellFormat(0, 5, fmt.Sprintf("%s (%d mentions)", pdfCleanText(sov.BrandName), sov.MentionCount), "", 1, "L", false, 0, "")
+			}
+			pdf.Ln(2)
+		}
+
+		// Content gap opportunities
+		if len(vr.TopicalDominance.ContentGaps) > 0 {
+			pdfCheckPageBreak(pdf, 20)
+			pdfSubHeader(pdf, "Content Gap Opportunities")
+			for _, cg := range vr.TopicalDominance.ContentGaps {
+				pdfCheckPageBreak(pdf, 10)
+				line := cg.Query
+				if cg.Recommendation != "" {
+					line = cg.Query + " - " + cg.Recommendation
+				}
+				pdfBullet(pdf, line)
+			}
+			pdf.Ln(2)
+		}
+
+		// Top third-party creators citing the brand
+		if len(vr.CitationNetwork.TopCreators) > 0 {
+			pdfCheckPageBreak(pdf, 20)
+			pdfSubHeader(pdf, "Top Creators")
+			for _, c := range vr.CitationNetwork.TopCreators {
+				pdfCheckPageBreak(pdf, 6)
+				pdf.SetFont("Helvetica", "B", 10)
+				cr, cg, cb := scoreToRGB(c.AuthorityScore)
+				pdf.SetTextColor(cr, cg, cb)
+				pdf.CellFormat(15, 5, fmt.Sprintf("%d", c.AuthorityScore), "", 0, "L", false, 0, "")
+				pdf.SetFont("Helvetica", "", 10)
+				pdf.SetTextColor(60, 60, 60)
+				detail := pdfCleanText(c.ChannelTitle)
+				if c.Role != "" {
+					detail += " (" + c.Role + ")"
+				}
+				pdf.CellFormat(0, 5, detail, "", 1, "L", false, 0, "")
+			}
+			pdf.Ln(2)
+		}
+
+		// Creator outreach targets
+		if len(vr.CitationNetwork.CreatorTargets) > 0 {
+			pdfCheckPageBreak(pdf, 20)
+			pdfSubHeader(pdf, "Creator Outreach Targets")
+			for _, ct := range vr.CitationNetwork.CreatorTargets {
+				pdfCheckPageBreak(pdf, 10)
+				line := ct.ChannelTitle
+				if ct.OutreachReason != "" {
+					line = ct.ChannelTitle + " - " + ct.OutreachReason
+				}
+				pdfBullet(pdf, line)
+			}
+			pdf.Ln(2)
+		}
+
+		if vr.ConfidenceNote != "" {
+			pdfCheckPageBreak(pdf, 14)
+			pdf.SetFont("Helvetica", "I", 9)
+			pdf.SetTextColor(120, 120, 120)
+			pdf.MultiCell(0, 4, pdfCleanText("Note: "+vr.ConfidenceNote), "", "L", false)
+			pdf.Ln(2)
+		}
+
 		if len(vr.VideoScorecards) > 0 {
 			pdfCheckPageBreak(pdf, 20)
 			pdfSubHeader(pdf, "Video Scorecards")
