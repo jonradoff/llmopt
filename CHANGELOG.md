@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-18
+
+- **LLM Test**: added a periodic SSE heartbeat to all 15 streaming endpoints, keeping the connection alive through long, silent LLM calls. Fixes the "Load Failed" error that dropped the Test stream mid-run behind the production proxy chain (Fly edge -> Caddy).
+- **LLM Test**: Phase 1 provider queries now run concurrently (capped at 6) instead of sequentially, cutting a large provider×query matrix from the sum of all calls to roughly the slowest single call. The overall request timeout was raised from 5 to 15 minutes. Together these fix the "Could not resolve primary LLM for evaluation" error that occurred when a long run exhausted the request budget before the evaluation step.
+- **API keys**: `resolveProviderKey`/`resolvePrimaryLLM` no longer map transient DB/context errors to `api_key_required`; a genuinely-missing key returns a sentinel error while real failures are wrapped and logged. The Test evaluation also falls back to a tested provider's key when the primary provider has none configured.
+- **Report**: the aggregate PDF's "YouTube Video Authority" section now renders the brand narrative ("What LLMs Probably Believe About You") with sentiment, key themes, share of voice, content-gap opportunities, top creators, creator outreach targets, and the confidence note — matching the YouTube tab instead of showing only scores and scorecard titles.
+
 ## 2026-06-05
 
 - **Video Authority**: added warning banner explaining that YouTube's bot detection frequently blocks transcript fetching from datacenter IPs (including the hosted instance at llmopt.fly.dev), and recommending self-hosting on a residential connection for reliable results.
