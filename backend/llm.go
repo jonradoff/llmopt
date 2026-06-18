@@ -2,12 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 
 	"llmopt/internal/saas"
 )
+
+// errAPIKeyRequired signals that a tenant genuinely has no API key configured
+// for the requested provider — as opposed to a transient DB or context error,
+// which must not be misreported as a missing key.
+var errAPIKeyRequired = errors.New("api_key_required")
 
 // resolveProviderKey looks up the tenant's API key for the given provider,
 // decrypts it, and returns the plaintext key. In non-SaaS mode (dev), falls
@@ -18,7 +25,7 @@ func resolveProviderKey(ctx context.Context, mongoDB *MongoDB, encKey []byte, fa
 		if providerID == "anthropic" {
 			return fallbackKey, nil
 		}
-		return "", fmt.Errorf("api_key_required")
+		return "", errAPIKeyRequired
 	}
 
 	tenantID := saas.TenantIDFromContext(ctx)
@@ -31,12 +38,15 @@ func resolveProviderKey(ctx context.Context, mongoDB *MongoDB, encKey []byte, fa
 		"tenantId": tenantID,
 		"provider": providerID,
 	}).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", errAPIKeyRequired
+	}
 	if err != nil {
-		return "", fmt.Errorf("api_key_required")
+		return "", fmt.Errorf("looking up API key for %s: %w", providerID, err)
 	}
 
 	if doc.EncryptedKey == "" {
-		return "", fmt.Errorf("api_key_required")
+		return "", errAPIKeyRequired
 	}
 
 	plaintext, err := decryptSecret(doc.EncryptedKey, encKey)
@@ -80,12 +90,15 @@ func resolvePrimaryLLM(ctx context.Context, mongoDB *MongoDB, encKey []byte, fal
 		"tenantId": tenantID,
 		"provider": primaryProviderID,
 	}).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, "", "", errAPIKeyRequired
+	}
 	if err != nil {
-		return nil, "", "", fmt.Errorf("api_key_required")
+		return nil, "", "", fmt.Errorf("looking up API key for %s: %w", primaryProviderID, err)
 	}
 
 	if doc.EncryptedKey == "" {
-		return nil, "", "", fmt.Errorf("api_key_required")
+		return nil, "", "", errAPIKeyRequired
 	}
 
 	plaintext, err := decryptSecret(doc.EncryptedKey, encKey)

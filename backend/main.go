@@ -8365,7 +8365,9 @@ func handleDeleteLLMTest(mongoDB *MongoDB) http.HandlerFunc {
 
 func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		// Generous budget: Phase 1 runs many provider calls (now in parallel) plus
+		// a large evaluation pass. 15 min leaves headroom for big provider matrices.
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 		defer cancel()
 		r = r.WithContext(ctx)
 		startTime := time.Now()
@@ -8433,6 +8435,11 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 		// providers we just validated for this test (its key is known good).
 		evalProvider, evalKey, _, primErr := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if primErr != nil {
+			if !errors.Is(primErr, errAPIKeyRequired) {
+				// A real DB/context failure — surface it instead of pretending a
+				// key is missing, and don't silently fall through.
+				log.Printf("LLM test: failed to resolve primary LLM: %v", primErr)
+			}
 			if len(providerKeys) > 0 {
 				evalProvider = providerKeys[0].provider
 				evalKey = providerKeys[0].apiKey
@@ -8461,9 +8468,18 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 			"message": fmt.Sprintf("Testing %d queries across %d providers (%d total calls)...", len(req.Queries), len(req.Providers), totalCalls),
 		})
 
-		// Phase 1: Query each provider with each query
-		responses := make([]testRawResponse, 0, totalCalls)
-
+		// Phase 1: Query each provider with each query. Calls run concurrently
+		// (capped) so a large provider×query matrix finishes in roughly the time
+		// of the slowest single call instead of the sum of all of them — which is
+		// what previously pushed long runs past the request timeout.
+		type queryJob struct {
+			provider LLMProvider
+			apiKey   string
+			model    ModelDef
+			queryIdx int
+			query    string
+		}
+		var jobs []queryJob
 		for _, pk := range providerKeys {
 			// Use model override if specified, otherwise use primary model
 			model := pk.provider.Models()[0]
@@ -8476,22 +8492,38 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 				}
 			}
 			for qi, q := range req.Queries {
-				completedCalls++
-				sendSSE(w, flusher, "status", map[string]string{
-					"message": fmt.Sprintf("[%d/%d] Querying %s (%s): \"%s\"...", completedCalls, totalCalls, pk.provider.Name(), model.Name, truncateStr(q.Query, 60)),
-				})
+				jobs = append(jobs, queryJob{provider: pk.provider, apiKey: pk.apiKey, model: model, queryIdx: qi, query: q.Query})
+			}
+		}
 
-				resp, err := pk.provider.Call(r.Context(), pk.apiKey, model.ID, q.Query, 4096)
+		responses := make([]testRawResponse, 0, totalCalls)
+		var respMu sync.Mutex
+
+		var g errgroup.Group
+		g.SetLimit(6) // cap concurrent provider calls to stay within BYOK rate limits
+		for _, j := range jobs {
+			j := j
+			g.Go(func() error {
+				resp, err := j.provider.Call(r.Context(), j.apiKey, j.model.ID, j.query, 4096)
+				respMu.Lock()
+				completedCalls++
+				n := completedCalls
 				responses = append(responses, testRawResponse{
-					providerID:   pk.provider.ProviderID(),
-					providerName: pk.provider.Name(),
-					model:        model.Name,
-					queryIdx:     qi,
+					providerID:   j.provider.ProviderID(),
+					providerName: j.provider.Name(),
+					model:        j.model.Name,
+					queryIdx:     j.queryIdx,
 					response:     resp,
 					err:          err,
 				})
-			}
+				respMu.Unlock()
+				sendSSE(w, flusher, "status", map[string]string{
+					"message": fmt.Sprintf("[%d/%d] %s (%s): \"%s\"", n, totalCalls, j.provider.Name(), j.model.Name, truncateStr(j.query, 60)),
+				})
+				return nil // per-call errors are captured in the response, never abort the group
+			})
 		}
+		_ = g.Wait()
 
 		// Phase 2: Evaluate all responses using the eval LLM resolved up front
 		sendSSE(w, flusher, "status", map[string]string{
