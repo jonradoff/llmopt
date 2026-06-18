@@ -589,6 +589,40 @@ func sendSSE(w http.ResponseWriter, f http.Flusher, eventType string, data any) 
 	f.Flush()
 }
 
+// startSSEHeartbeat emits a periodic SSE comment (": ping") to keep the
+// connection alive through long, silent server-side work such as blocking LLM
+// calls. Without it, intermediaries on the production path (Fly edge proxy →
+// Caddy reverse proxy) close idle streaming connections, which surfaces in the
+// browser as a fetch "Load failed"/"network error" mid-test. Comment lines are
+// ignored by the frontend SSE parser, so they are invisible to clients. The
+// returned stop function must be deferred; it blocks until the heartbeat
+// goroutine has fully exited so it can never race with the handler's final
+// write or the connection teardown.
+func startSSEHeartbeat(w http.ResponseWriter, f http.Flusher) func() {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				sseMu.Lock()
+				fmt.Fprint(w, ": ping\n\n")
+				f.Flush()
+				sseMu.Unlock()
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-stopped
+	}
+}
+
 // saveAndSendDone parses the result, saves to MongoDB, and sends the done SSE event.
 func saveAndSendDone(w http.ResponseWriter, flusher http.Flusher, ctx context.Context, mongoDB *MongoDB, domain string, rawText string, resultJSON string, model string, brandInfo BrandContextInfo) {
 	resultJSON = stripJSONFencing(resultJSON)
@@ -902,6 +936,7 @@ func handleAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		var req struct {
 			URL   string `json:"url"`
@@ -2046,6 +2081,7 @@ func handleOptimize(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEna
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		// Parse path params
 		analysisIDStr := r.PathValue("id")
@@ -4317,6 +4353,7 @@ func handleGenerateDomainSummary(mongoDB *MongoDB, encKey []byte, fallbackKey st
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		// Resolve primary LLM provider and API key for this tenant
 		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
@@ -4526,6 +4563,7 @@ func handleDiscoverCompetitors(mongoDB *MongoDB, encKey []byte, fallbackKey stri
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
@@ -4658,6 +4696,7 @@ func handleSuggestQueries(mongoDB *MongoDB, encKey []byte, fallbackKey string, s
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
@@ -4796,6 +4835,7 @@ func handleGenerateDescription(mongoDB *MongoDB, encKey []byte, fallbackKey stri
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
@@ -4890,6 +4930,7 @@ func handlePredictAudience(mongoDB *MongoDB, encKey []byte, fallbackKey string, 
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
@@ -5006,6 +5047,7 @@ func handleSuggestClaims(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
@@ -5129,6 +5171,7 @@ func handlePredictDifferentiators(mongoDB *MongoDB, encKey []byte, fallbackKey s
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
@@ -5280,6 +5323,7 @@ func handleVideoDiscover(mongoDB *MongoDB, encKey []byte, systemYTKey string, sa
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		var req struct {
 			Domain               string   `json:"domain"`
@@ -5830,6 +5874,7 @@ func handleVideoAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, saa
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
@@ -6566,6 +6611,7 @@ func handleRedditDiscover(mongoDB *MongoDB) http.HandlerFunc {
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		var req struct {
 			Domain      string   `json:"domain"`
@@ -6734,6 +6780,7 @@ func handleRedditAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
@@ -7435,6 +7482,7 @@ func handleSearchAnalyze(mongoDB *MongoDB, encKey []byte, fallbackKey string, sa
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		provider, apiKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
 		if err != nil {
@@ -8331,6 +8379,7 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
+		defer startSSEHeartbeat(w, flusher)()
 
 		var req struct {
 			Domain       string            `json:"domain"`
