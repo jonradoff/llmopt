@@ -8427,6 +8427,21 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 			providerKeys = append(providerKeys, providerWithKey{provider: p, apiKey: key})
 		}
 
+		// Resolve the LLM used for the evaluation pass (Phase 2) up front, so we
+		// fail fast instead of after running every query. Prefer the tenant's
+		// primary provider; if it has no usable key, fall back to one of the
+		// providers we just validated for this test (its key is known good).
+		evalProvider, evalKey, _, primErr := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
+		if primErr != nil {
+			if len(providerKeys) > 0 {
+				evalProvider = providerKeys[0].provider
+				evalKey = providerKeys[0].apiKey
+			} else {
+				sendSSE(w, flusher, "error", map[string]string{"message": "No API key available to evaluate results. Add an API key for your primary provider (or one of the providers you're testing) in Settings."})
+				return
+			}
+		}
+
 		// Look up brand context
 		brandInfo := lookupBrandContext(mongoDB, req.Domain, saas.TenantIDFromContext(r.Context()))
 		brandName := req.Domain
@@ -8478,22 +8493,16 @@ func handleLLMTest(mongoDB *MongoDB, encKey []byte, fallbackKey string, saasEnab
 			}
 		}
 
-		// Phase 2: Evaluate all responses using the primary LLM
+		// Phase 2: Evaluate all responses using the eval LLM resolved up front
 		sendSSE(w, flusher, "status", map[string]string{
 			"message": "Evaluating responses against brand profile...",
 		})
 
-		primaryProvider, primaryKey, _, err := resolvePrimaryLLM(r.Context(), mongoDB, encKey, fallbackKey, saasEnabled)
-		if err != nil {
-			sendSSE(w, flusher, "error", map[string]string{"message": "Could not resolve primary LLM for evaluation"})
-			return
-		}
-
 		// Build evaluation prompt
 		evalPrompt := buildTestEvaluationPrompt(brandName, req.Domain, brandInfo, req.Queries, responses)
 
-		evalModel := primaryProvider.Models()[0].ID
-		evalResp, err := primaryProvider.Call(r.Context(), primaryKey, evalModel, evalPrompt, 16384)
+		evalModel := evalProvider.Models()[0].ID
+		evalResp, err := evalProvider.Call(r.Context(), evalKey, evalModel, evalPrompt, 16384)
 		if err != nil {
 			sendSSE(w, flusher, "error", map[string]string{"message": "Evaluation failed: " + err.Error()})
 			return
